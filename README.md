@@ -8,7 +8,9 @@ post-training release target is an 8-step student.
 - [Pretraining recipe and checkpoint contracts](notes/pretrain_recipe.md)
 - [Dataset composition and caption policy](notes/dataset_plan.md)
 - [Infrastructure measurements and qualification limits](notes/infra_pretrain.md)
-- [Post-training reward evidence and requirements](notes/posttrain_preflight.md)
+- [Posttraining mathematical and execution contract](notes/posttrain_contract.md)
+- [Posttraining evaluation protocol](notes/posttrain_evaluation.md)
+- [Posttraining recipe and open selections](notes/posttrain_recipe.md)
 - [Project tools](scripts/README.md)
 
 The complete training configuration is [configs/pretrain.toml](configs/pretrain.toml).

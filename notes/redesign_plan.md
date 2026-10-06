@@ -16,12 +16,20 @@ telemetry and generations establish training behavior under the mixture.
 - [Pretraining infrastructure](infra_pretrain.md): measured execution gains and
   qualification limits.
 - [Dataset plan](dataset_plan.md): domains, caption contract and eligible pools.
-- [Post-training preflight](posttrain_preflight.md): judge/scorer evidence,
-  throughput accounting, reward-pipeline requirements and qualification.
+- [Posttraining contract](posttrain_contract.md): mathematical conventions,
+  objectives, model roles, update clocks, and recovery requirements.
+- [Posttraining evaluation](posttrain_evaluation.md): benchmark protocol,
+  prompt splits, comparison evidence, and cost accounting.
+- [Posttraining recipe](posttrain_recipe.md): provisional two-stage baseline,
+  open selections, and the eventual selected recipe with supporting evidence.
 
 Platform accounts, images, storage roots, secrets and job submission details
 live in the machine-local `INSPIRE.md`. Completed experiment records with
 useful additional evidence remain locally in the gitignored `notes/archive/`.
+Working posttraining experiments and Stage 6 sub-stage progress live in
+gitignored `notes/internal/posttrain_experiments.md` and
+`notes/internal/posttrain_progress.md`. Selected findings and their rationale
+are incorporated into the tracked notes so published decisions are self-contained.
 The maintained notes contain the evidence needed to act on the current design.
 
 ## Design decisions
@@ -61,7 +69,7 @@ one strict run config covering the entire resolution curriculum.
 | 3.5: captions and buckets | Complete | Multi-caption row sampling, length curriculum and variable-aspect planning. |
 | 4: Ascend qualification | Reference workloads and 640p restart verified | 16×910B2C plans, native transitions, recovery and monitoring; the 640p continuation passes all-rank restore and initial updates. The configured 896p pool needs its own qualification. |
 | 5: pretraining | 640p continuation | Migrated 480k input, audited source weights, explicit sampler rebuild and exact all-rank restoration in `inko`; monitor through the 570k boundary. |
-| 6: post-training | Preparation | Ascend execution/reward qualification, 640p pilot, then 896p cold start and joint DMD+RL. |
+| 6: post-training | Contract and evaluation scaffolding | Sampling/measurement, DMD, RT-DM/DynaDG/DynaRS cold start, then NFT+DMD and comparative experiments; 640p pilot before final 896p qualification. |
 | 7: publication | Pending completed training | Final inference pipeline, model release and demo. |
 
 The following measurements explain retained choices; their experimental
@@ -112,80 +120,41 @@ measured compute/exposure, and a record of observed abilities and limitations.
 
 ## Stage 6 — Ascend post-training
 
-The release target is an **8-step student**, trained through optional targeted
-SFT, a DMD2 cold start, and joint distribution matching plus RL. The method
-follows [DMD2](https://arxiv.org/abs/2405.14867) and
-[DMDR](https://arxiv.org/abs/2511.13649). Distribution matching regularizes
-reward optimization against the teacher while the reward term supplies the
-preference signal:
+The release target is an **8-step student**. The provisional
+[recipe](posttrain_recipe.md) follows two training stages:
 
-`L = L_dmd + λ_rl L_rl`.
+1. Cold start with RT-DM, DynaDG, and DynaRS.
+2. Joint DiffusionNFT and DMD, using distribution matching to regularize reward
+   optimization against the teacher distribution.
 
-### Execution and qualification
+This baseline starts the experiments. Objectives, components, optimization,
+sampling, rewards, prompt/data mixtures, and custom techniques remain open
+comparison axes. The exact losses and state transitions will be specified in the
+[contract](posttrain_contract.md); benchmark and generation evidence determine
+selection under the [evaluation protocol](posttrain_evaluation.md).
 
-Use Ascend for the teacher, student, fake-score network and training updates.
-The shared VLM judge remains a remote API; place local reward scorers according
-to measured support, memory and throughput on the Ascend allocation. CPU
-weight-loading evidence is recorded in [preflight](posttrain_preflight.md).
+Develop through sampling and measurement, minimal distribution matching,
+complete cold start, and joint training before broader comparisons. These are
+implementation increments inside Stage 6, distinct from the two training stages.
+Core logic, including reward/score clients, belongs in `src/posttrain/`;
+benchmarks belong in `src/evaluation/benchmarks/`; rollout prompts belong in
+`configs/prompts/`. The planned trainer uses complete explicit configs.
 
-Write the DMD, joint-loss, NFT and reward components per the method notes in
-`literature/`, then qualify the real workload: rollout sampling, VAE decode,
-fake-score/GAN backward passes, distributed updates, checkpoint/resume, and
-reward failure handling. Reuse the qualified
-Ascend attention, normalization and launch mechanisms where applicable.
+Qualify real rollout/decode, score acquisition, training updates, distributed
+execution, and recovery on Ascend. Measure memory, compute, synchronization,
+and reward waiting before choosing the topology and experiment budgets. Scorer
+placement and any asynchronous execution follow measured workload needs.
 
-Embed one measurement pass in this bring-up, covering device memory and time
-spent in rollout, teacher/fake-score forwards, backward, synchronization,
-optimizer and reward waiting. Then run a 640p pilot using the 570k pretrained model
-endpoint, followed by the 896p main line using the final 600k checkpoint.
-Record end-to-end wall time and NPU-hours for the selected topology before
-setting the main-run and ablation budgets. Workload measurements on the
-target hardware are required for these estimates.
+Use preserved intermediate weights for infrastructure bring-up, the 570k
+endpoint for the 640p pilot, and the completed 600k teacher for final 896p
+decisions. The pilot informs cold-start transition timing and candidate settings;
+transfer to the final resolution requires its own evidence.
 
-### Method and decisions
-
-1. **CFG study, after pretraining completion:** compare CFG 1 / 1.5 / 2 / 3 using
-   conditional/unconditional loss, empty-caption behavior, KID, reward and
-   fixed grids. Compare live and stored EMA weights. Use training/evaluation
-   sampling helpers while the public generation pipeline awaits Stage 7.
-2. **Optional targeted SFT:** the 600k final capability benchmark decides
-   the go/no-go and identifies what targeted data could fix. Composition,
-   anatomy and texture improvement belong to DMD+RL. Review the
-   synthetic teacher and samples before including them.
-3. **DMD2 cold start at native 896p:** initialize from the pretrained model; train an online
-   fake-score copy on student outputs. Add a classification head on its
-   bottleneck, using noise-injected latents, a non-saturating GAN objective and
-   real precomputed latents. Start with five fake-score updates per generator
-   update. Select the 8-step timestep grid on the final teacher before locking
-   the distillation configuration.
-4. **Joint DMD+RL:** compare ReFL and DiffusionNFT. Start the λ_rl study near 1
-   and adjust using held-out reward and KID; a reward plateau with KID
-   regression calls for reducing the RL contribution. Validate the loss-scale
-   assumption in the actual implementation. NFT permits asynchronous terminal
-   image rollouts/rewards and works with the 8-step student.
-5. **Rewards:** combine aesthetic, HPSv2 and VLM rubric signals, with explicit
-   criteria for anatomy, prompt adherence and over-smoothed artifacts. Keep
-   a separately monitored reward outside the optimized ensemble. Final
-   composition and weights are selected in the pilot.
-6. **Domain coverage:** mirror the pretrained model mix in rollout prompts. Inspect fixed
-   canary grids for Chinese painting, Western painting, people and world
-   content; track train/held-out reward divergence and diversity. Human image
-   review assesses whether the output looks over-optimized.
-
-Ablation axes are RL algorithm, λ_rl, reward composition/domain weights,
-rollout group size G=16/24 and prompts per iteration (initial candidate 48).
-This produces 768/1,152 images per iteration; judge throughput can dominate
-wall time. Use the demand accounting in [preflight](posttrain_preflight.md).
-
-Decide the cold-start → joint promotion rule with the 640p pilot. Promotion
-must leave room for joint learning before distillation converges. Build a
-small 5k-prompt pool for bring-up; finalize the roughly 20k pool through
-review at the 640p checkpoint. Memory measurements set backward-simulation
-micro-batches. Main algorithm/λ studies use the completed pretrained model.
-
-Exit: an 8-step student with improved reward and panel review, preserved
-KID/diversity, recorded reward/λ configuration, domain comparison grids and
-measured Ascend costs.
+Exit: a selected 8-step checkpoint with reproducible config and inference
+settings, held-out benchmarks and image review, domain/diversity evidence,
+measured cost, recovery qualification, and a recipe explaining the decisions
+and limitations. The internal ledger and progress log track ongoing work;
+selected evidence is preserved in the public notes.
 
 ## Stage 7 — Publication
 
