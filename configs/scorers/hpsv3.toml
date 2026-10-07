@@ -1,0 +1,53 @@
+[semantics]
+backend = "hpsv3"
+precision = "bfloat16"
+attention = "sdpa"
+preprocessing = "upstream"
+implementation = "inko-resident-v1"
+input_schema = "image-text-v1"
+structured_fields = []
+[semantics.source]
+repository = "https://github.com/MizzenAI/HPSv3"
+revision = "bd0c5fcb5f587617b0169c07222ab78d01e2f3c2"
+[semantics.weights]
+repository = "MizzenAI/HPSv3"
+revision = "4f81e3e09edd82fe3c5f636444c721b592a735ca"
+files = ["HPSv3.safetensors"]
+[[semantics.outputs]]
+name = "mu"
+direction = "higher"
+bounds = []
+meaning = "Predicted preference mean"
+[[semantics.outputs]]
+name = "log_sigma"
+direction = "lower"
+bounds = []
+meaning = "Diagnostic log standard deviation; not a reward"
+[options]
+head_precision = "float32"
+[options.backbone]
+repository = "Qwen/Qwen2-VL-7B-Instruct"
+revision = "eed13092ef92e448dd6875b2a00151bd3f7db0ac"
+files = ["*.json", "*.safetensors", "*.txt", "*.jinja", "*.model"]
+[limits]
+max_batch_size = 2
+queue_capacity = 24
+request_timeout = 600.0
+max_body_bytes = 33554432
+cpu_threads = 4
+
+[semantics.packages]
+"torch" = "2.9.0"
+"torch-npu" = "2.9.0"
+"torchvision" = "0.24.0"
+"qwen-vl-utils" = "0.0.14"
+"pillow" = "12.3.0"
+"numpy" = "2.5.3"
+"accelerate" = "1.14.0"
+"safetensors" = "0.8.0"
+"transformers" = "4.45.2"
+"tokenizers" = "0.20.3"
+
+[semantics.runtime_files]
+cann_runtime = "13299fdba3a3495cfbf310455d4953d60de9dc21a18ba5a3a8f753d825ddd1e4"
+cann_ops = "cd841c9ab92a2331b262b1d242590533a5d9a4a0f8c9b957ebfd48cfd8056cf0"

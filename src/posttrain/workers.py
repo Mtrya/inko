@@ -1,27 +1,22 @@
-"""Bounded single-host resident role workers with explicit startup and failure."""
+"""Resident generation and bounded HTTP acquisition, without backend dispatch."""
 
-import importlib.metadata
 import multiprocessing as mp
 import os
 import queue
 import sys
 import time
 import traceback
-from dataclasses import asdict
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+
+from .artifacts import package_versions
+from .scoring.client import request_for_record
+from .scoring.lifecycle import Services, isolated_environment
 
 
-def _worker(role, index, config, assets, identities, incoming, outgoing):
-    # Dependency overlays are role-local; scorer versions need not change pretraining.
-    overlays = assets.get(role, {}).get("python_paths", [])
-    sys.path[:0] = overlays
-    bins = [str(Path(p) / "bin") for p in overlays if (Path(p) / "bin").is_dir()]
-    os.environ["PATH"] = os.pathsep.join([*bins, os.environ.get("PATH", "")])
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    # These are standalone inference processes. An enclosing launcher must not
-    # make a scorer's HF TrainingArguments initialize a training collective.
+def _worker(index, config, assets, incoming, outgoing):
+    paths = assets["learner"]["python_paths"]
+    sys.path[:0] = paths
+    os.environ.update(isolated_environment(paths))
     for key in (
         "RANK",
         "WORLD_SIZE",
@@ -33,72 +28,43 @@ def _worker(role, index, config, assets, identities, incoming, outgoing):
         os.environ.pop(key, None)
     try:
         from .models import Generator, peak_memory, set_device, synchronize
-        from .records import ScoreRequest
-        from .scoring import HPSv3, VQAScore, acquire
 
-        start = time.perf_counter()
-        device = set_device(
-            assets["device_type"], index, config["execution"]["cpu_threads"]
-        )
-        os.environ["ACCELERATE_TORCH_DEVICE"] = str(device)
-        if role == "learner":
-            backend = Generator(config, assets, device)
-        else:
-            backend = {"hpsv3": HPSv3, "vqascore": VQAScore}[role](
-                config["scorers"][role], assets[role], device
-            )
+        started = time.perf_counter()
+        device = set_device(assets["device_type"], index, config.execution.cpu_threads)
+        backend = Generator(config, assets, device)
         synchronize(device)
         outgoing.put(
             {
                 "event": "ready",
-                "role": role,
+                "role": "learner",
                 "device": index,
-                "load_seconds": time.perf_counter() - start,
-                "packages": {
-                    name: importlib.metadata.version(name)
-                    for name in ("torch", "transformers", "diffusers")
-                },
+                "load_seconds": time.perf_counter() - started,
+                "packages": package_versions(),
             }
         )
         while True:
             task = incoming.get()
             if task is None:
                 return
-            start = time.perf_counter()
-            if role == "learner":
-                result = backend.generate(task)
-            else:
-                requests = [ScoreRequest(**r) for r in task["requests"]]
-                result = {
-                    "scores": [
-                        asdict(r)
-                        for r in acquire(
-                            backend,
-                            requests,
-                            scorer=role,
-                            scorer_identity=identities[role],
-                            attempts=config["execution"]["score_attempts"],
-                        )
-                    ]
-                }
-            synchronize(device)
+            started = time.perf_counter()
+            result = backend.generate(task)
             outgoing.put(
                 {
                     "event": "result",
-                    "role": role,
+                    "role": "learner",
                     "device": index,
                     "task_id": task["task_id"],
                     "result": result,
-                    "service_seconds": time.perf_counter() - start,
-                    "queue_seconds": start - task["enqueued_at"],
+                    "service_seconds": time.perf_counter() - started,
+                    "queue_seconds": started - task["enqueued_at"],
                     "peak_memory_bytes": peak_memory(device),
                 }
             )
-    except BaseException:  # noqa: BLE001 - propagate worker traceback to coordinator
+    except BaseException:  # noqa: BLE001 - propagate worker failures
         outgoing.put(
             {
                 "event": "fatal",
-                "role": role,
+                "role": "learner",
                 "device": index,
                 "error": traceback.format_exc(),
             }
@@ -106,44 +72,47 @@ def _worker(role, index, config, assets, identities, incoming, outgoing):
 
 
 class ResidentWorkers:
-    """Processes own models until close; the coordinator owns all result matching."""
-
-    def __init__(self, config, assets, identities, roles=None):
-        self.config = config
+    def __init__(self, config, assets, output, *, generate=True, score=True):
+        self.config, self.assets, self.output = config, assets, output
         context = mp.get_context("spawn")
-        capacity = config["execution"]["max_inflight_batches"]
-        self.incoming = {
-            role: context.Queue(maxsize=capacity)
-            for role in (roles or ("learner", "hpsv3", "vqascore"))
-        }
-        self.outgoing = context.Queue(maxsize=capacity * 3 + 32)
-        self.processes = []
-        for role, incoming in self.incoming.items():
-            for index in config["execution"][role + "_devices"]:
-                process = context.Process(
+        capacity = config.execution.max_inflight_batches
+        self.incoming = context.Queue(maxsize=capacity)
+        self.outgoing = context.Queue(maxsize=capacity * (len(config.scorers) + 1) + 32)
+        self.processes = (
+            [
+                context.Process(
                     target=_worker,
-                    args=(
-                        role,
-                        index,
-                        config,
-                        assets,
-                        identities,
-                        incoming,
-                        self.outgoing,
-                    ),
+                    args=(i, config, assets, self.incoming, self.outgoing),
                 )
-                self.processes.append(process)
+                for i in config.execution.learner_devices
+            ]
+            if generate
+            else []
+        )
+        self.services = Services(
+            config.scorers if score else (),
+            assets.get("services", {}),
+            output,
+            config.execution.learner_devices,
+            config.execution.startup_timeout,
+        )
+        self.executor = None
         self.startup = []
 
     def __enter__(self):
         try:
-            for process in self.processes:
-                process.start()
-            deadline = time.monotonic() + self.config["execution"]["startup_timeout"]
-            while len(self.startup) < len(self.processes):
+            self.services.__enter__()
+            self.startup.extend(self.services.startup)
+            self.executor = ThreadPoolExecutor(
+                max_workers=max(1, sum(s.concurrency for s in self.config.scorers))
+            )
+            for p in self.processes:
+                p.start()
+            deadline = time.monotonic() + self.config.execution.startup_timeout
+            for _ in self.processes:
                 message = self.receive(deadline)
                 if message["event"] != "ready":
-                    raise RuntimeError("unexpected worker startup message")
+                    raise RuntimeError("unexpected generation startup message")
                 self.startup.append(message)
             return self
         except BaseException:
@@ -151,54 +120,76 @@ class ResidentWorkers:
             raise
 
     def submit(self, role, task):
-        self.incoming[role].put({**task, "enqueued_at": time.perf_counter()}, timeout=5)
+        if role == "learner":
+            self.incoming.put({**task, "enqueued_at": time.perf_counter()}, timeout=5)
+            return
+        self.executor.submit(self._score, role, task, time.perf_counter())
+
+    def _score(self, role, task, enqueued):
+        try:
+            client = self.services.clients[role]
+            started = time.perf_counter()
+            requests = [request_for_record(r, client.spec) for r in task["records"]]
+            scores = client.acquire(requests)
+            self.outgoing.put(
+                {
+                    "event": "result",
+                    "role": role,
+                    "task_id": task["task_id"],
+                    "result": {"scores": scores},
+                    "service_seconds": time.perf_counter() - started,
+                    "queue_seconds": started - enqueued,
+                }
+            )
+        except BaseException:  # noqa: BLE001 - propagate acquisition failures
+            self.outgoing.put(
+                {"event": "fatal", "role": role, "error": traceback.format_exc()}
+            )
 
     def receive(self, deadline):
         while time.monotonic() < deadline:
+            self.services.check()
             try:
                 message = self.outgoing.get(
                     timeout=min(1, max(0.01, deadline - time.monotonic()))
                 )
             except queue.Empty:
-                dead = [
-                    p
-                    for p in self.processes
-                    if p.pid is not None and p.exitcode is not None
-                ]
-                if dead:
-                    raise RuntimeError(
-                        f"resident worker exited: {[p.exitcode for p in dead]}"
-                    )
+                if any(
+                    p.pid is not None and p.exitcode is not None for p in self.processes
+                ):
+                    raise RuntimeError("resident generation worker exited")
                 continue
             if message["event"] == "fatal":
-                raise RuntimeError(
-                    f"{message['role']} device {message['device']}: {message['error']}"
-                )
+                raise RuntimeError(f"{message['role']}: {message['error']}")
             return message
-        raise TimeoutError("resident worker deadline exceeded")
+        raise TimeoutError("pipeline task deadline exceeded")
 
-    def close(self):
-        for role, incoming in self.incoming.items():
-            for _ in self.config["execution"][role + "_devices"]:
-                try:
-                    incoming.put_nowait(None)
-                except queue.Full:
-                    break
-        for process in self.processes:
-            if process.pid is not None:
-                process.join(timeout=1)
-                if process.is_alive():
-                    process.terminate()
-                    process.join(timeout=5)
-                if process.is_alive():
-                    process.kill()
-                    process.join()
-        for q in [*self.incoming.values(), self.outgoing]:
+    def close(self, *, graceful=False):
+        self.services.close()
+        if self.executor:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+        alive = [p for p in self.processes if p.pid is not None and p.is_alive()]
+        if graceful:
+            # Completed workers return normally so accelerator compiler children
+            # and multiprocessing resources run their own shutdown hooks.
+            for _ in alive:
+                self.incoming.put(None, timeout=1)
+            deadline = time.monotonic() + 30
+            for p in alive:
+                p.join(timeout=max(0, deadline - time.monotonic()))
+        for p in self.processes:
+            if p.pid is not None and p.is_alive():
+                p.terminate()
+                p.join(timeout=5)
+                if p.is_alive():
+                    p.kill()
+                    p.join()
+        for q in (self.incoming, self.outgoing):
             q.cancel_join_thread()
             q.close()
 
     def __exit__(self, *exc):
-        self.close()
+        self.close(graceful=exc[0] is None)
 
 
 def run_pipeline(tasks, workers, config, on_generated, on_scored):
@@ -211,25 +202,18 @@ def run_pipeline(tasks, workers, config, on_generated, on_scored):
     iterator = iter(tasks)
     inflight, exhausted = {}, False
     telemetry = []
-    limit = config["execution"]["max_inflight_batches"]
-    timeout = config["execution"]["task_timeout"]
+    limit = config.execution.max_inflight_batches
+    timeout = config.execution.task_timeout
 
     def score(task, records):
-        requests = [
-            {
-                "sample_id": r["sample_id"],
-                "image_path": r["image_path"],
-                "image_sha256": r["image_sha256"],
-                "prompt": r["prompt"]["text"],
-            }
-            for r in records
-        ]
         task["phase"] = "score"
         task["expected_samples"] = {r["sample_id"] for r in records}
-        task["waiting"] = set(task.get("missing_scorers", ["hpsv3", "vqascore"]))
+        task["waiting"] = set(
+            task.get("missing_scorers", [s.id for s in config.scorers])
+        )
         task["deadline"] = time.monotonic() + timeout
         for role in task["waiting"]:
-            workers.submit(role, {"task_id": task["task_id"], "requests": requests})
+            workers.submit(role, {"task_id": task["task_id"], "records": records})
 
     while inflight or not exhausted:
         while not exhausted and len(inflight) < limit:

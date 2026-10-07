@@ -289,23 +289,34 @@ ordering still belong to the objective derivation before training implementation
 
 ## Sampling/scoring implementation contract
 
-The [config](../configs/posttrain.toml) declares initial weight identity, text
-exit layer, precision, explicit image shapes, sampler arms, role device lists,
-queue capacity, retry/deadline limits, suite paths, uncertainty settings, and
-scorer source/weight revisions. Unknown fields and incompatible settings fail
-validation. Numerical settings are experiment inputs, not test expectations.
+The [caller config](../configs/posttrain.toml) uses strict frozen records for
+sampling, explicit per-arm checkpoint/architecture digests and live/EMA choice,
+execution limits, suite paths, declared score channels and acquisition limits.
+[Service configs](../configs/scorers/) separately own source/model pins,
+preprocessing, numeric runtime, output meanings and model batching. Asset paths
+and endpoint/device placement live in separate local JSON. Unknown fields fail
+validation; no config inheritance or environment hyperparameters are supported.
 
-The first harness uses a coordinator and persistent single-host processes with
-disjoint device ownership. The coordinator has no accelerator model. Generation
-workers share a bounded task queue; each scorer group has its own queue. A batch
-occupies an in-flight slot until both scorers respond. Images are immutable PNGs
-on shared storage, referenced by path and content hash. Filesystem/queue costs
-need measurement before choosing a faster transport.
+The CPU coordinator has no scorer model or backend imports. Independently
+runnable services expose `/v1/health`, `/v1/capabilities` and `/v1/score` through
+HTTP JSON protocol version 1. The same client handles owned loopback replicas
+and externally managed endpoints. Scorers never join learner collectives.
+Generation and acquisition overlap within a bounded number of unfinished
+batches, held until all configured services respond. `learner` is reserved as
+the generation role ID; scorer IDs and output channels otherwise come from config.
+
+The handshake checks semantic fingerprint, input schema, output direction/range,
+transport, batch size and stable replay. Requests accept verified shared-file
+PNGs or encoded PNG bytes, exact prompts, structured inputs and an explicit seed
+policy for stochastic services. A semantic cache key excludes sample IDs and
+transport locations; wire IDs hash `(sample_id, cache_key)`. Cached results are
+re-enveloped for the current sample. Diagnostic JSON never becomes a reward.
 
 Sampling performs FP32 state/time arithmetic with BF16 model calls. Shapes are
 configured as image height/width and converted by the VAE's /8 factor. Each
 shape's shift is `max(1, sqrt((latent_height * latent_width / 4) / 256))`, applied
-once to the base grid. Initial noise uses the prompt seed; transition noise
+once when the arm selects shape shift; unshifted grids are explicit. CFG uses
+true empty-prompt conditioning through the same encoder contract. Initial noise uses the prompt seed; transition noise
 uses separate SHA256-derived seeds. The student harness retains one uniformly
 assigned step for interface qualification; the cold-start training step
 distribution will be derived with its objective.
@@ -313,10 +324,12 @@ distribution will be derived with its objective.
 The generation record includes prompt/sample/policy identity, grid, shape,
 noise specification, terminal and selected-step tensors, and image/latent
 hashes. Frozen text conditioning can be rebuilt from the recorded prompt,
-encoder/tokenizer artifact identity, and text contract. The score request binds
-sample ID, image hash, and exact prompt. Its request ID also includes scorer
-source, weight, preprocessing/config, and dependency identity. Results carry
-separate raw values, success/failure, attempt count, and error details.
+encoder/tokenizer artifact identity, and text contract. Score semantics include pinned source/model, preprocessing, adapter, numeric
+runtime and structured-input identities. Results contain validated named raw
+channels, typed failures and diagnostic metadata. Request deadlines cover DNS,
+TLS and response bodies through a bounded, model-free transport process.
+Stalled inference retires the owned service instead of leaving a permanently
+blocked model worker advertised as healthy.
 
 Initially each scoring request has two attempts on identical image bytes.
 Exhaustion produces explicit failure records. Startup failures, dead workers,
@@ -325,7 +338,9 @@ can report score failures; the training join rejects incomplete rounds.
 
 Each run writes an immutable input/code/artifact manifest and atomic sample and
 score records under a single-writer lock. Restart verifies those identities and
-content hashes, reuses completed records, and resubmits work with no result.
+content hashes, reuses completed records, and resubmits unresolved work within its persisted retry allowance.
+Each attempt is charged durably before transport; successful rows survive a
+partial batch failure, and retries preserve request/seed identity.
 Exhausted score failures remain recorded; a restart does not silently grant a
 new retry budget. Temporary/unrecorded generation is recollected. Training
 recovery will initially restart incomplete collection from the preceding

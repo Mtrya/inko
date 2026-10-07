@@ -1,6 +1,7 @@
 """Resident Inko rollout worker; model assets are always supplied explicitly."""
 
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -40,17 +41,13 @@ class Generator:
         from diffusers import AutoencoderKLQwenImage
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        from src.models.inko import Inko
         from src.utils.vae_codec import get_vae_stats
 
         self.device, self.config = device, config
-        self.dtype = getattr(torch, config["sampling"]["precision"])
-        self.model = (
-            Inko.from_single_file(assets["checkpoint"])
-            .to(device, self.dtype)
-            .eval()
-            .requires_grad_(False)
-        )
+        self.dtype = getattr(torch, config.sampling.precision)
+        self.assets = assets
+        self.model = None
+        self.checkpoint = None
         self.text = (
             AutoModelForCausalLM.from_pretrained(
                 assets["text_encoder"],
@@ -74,6 +71,29 @@ class Generator:
             .requires_grad_(False)
         )
         self.mean, self.std = get_vae_stats(assets["vae"], device)
+        self.select_checkpoint(config.arms[0].checkpoint)
+
+    def select_checkpoint(self, checkpoint):
+        from src.models.inko import Inko
+
+        if self.checkpoint == checkpoint:
+            return
+        path = self.assets["checkpoints"][checkpoint.asset]
+        if (
+            file_hash(path) != checkpoint.sha256
+            or file_hash(Path(path).with_name("transformer_config.json"))
+            != checkpoint.architecture_sha256
+        ):
+            raise ValueError("arm checkpoint/architecture bytes changed")
+        # Replace once at an arm boundary; scorers remain resident independently.
+        self.model = None
+        self.model = (
+            Inko.from_single_file(path)
+            .to(self.device, self.dtype)
+            .eval()
+            .requires_grad_(False)
+        )
+        self.checkpoint = checkpoint
 
     def predict_velocity(self, x, t, conditioning):
         txt, pooled, mask = conditioning
@@ -92,33 +112,52 @@ class Generator:
         synchronize(self.device)
         start = time.perf_counter()
         prompts, arm = task["prompts"], task["arm"]
+        self.select_checkpoint(arm.checkpoint)
         txt, mask, pooled = encode_text(
             [p["text"] for p in prompts],
             self.text,
             self.tokenizer,
             pooling=True,
-            exit_layer=self.config["initialization"]["text_exit_layer"],
+            exit_layer=self.config.sampling.text_exit_layer,
         )
+        unconditional = None
+        if arm.guidance != 1:
+            u_txt, u_mask, u_pooled = encode_text(
+                [""] * len(prompts),
+                self.text,
+                self.tokenizer,
+                pooling=True,
+                exit_layer=self.config.sampling.text_exit_layer,
+            )
+            unconditional = (u_txt, u_pooled, u_mask)
         synchronize(self.device)
         text_end = time.perf_counter()
-        height, width = self.config["sampling"]["shapes"][prompts[0]["aspect"]]
+        height, width = self.config.sampling.shapes[prompts[0]["aspect"]]
         shape = (16, height // 8, width // 8)
-        shift = max(1.0, ((shape[1] * shape[2] / 4) / 256) ** 0.5)
-        grid = time_grid(arm["steps"], shift)
+        shift = (
+            max(1.0, ((shape[1] * shape[2] / 4) / 256) ** 0.5)
+            if arm.shift == "shape"
+            else 1.0
+        )
+        grid = time_grid(arm.steps, shift)
         indices = None
-        if arm["rule"] == "renoise" and self.config["sampling"]["retain_selected"]:
+        if self.config.sampling.retain_selected:
             indices = [
-                noise_seed(p["seed"], "training_index") % arm["steps"] for p in prompts
+                noise_seed(p["seed"], "selected_index") % arm.steps for p in prompts
             ]
 
         def velocity(x, t):
-            return self.predict_velocity(x, t, (txt, pooled, mask))
+            conditional = self.predict_velocity(x, t, (txt, pooled, mask))
+            if unconditional is None:
+                return conditional
+            empty = self.predict_velocity(x, t, unconditional)
+            return empty.float() + arm.guidance * (conditional.float() - empty.float())
 
         rollout = sample(
             velocity,
             [p["seed"] for p in prompts],
             shape,
-            rule=arm["rule"],
+            rule=arm.rule,
             grid=grid,
             device=self.device,
             selected_indices=indices,
@@ -132,7 +171,7 @@ class Generator:
         for i, (prompt, image, sample_id) in enumerate(
             zip(prompts, images, task["sample_ids"], strict=True)
         ):
-            directory = Path(task["output"]) / arm["name"]
+            directory = Path(task["output"]) / arm.name
             directory.mkdir(parents=True, exist_ok=True)
             image_path = directory / f"{prompt['id']}.png"
             temporary = image_path.with_suffix(".png.tmp")
@@ -153,7 +192,8 @@ class Generator:
                 {
                     "sample_id": sample_id,
                     "prompt": prompt,
-                    "arm": arm["name"],
+                    "arm": arm.name,
+                    "checkpoint": asdict(arm.checkpoint),
                     "image_path": str(image_path),
                     "image_sha256": file_hash(image_path),
                     "latent_path": str(latent_path),
@@ -162,7 +202,19 @@ class Generator:
                     "shape": list(shape),
                     "seed": prompt["seed"],
                     "selected_index": None if indices is None else indices[i],
-                    "noise_specification": "CPU torch.randn float32; initial seed; SHA256 transition stream",
+                    "noise_specification": {
+                        "version": "benchmark-cpu-fp32-v1",
+                        "initial": prompt["seed"],
+                        "selected_index": noise_seed(prompt["seed"], "selected_index"),
+                        "transitions": [
+                            noise_seed(prompt["seed"], "transition", k)
+                            for k in range(1, arm.steps)
+                        ]
+                        if arm.rule == "renoise"
+                        else [],
+                        "draw_id": prompt["id"],
+                    },
+                    "conditioning_identity": task["conditioning_identity"],
                     "policy_version": task["policy_version"],
                 }
             )

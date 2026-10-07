@@ -28,7 +28,7 @@ def paired_interval(rows, repeats, confidence, seed):
 
 def build_report(records, scores, config):
     samples = {r["sample_id"]: r for r in records}
-    arms = [a["name"] for a in config["arms"]]
+    arms = [a.name for a in config.arms]
     indexed = {}
     for score in scores:
         key = (score["sample_id"], score["scorer"])
@@ -41,8 +41,8 @@ def build_report(records, scores, config):
         "paired": {},
         "uncertainty": "Paired cluster bootstrap by scene; conditional on these fixed noise seeds.",
     }
-    for scorer, spec in config["scorers"].items():
-        metric = spec["primary_output"]
+    for channel in config.evaluation.channels:
+        scorer, metric = channel.split(".")
         by_arm = {}
         for arm in arms:
             selected = [r for r in records if r["arm"] == arm]
@@ -57,7 +57,7 @@ def build_report(records, scores, config):
                         result["values"][metric],
                     )
             by_arm[arm] = good
-            report["arms"].setdefault(arm, {})[scorer] = {
+            report["arms"].setdefault(arm, {})[channel] = {
                 "metric": metric,
                 "expected": len(selected),
                 "scored": len(good),
@@ -75,18 +75,18 @@ def build_report(records, scores, config):
                 for p in common
             ]
             expected = sum(r["arm"] == reference for r in records)
-            settings = config["evaluation"]
-            report["paired"].setdefault(arm, {})[scorer] = {
+            settings = config.evaluation
+            report["paired"].setdefault(arm, {})[channel] = {
                 "reference": reference,
                 "paired": len(rows),
                 "expected": expected,
                 "mean_delta": statistics.mean(v for _, v in rows) if rows else None,
-                "confidence": settings["confidence"],
+                "confidence": settings.confidence,
                 "interval": paired_interval(
                     rows,
-                    settings["bootstrap_repeats"],
-                    settings["confidence"],
-                    settings["bootstrap_seed"],
+                    settings.bootstrap_repeats,
+                    settings.confidence,
+                    settings.bootstrap_seed,
                 ),
                 "coverage_complete": len(rows) == expected,
                 "selection_status": "descriptive_only; inspect blinded images"

@@ -1,9 +1,9 @@
 # Posttraining evaluation protocol
 
-Status: initial design closed; sampling/scoring implementation is in progress.
-The 480k EMA, 640p shapes, prompt manifests, and HPSv3/VQAScore v3.1 source/weight
-identities are pinned. Target-runtime preparation and real-image qualification
-remain pending; no quality results are established. Full-run preparation is a later
+Status: Stage 6.1.2 real 640p sampling/scoring qualification and independent
+review are complete. The 480k
+EMA, shapes, prompts, and HPSv3/VQAScore v3.1 identities are pinned. These are
+untrained starting controls, not posttraining quality improvements. Full-run preparation is a later
 work layer. See the [contract](posttrain_contract.md) and
 [recipe](posttrain_recipe.md).
 
@@ -27,14 +27,14 @@ or an observable difference between variants. This does not require preparing
 the full-run data distribution, a reward ensemble, or a new reference-image
 corpus. The initial inputs are:
 
-| Input | Choice | Preparation remaining |
+| Input | Choice | Evidence and remaining scope |
 |---|---|---|
-| Initialization | Preserved 480k EMA, at 640p; digest in config | Real-image baseline qualification |
+| Initialization | Preserved 480k EMA, at 640p; digest in config | Bringup completed; retain observed prompt-following limitations |
 | Rollout prompts | Fixed 512-prompt subset of DiffusionNFT's `pickscore/train.txt`; 32 of these for bring-up | Manifests prepared; semantic overlap review can refine later comparisons |
-| Scored development benchmark | 200 unique DrawBench prompts, one fixed seed each; fixed 16-prompt subset for bring-up | Manifests and seeds prepared; obtain real samples/scores |
-| Visual monitoring | All 48 entries of [monitor.jsonl](../configs/prompts/monitor.jsonl), with existing seeds and aspects | Explicit shapes in config; generate and review panels |
-| Reward/score clients | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; no custom VLM-rubric scorer | Pins and adapters implemented; dependencies/weights and Ascend qualification pending |
-| Initial report | Separate raw results, paired differences, scene-clustered bootstrap, failures, and cost telemetry | Report mechanism implemented; blinded review requires generated images |
+| Scored development benchmark | 200 unique DrawBench prompts, one fixed seed each; fixed 16-prompt subset for bring-up | 600 real images and 1,200 required scores complete; one seed per prompt |
+| Visual monitoring | All 48 entries of [monitor.jsonl](../configs/prompts/monitor.jsonl), with existing seeds and aspects | All 144 images inspected; three actual shapes exercised |
+| Reward/score clients | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; no custom VLM-rubric scorer | Pins/assets verified; real Ascend bringup and service restart completed |
+| Initial report | Separate raw results, paired differences, scene-clustered bootstrap, failures, and cost telemetry | Raw/paired reports complete; blinded-position review of all bringup/monitor and 24 development prompts |
 | Diversity check | Multiple fixed seeds on a small declared subset when comparing trained variants | Select the subset and draw count before the comparison |
 
 The inspected [DiffusionNFT prompt source](https://github.com/NVlabs/DiffusionNFT/tree/cbb14f84b8312b620390dfcbe2fab69c1383b104/dataset)
@@ -70,7 +70,8 @@ Qwen3-VL-8B-Instruct backbone, explicitly selecting `qwen3-vl-8b`. The
 [upstream announcement and model list](https://github.com/linzhiqiu/t2v_metrics)
 describe this implementation. Pin the exact source revision and weight revision
 when preparing the runtime rather than relying on a moving branch or an implicit
-model default. Immutable revisions are recorded in `configs/posttrain.toml`.
+model default. Immutable source/model/runtime revisions are recorded in `configs/scorers/`;
+the caller pins their semantic fingerprints in `configs/posttrain.toml`.
 The v3.1 source commit is `74c720890c6ee3916e2f4facf9c671c8fe47ddf4`;
 its commit timestamp is June 5 UTC, while its announcement says June 4.
 
@@ -175,9 +176,11 @@ The first deliverable is a reproducible comparison of the selected pretrained
 teacher and its initial 8-step student, with real images, scores, and cost records.
 It establishes a baseline, not evidence that distillation has succeeded.
 The development suite, scorer identities, sampling rules, and reporting format
-are selected; failed-score accounting has local mechanism coverage. Before
-ranking trained variants, qualify these paths with actual images and scorer
-inference on the target runtime.
+have been exercised on the target runtime. See the [qualification results and
+limits](posttrain_recipe.md#samplingscoring-qualification): 792 images, 1,296
+required score results, full coverage, real service restart and artifact reuse.
+Severe untrained renoise degradation remains visible; successful execution
+does not establish that the initial few-step sampler is useful.
 
 Algorithm comparisons require sample review and benchmark evidence appropriate
 to their scope. Choose numerical acceptance margins and the cold-start-to-joint

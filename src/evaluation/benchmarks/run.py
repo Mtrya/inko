@@ -1,24 +1,23 @@
-"""Run the initial three-arm benchmark with resident generation/scorer workers."""
+"""Evaluate explicit checkpoint arms through independent scorer services."""
 
 import argparse
 import fcntl
-import importlib.metadata
 import json
 import subprocess
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
 
+from src.posttrain.artifacts import tree_identity
 from src.posttrain.config import load_config
-from src.posttrain.records import (
-    ScoreRequest,
-    ScoreResult,
-    atomic_json,
-    file_hash,
-    identity,
-    join_scores,
-)
+from src.posttrain.records import atomic_json, file_hash, identity
+from src.posttrain.schema import decode, require
+from src.posttrain.scoring.client import request_for_record
+from src.posttrain.scoring.contracts import ScoreResult, validate_results
+from src.posttrain.scoring.lifecycle import isolated_environment
 from src.posttrain.workers import ResidentWorkers, run_pipeline
+from src.utils import prompt_contract
 
 from .prompts import load_prompts
 from .report import build_report
@@ -26,78 +25,50 @@ from .report import build_report
 REPO = Path(__file__).resolve().parents[3]
 
 
-def tree_identity(path):
-    path = Path(path)
-    if path.is_file():
-        return {path.name: file_hash(path)}
-    files = sorted(
-        p
-        for p in path.rglob("*")
-        if p.is_file()
-        and not any(
-            x.startswith(".") or x == "__pycache__" for x in p.relative_to(path).parts
+def verify_assets(config, assets):
+    native_files = assets["learner"].get("runtime_files", {})
+    require(
+        assets["device_type"] != "npu" or bool(native_files),
+        "NPU generation requires an explicit native runtime inventory",
+    )
+    checkpoints = {}
+    for arm in config.arms:
+        checkpoint = arm.checkpoint
+        path = Path(assets["checkpoints"][checkpoint.asset])
+        require(file_hash(path) == checkpoint.sha256, "arm checkpoint bytes differ")
+        require(
+            file_hash(path.with_name("transformer_config.json"))
+            == checkpoint.architecture_sha256,
+            "arm architecture bytes differ",
         )
-        and p.suffix != ".pyc"
+        require(path.suffix in {".pt", ".safetensors"}, "unsupported checkpoint format")
+        checkpoints[arm.name] = asdict(checkpoint)
+    probe = subprocess.run(
+        [sys.executable, "-m", "src.posttrain.runtime"],
+        env=isolated_environment(assets["learner"]["python_paths"]),
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    if not files:
-        raise ValueError(f"empty or missing artifact {path}")
-    return {str(p.relative_to(path)): file_hash(p) for p in files}
-
-
-def verify_assets(config, assets, visual_only=False):
-    checkpoint = Path(assets["checkpoint"])
-    if file_hash(checkpoint) != config["initialization"]["sha256"]:
-        raise ValueError("checkpoint bytes differ from the selected initialization")
-    expected_name = (
-        "ema_weights.pt"
-        if config["initialization"]["weights"] == "ema"
-        else "model.safetensors"
-    )
-    if checkpoint.name != expected_name:
-        raise ValueError("checkpoint filename disagrees with live/EMA selection")
-    identities = {
-        "checkpoint": file_hash(checkpoint),
-        "architecture": tree_identity(checkpoint.with_name("transformer_config.json")),
+    return {
+        "checkpoints": checkpoints,
+        "generation_runtime": json.loads(probe.stdout),
+        "generation_native_runtime": {
+            name: file_hash(path) for name, path in sorted(native_files.items())
+        },
         "text_encoder": tree_identity(assets["text_encoder"]),
         "vae": tree_identity(assets["vae"]),
-        "runtime": {
-            role: [
-                tree_identity(p) for p in assets.get(role, {}).get("python_paths", [])
-            ]
-            for role in (
-                ["learner"] if visual_only else ["learner", "hpsv3", "vqascore"]
-            )
-        },
-        "base_packages": {
-            d.metadata["Name"]: d.version
-            for d in importlib.metadata.distributions()
-            if d.metadata["Name"]
-        },
     }
-    if not visual_only:
-        for role in ("hpsv3", "vqascore"):
-            source = assets[role]["source"]
-            revision = subprocess.check_output(
-                ["git", "-C", source, "rev-parse", "HEAD"], text=True
-            ).strip()
-            if revision != config["scorers"][role]["source_revision"]:
-                raise ValueError(f"{role}: source revision mismatch")
-            if subprocess.check_output(
-                ["git", "-C", source, "status", "--porcelain", "--untracked-files=no"],
-                text=True,
-            ).strip():
-                raise ValueError(f"{role}: source checkout has modifications")
-            identities[role] = {
-                "source_revision": revision,
-                "weights": tree_identity(assets[role]["weights"]),
-            }
-            if role == "hpsv3":
-                identities[role]["backbone"] = tree_identity(assets[role]["backbone"])
-    return identities
+
+
+def parse_score(row):
+    return decode(
+        ScoreResult, {k: v for k, v in row.items() if k not in {"scorer", "attempts"}}
+    )
 
 
 def run(config, assets, prompts, output, *, visual_only=False):
-    output = output.resolve()
+    output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     with (output / ".writer.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -107,93 +78,97 @@ def run(config, assets, prompts, output, *, visual_only=False):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _run(config, assets, prompts, output, *, visual_only=False):
-    output = output.resolve()
-    # Hash once in the coordinator, outside measured service time.
-    artifacts = verify_assets(config, assets, visual_only)
-    policy = identity(
-        {k: artifacts[k] for k in ("checkpoint", "architecture", "text_encoder", "vae")}
-    )
-    scorer_ids = (
-        {}
-        if visual_only
-        else {
-            role: identity(
-                {
-                    "spec": config["scorers"][role],
-                    "artifacts": artifacts[role],
-                    "runtime": artifacts["runtime"][role],
-                    "base_packages": artifacts["base_packages"],
-                    "adapter_sha256": file_hash(REPO / "src/posttrain/scoring.py"),
-                }
-            )
-            for role in config["scorers"]
+def _run(config, assets, prompts, output, *, visual_only):
+    artifacts = verify_assets(config, assets)
+    conditioning = identity(
+        {
+            "encoder": artifacts["text_encoder"],
+            "exit_layer": config.sampling.text_exit_layer,
+            "template": prompt_contract.PROMPT_TEMPLATE,
+            "system": prompt_contract.SYSTEM_PROMPT,
+            "drop_idx": prompt_contract.DROP_IDX,
+            "max_sequence_length": prompt_contract.MAX_SEQUENCE_LENGTH,
         }
     )
+    policies = {
+        a.name: identity(
+            {
+                "checkpoint": {
+                    k: v for k, v in asdict(a.checkpoint).items() if k != "asset"
+                },
+                "conditioning": conditioning,
+                "vae": artifacts["vae"],
+                "precision": config.sampling.precision,
+            }
+        )
+        for a in config.arms
+    }
+    specs = {} if visual_only else {s.id: s for s in config.scorers}
+    recipe = asdict(config)
+    recipe.pop("execution")
     manifest = {
-        "config": config,
+        "config": recipe,
         "prompts": prompts,
         "artifacts": artifacts,
-        "policy_version": policy,
-        "scorer_identities": scorer_ids,
+        "policies": policies,
+        "conditioning_identity": conditioning,
         "visual_only": visual_only,
         "code": {
             str(p.relative_to(REPO)): file_hash(p)
             for p in sorted((REPO / "src").rglob("*.py"))
         },
-        "packages": {
-            d.metadata["Name"]: d.version
-            for d in importlib.metadata.distributions()
-            if d.metadata["Name"]
-        },
     }
-    manifest_path = output / "manifest.json"
-    if manifest_path.exists() and json.loads(manifest_path.read_text()) != manifest:
-        raise ValueError("run identity changed; use a new output directory")
-    atomic_json(manifest_path, manifest)
-    records, results = {}, {}
-    tasks = []
-    batch_size = config["sampling"]["batch_size"]
-
-    for arm in config["arms"]:
+    # Normalize tuples to their JSON wire representation before restart comparison.
+    manifest = json.loads(json.dumps(manifest, allow_nan=False))
+    path = output / "manifest.json"
+    require(
+        not path.exists() or json.loads(path.read_text()) == manifest,
+        "run identity changed; use a new output directory",
+    )
+    atomic_json(path, manifest)
+    records, results, tasks = {}, {}, []
+    for arm in config.arms:
         pending = {}
         for prompt in prompts:
             sample_id = identity(
                 {
-                    "policy": policy,
+                    "policy": policies[arm.name],
                     "prompt": prompt,
-                    "arm": arm,
-                    "sampling": config["sampling"],
+                    "arm": asdict(arm),
+                    "sampling": asdict(config.sampling),
                 }
             )
             path = output / "records" / f"{sample_id}.json"
             if path.exists():
                 record = json.loads(path.read_text())
-                if (
-                    record["sample_id"] != sample_id
-                    or record["prompt"] != prompt
-                    or record["arm"] != arm["name"]
-                ):
-                    raise ValueError("saved sample identity differs")
+                require(
+                    record["sample_id"] == sample_id
+                    and record["prompt"] == prompt
+                    and record["arm"] == arm.name,
+                    "saved sample identity differs",
+                )
                 for kind in ("image", "latent"):
-                    if file_hash(record[kind + "_path"]) != record[kind + "_sha256"]:
-                        raise ValueError(f"saved {kind} bytes changed")
+                    require(
+                        file_hash(record[kind + "_path"]) == record[kind + "_sha256"],
+                        f"saved {kind} bytes changed",
+                    )
                 records[sample_id] = record
                 missing = []
-                for role in scorer_ids:
+                for role, spec in specs.items():
                     score_path = output / "scores" / role / f"{sample_id}.json"
                     if score_path.exists():
-                        score = ScoreResult(**json.loads(score_path.read_text()))
-                        request = ScoreRequest(
-                            sample_id,
-                            record["image_path"],
-                            record["image_sha256"],
-                            prompt["text"],
+                        row = json.loads(score_path.read_text())
+                        require(row["scorer"] == role, "saved service ID differs")
+                        score = parse_score(row)
+                        validate_results(
+                            [request_for_record(record, spec)],
+                            [score],
+                            spec.outputs,
+                            complete=False,
                         )
-                        join_scores(
-                            [request], [score], scorer_ids, require_complete=False
-                        )
-                        results[(sample_id, role)] = asdict(score)
+                        results[(sample_id, role)] = row
+                        if score.status != "ok":
+                            missing.append(role)
                     else:
                         missing.append(role)
                 if missing:
@@ -207,8 +182,8 @@ def _run(config, assets, prompts, output, *, visual_only=False):
             else:
                 pending.setdefault(prompt["aspect"], []).append((prompt, sample_id))
         for pairs in pending.values():
-            for start in range(0, len(pairs), batch_size):
-                chunk = pairs[start : start + batch_size]
+            for start in range(0, len(pairs), config.sampling.batch_size):
+                chunk = pairs[start : start + config.sampling.batch_size]
                 tasks.append(
                     {
                         "task_id": identity([s for _, s in chunk]),
@@ -216,8 +191,9 @@ def _run(config, assets, prompts, output, *, visual_only=False):
                         "sample_ids": [s for _, s in chunk],
                         "arm": arm,
                         "output": str(output),
-                        "policy_version": policy,
-                        "missing_scorers": list(scorer_ids),
+                        "policy_version": policies[arm.name],
+                        "conditioning_identity": conditioning,
+                        "missing_scorers": list(specs),
                     }
                 )
 
@@ -227,46 +203,48 @@ def _run(config, assets, prompts, output, *, visual_only=False):
             atomic_json(output / "records" / f"{record['sample_id']}.json", record)
 
     def scored(role, batch):
-        if not batch:
-            raise ValueError("empty scorer response")
-        requests = [
-            ScoreRequest(
-                r["sample_id"],
-                records[r["sample_id"]]["image_path"],
-                records[r["sample_id"]]["image_sha256"],
-                records[r["sample_id"]]["prompt"]["text"],
-            )
-            for r in batch
-        ]
-        parsed = [ScoreResult(**r) for r in batch]
-        if any(r.scorer != role for r in parsed):
-            raise ValueError("worker returned another scorer's result")
-        join_scores(requests, parsed, scorer_ids, require_complete=False)
-        for result in batch:
-            results[(result["sample_id"], role)] = result
-            atomic_json(
-                output / "scores" / role / f"{result['sample_id']}.json", result
-            )
+        require(
+            bool(batch) and all(r["scorer"] == role for r in batch),
+            "empty or wrong service response",
+        )
+        validate_results(
+            [request_for_record(records[r["sample_id"]], specs[role]) for r in batch],
+            [parse_score(r) for r in batch],
+            specs[role].outputs,
+            complete=False,
+        )
+        for row in batch:
+            results[(row["sample_id"], role)] = row
+            atomic_json(output / "scores" / role / f"{row['sample_id']}.json", row)
 
-    started = time.perf_counter()
     if tasks:
+        started = time.perf_counter()
         with ResidentWorkers(
-            config, assets, scorer_ids, roles=["learner"] if visual_only else None
+            config,
+            assets,
+            output,
+            generate=any("records" not in t for t in tasks),
+            score=not visual_only,
         ) as workers:
-            atomic_json(output / "worker_startup.json", workers.startup)
+            stamp = time.time_ns()
+            atomic_json(
+                output / "execution" / f"{stamp}-startup.json",
+                {"execution": asdict(config.execution), "workers": workers.startup},
+            )
             service_start = time.perf_counter()
             telemetry = run_pipeline(tasks, workers, config, generated, scored)
             atomic_json(
-                output / "timings.json",
+                output / "execution" / f"{stamp}-timings.json",
                 {
                     "workers": telemetry,
                     "service_wall_seconds": time.perf_counter() - service_start,
                     "including_load_seconds": time.perf_counter() - started,
                 },
             )
-    expected = len(prompts) * len(config["arms"])
-    if len(records) != expected:
-        raise ValueError("benchmark has missing generated samples")
+    require(
+        len(records) == len(prompts) * len(config.arms),
+        "benchmark has missing generated samples",
+    )
     report = (
         {"scope": "Visual panel only; no automatic language/length scoring claim."}
         if visual_only
@@ -280,11 +258,7 @@ def _run(config, assets, prompts, output, *, visual_only=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=REPO / "configs/posttrain.toml")
-    parser.add_argument(
-        "--assets",
-        type=Path,
-        help="machine-local JSON artifact paths and role dependency overlays",
-    )
+    parser.add_argument("--assets", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--suite", choices=["development", "bringup", "monitor"], default="bringup"
@@ -292,29 +266,29 @@ def main():
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
     config = load_config(args.config)
-    suite_key = {
+    key = {
         "development": "suite",
         "bringup": "bringup_suite",
         "monitor": "monitor_suite",
     }[args.suite]
     prompts = load_prompts(
-        REPO / config["evaluation"][suite_key], config["sampling"]["shapes"]
+        REPO / getattr(config.evaluation, key), config.sampling.shapes
     )
     if args.validate_only:
         print(
             json.dumps(
                 {
                     "prompts": len(prompts),
-                    "arms": [a["name"] for a in config["arms"]],
-                    "samples": len(prompts) * len(config["arms"]),
-                    "execution": config["execution"],
+                    "arms": [a.name for a in config.arms],
+                    "samples": len(prompts) * len(config.arms),
+                    "execution": asdict(config.execution),
                 },
                 indent=2,
             )
         )
         return
     if args.assets is None or args.output is None:
-        parser.error("--assets and --output are required for execution")
+        parser.error("--assets and --output are required")
     run(
         config,
         json.loads(args.assets.read_text()),

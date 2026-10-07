@@ -1,39 +1,26 @@
-# Sampling/scoring baseline. Objective settings arrive with their increments.
-# Artifact paths are supplied by a machine-local --assets JSON file.
-
-[initialization]
-step = 480000
-weights = "ema"
-sha256 = "1891290374655850c96d4158860e9e480dfa01ca3e554ccd9159ac9b28866bc9"
-text_exit_layer = 20
-
+# Complete sampling qualification recipe; local paths/endpoints live in --assets.
 [sampling]
 precision = "bfloat16"
 batch_size = 2
 retain_selected = true
-
-# Explicit image [height, width]; VAE /8, DiT patch /2.
+text_exit_layer = 20
 [sampling.shapes]
 "1:1" = [640, 640]
 "3:4" = [736, 560]
 "4:3" = [560, 736]
 "9:16" = [848, 480]
 "16:9" = [480, 848]
-
 [execution]
 learner_devices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-hpsv3_devices = [12, 13]
-vqascore_devices = [14, 15]
 max_inflight_batches = 24
-score_attempts = 2
 startup_timeout = 1800
 task_timeout = 600
 cpu_threads = 4
-
 [evaluation]
 suite = "configs/prompts/posttrain_drawbench.jsonl"
 bringup_suite = "configs/prompts/posttrain_drawbench_bringup.jsonl"
 monitor_suite = "configs/prompts/monitor.jsonl"
+channels = ["hpsv3.mu", "vqascore.probability"]
 bootstrap_seed = 1729
 bootstrap_repeats = 2000
 confidence = 0.95
@@ -43,38 +30,74 @@ name = "teacher_euler50"
 rule = "euler"
 steps = 50
 guidance = 1.0
+shift = "shape"
+[arms.checkpoint]
+asset = "initial"
+weights = "ema"
+sha256 = "1891290374655850c96d4158860e9e480dfa01ca3e554ccd9159ac9b28866bc9"
+architecture_sha256 = "75372e0a153b637d500dee1e3314a056750c8a4d398017d2db6e4531737120c6"
 
 [[arms]]
 name = "undistilled_euler8"
 rule = "euler"
 steps = 8
 guidance = 1.0
+shift = "shape"
+[arms.checkpoint]
+asset = "initial"
+weights = "ema"
+sha256 = "1891290374655850c96d4158860e9e480dfa01ca3e554ccd9159ac9b28866bc9"
+architecture_sha256 = "75372e0a153b637d500dee1e3314a056750c8a4d398017d2db6e4531737120c6"
 
 [[arms]]
 name = "student_renoise8"
 rule = "renoise"
 steps = 8
 guidance = 1.0
+shift = "shape"
+[arms.checkpoint]
+asset = "initial"
+weights = "ema"
+sha256 = "1891290374655850c96d4158860e9e480dfa01ca3e554ccd9159ac9b28866bc9"
+architecture_sha256 = "75372e0a153b637d500dee1e3314a056750c8a4d398017d2db6e4531737120c6"
 
-[scorers.hpsv3]
-source_repository = "https://github.com/MizzenAI/HPSv3"
-source_revision = "bd0c5fcb5f587617b0169c07222ab78d01e2f3c2"
-weights_repository = "MizzenAI/HPSv3"
-weights_revision = "4f81e3e09edd82fe3c5f636444c721b592a735ca"
-weights_file = "HPSv3.safetensors"
-backbone_repository = "Qwen/Qwen2-VL-7B-Instruct"
-backbone_revision = "eed13092ef92e448dd6875b2a00151bd3f7db0ac"
-primary_output = "mu"
+[[scorers]]
+id = "hpsv3"
+fingerprint = "9d0d57cfe59b6830f2b0dbd002316e8bcf1e0ef068746c1792fab03bc3705c3b"
+input_schema = "image-text-v1"
+structured_fields = []
+attempts = 2
+timeout = 600.0
+concurrency = 2
+batch_size = 2
+transport = "shared_file"
+seed_policy = "none"
+seed = 0
+[[scorers.outputs]]
+name = "mu"
+direction = "higher"
+bounds = []
+meaning = "Predicted preference mean"
+[[scorers.outputs]]
+name = "log_sigma"
+direction = "lower"
+bounds = []
+meaning = "Diagnostic log standard deviation; not a reward"
 
-[scorers.vqascore]
-source_repository = "https://github.com/linzhiqiu/t2v_metrics"
-source_revision = "74c720890c6ee3916e2f4facf9c671c8fe47ddf4"
-release = "3.1"
-model = "qwen3-vl-8b"
-weights_repository = "Qwen/Qwen3-VL-8B-Instruct"
-weights_revision = "0c351dd01ed87e9c1b53cbc748cba10e6187ff3b"
-question_template = 'Does this figure show "{}"? Please answer Yes or No.'
-answer_template = "Yes"
-max_new_tokens = 1
-temperature = 1.0
-primary_output = "probability"
+[[scorers]]
+id = "vqascore"
+fingerprint = "01bb42de3a579c03ec82832afd9ee0b8b92f9770c7fd7ed8743a0152f7012458"
+input_schema = "image-text-v1"
+structured_fields = []
+attempts = 2
+timeout = 600.0
+concurrency = 2
+batch_size = 2
+transport = "shared_file"
+seed_policy = "none"
+seed = 0
+[[scorers.outputs]]
+name = "probability"
+direction = "higher"
+bounds = [0.0, 1.0]
+meaning = "Probability of Yes for the configured image-text question"

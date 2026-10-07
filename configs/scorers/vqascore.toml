@@ -1,0 +1,49 @@
+[semantics]
+backend = "vqascore"
+precision = "bfloat16"
+attention = "sdpa"
+preprocessing = "upstream"
+implementation = "inko-resident-v1"
+input_schema = "image-text-v1"
+structured_fields = []
+[semantics.source]
+repository = "https://github.com/linzhiqiu/t2v_metrics"
+revision = "74c720890c6ee3916e2f4facf9c671c8fe47ddf4"
+[semantics.weights]
+repository = "Qwen/Qwen3-VL-8B-Instruct"
+revision = "0c351dd01ed87e9c1b53cbc748cba10e6187ff3b"
+files = ["*.json", "*.safetensors", "*.txt", "*.jinja", "*.model"]
+[[semantics.outputs]]
+name = "probability"
+direction = "higher"
+bounds = [0.0, 1.0]
+meaning = "Probability of Yes for the configured image-text question"
+[options]
+release = "3.1"
+model = "qwen3-vl-8b"
+question_template = 'Does this figure show "{}"? Please answer Yes or No.'
+answer_template = "Yes"
+max_new_tokens = 1
+temperature = 1.0
+[limits]
+max_batch_size = 2
+queue_capacity = 24
+request_timeout = 600.0
+max_body_bytes = 33554432
+cpu_threads = 4
+
+[semantics.packages]
+"torch" = "2.9.0"
+"torch-npu" = "2.9.0"
+"torchvision" = "0.24.0"
+"qwen-vl-utils" = "0.0.14"
+"pillow" = "12.3.0"
+"numpy" = "2.5.3"
+"accelerate" = "1.14.0"
+"safetensors" = "0.8.0"
+"transformers" = "5.16.1"
+"tokenizers" = "0.23.2"
+
+[semantics.runtime_files]
+cann_runtime = "13299fdba3a3495cfbf310455d4953d60de9dc21a18ba5a3a8f753d825ddd1e4"
+cann_ops = "cd841c9ab92a2331b262b1d242590533a5d9a4a0f8c9b957ebfd48cfd8056cf0"

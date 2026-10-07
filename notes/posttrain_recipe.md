@@ -1,8 +1,7 @@
 # Posttraining recipe
 
-Status: the full 6.1.1 specification is closed after independent review. A partial
-6.1.2 sampling/scoring harness exists; independent scorer services and
-target-runtime qualification remain pending. No final training recipe is selected and
+Status: Stage 6.1.2 sampling/scoring qualification is complete, including
+independent review and real 640p bringup, monitor and development suites. No final training recipe is selected and
 the optimizer/trainer is not implemented yet. The canonical config is
 `configs/posttrain.toml`; its current scope is the sampling/scoring baseline.
 
@@ -45,17 +44,17 @@ in local project configuration.
 
 | Area | Starting intent | Evidence or decision needed |
 |---|---|---|
-| Teacher | Preserved 480k EMA, SHA256 pinned in config, at 640p | Real generation/scoring comparison |
+| Teacher | Preserved 480k EMA, SHA256 pinned in config, at 640p | Qualified starting control; final teacher transfer remains a later comparison |
 | Student sampling | 8-step clean-prediction/renoise, shifted uniform grid, conditional CFG 1 | Generation quality and subsequent train/inference correspondence |
 | Distribution matching | Online fake-score learning with backward simulation | Parameterization, normalization, update ratio, trainable parameter scope |
 | Student tuning | Both full-parameter and LoRA training are in the initial implementation scope | Separate training/state/export qualification and later controlled quality/cost comparisons |
 | Cold start | RT-DM, DynaDG, DynaRS | Score transform, adapter design, schedules, and transition timing |
 | Joint objective | NFT with persistent DMD regularization | Loss reductions/balance, NFT old-policy update, and any additional regularization |
 | Optimization | Configured separately for trainable roles | Optimizers, learning rates, accumulation, clipping, precision, and EMA |
-| Rewards | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; source/weight pins and separate raw outputs | Runtime qualification, training mixture and normalization |
+| Rewards | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; source/weight pins and separate raw outputs | Training mixture and normalization; broader scorer validity remains unestablished |
 | Prompts | Prepared 512/32 rollout and 200/16 DrawBench manifests, plus the 48-entry visual panel | Semantic overlap review and later reward group size |
-| Execution | Ascend with resident learner/rollout and HPSv3/VQAScore worker groups from the first version | Role-map memory/throughput, bounded score queues, distributed updates, and recovery; 12/2/2 is an unqualified candidate |
-| Scorer boundary | Independently runnable services behind a versioned shared client; configuration selects services and channels | Replace current backend-specific dispatch and qualify config-only substitution |
+| Execution | Ascend with resident learner/rollout and HPSv3/VQAScore worker groups from the first version | 12/2/2 fits sampling and development scoring; training-state memory, distributed updates and systematic throughput tuning remain unqualified |
+| Scorer boundary | Independently runnable services behind a versioned shared client; configuration selects services and channels | Generic collection/report substitution implemented and mechanism-tested; future production VLM backend needs its own qualification |
 | Final selection | Real generations, benchmarks, diversity, and cost | Comparison protocol, repeat budget, and acceptable regressions |
 
 ## Work layers and qualification
@@ -112,16 +111,41 @@ Validate the config and selected prompt suite without model dependencies:
 python -m src.evaluation.benchmarks.run --config configs/posttrain.toml --validate-only
 ```
 
-Prepare scorer sources and weights in a network-enabled environment with
-`python -m scripts.posttrain.prepare_assets --help`. It pins revisions and writes
-an asset map; it does not modify installed dependencies. The machine-local asset
-JSON names `checkpoint` (weight file), `text_encoder`, `vae`, `device_type`, and
-`hpsv3`/`vqascore` objects containing `source`, `weights`, and ordered
-`python_paths`. HPSv3 also requires `backbone`; an optional `learner.python_paths`
-selects its dependency overlay. Keep this file under ignored internal storage.
-Existing `bin/` directories inside those overlays are also prepended to the
-worker's `PATH`; VQAScore requires a working `ffmpeg` executable even for image
-scoring. Overlay contents, including that executable, enter the run identity.
+Prepare each scorer with its complete `configs/scorers/<name>.toml` using
+`python -m scripts.posttrain.prepare_assets --help`. Preparation pins source and
+model revisions, checks upstream file digests, and writes local service assets.
+It does not install packages. `--assets` verifies existing files;
+`--assets` plus `--artifact-root` builds an isolated view containing only pinned
+model members. Supply native-runtime version files through `--runtime-files`.
+
+Caller assets name `checkpoints` (a map from arm asset IDs to weight files),
+`text_encoder`, `vae`, `device_type`, `learner.python_paths`, and `services`.
+NPU learners also supply `learner.runtime_files`, a map of native-runtime
+version-file names to paths; their content hashes enter the run identity.
+Each service ID has `endpoints` and `launches`; an empty launch list connects to
+an independently managed endpoint. Each owned launch supplies `config`, `assets`,
+`device`, `bind`, and `python_paths`. Service assets contain `source`, `weights`,
+`weights_manifest`, `device_type`, and `runtime_files`; HPS also requires
+`backbone` and `backbone_manifest`. All locations are machine-local JSON data.
+The initial placement is learners 0–11, HPS replicas 12–13 and VQA replicas 14–15.
+
+A service can run without a coordinator:
+
+```bash
+python -m src.posttrain.scoring.service --config configs/scorers/hpsv3.toml \
+  --assets /external/hps-assets.json --device 12 --bind 127.0.0.1:8100 \
+  --cache /external/hps-cache
+```
+
+The service process needs its own dependency overlay on `PYTHONPATH`; owned
+launches configure it automatically. Overlay `bin/` directories enter `PATH`.
+These explicit Python paths must include the image's native compiler modules
+as well as package overlays. In particular, Ascend inference needs CANN's `tbe`
+paths; importing Torch and loading weights alone does not exercise that compiler.
+The VQA source requires `ffmpeg` even for image scoring. Relevant package
+versions and native-runtime version-file hashes are pinned in service semantics
+and validated before loading; changing them changes the scorer fingerprint.
+Other installed packages remain execution provenance.
 
 HPSv3's source expects its Transformers 4.45-era runtime; VQAScore v3.1 targets
 Transformers 5.x. Qualify separate role overlays without changing pretraining's
@@ -129,7 +153,7 @@ runtime. The VQA adapter overrides device placement and local artifact loading,
 while retaining the pinned upstream scoring/preprocessing implementation.
 The HPS adapter makes its FP32 reward-head input cast explicit across devices
 and retains raw `mu` and `log_sigma` outputs. Only `mu` enters its preference
-report. These adapters still need real scorer inference qualification.
+report. Both adapters have produced real 640p scores and passed service restart/cache reuse.
 Upstream Qwen scoring currently iterates over images inside a request; request
 batching alone does not establish batched model throughput.
 
@@ -147,10 +171,66 @@ python -m src.evaluation.benchmarks.run --config configs/posttrain.toml \
 Use `--suite development` for all 200 DrawBench prompts and `--suite monitor`
 for the 48-entry visual-only panel. Monitor mode starts only generation workers.
 Reusing the same output directory resumes verified records under the same input
-identity. A changed config, source, dependency identity, or prompt suite requires
-a new output directory. Each arm writes PNGs named by prompt ID, suitable for
+identity. A changed semantic config, source, scorer identity, or prompt suite requires
+a new output directory. Endpoint relocation preserves score identity. Each arm writes PNGs named by prompt ID, suitable for
 the existing `scripts/eval/blind_panel.py` workflow. Scores and reports retain
 both metric scales separately; no reward mixture is applied by this harness.
+
+For implementation smokes, `scripts.posttrain.qualify` consumes explicit
+sampling cases and a separate shared budget ledger. Its external watchdog
+reserves one 16-NPU job, charges from provider allocation through confirmed
+release, and stops near the cumulative 24-node-hour limit with shutdown margin.
+It imposes no independent per-job cap. Provider/accounting uncertainty blocks
+subsequent launches. The launcher is not a variant-selection sweep tool.
+
+## Sampling/scoring qualification
+
+The fixed 480k EMA control produced 48 bringup images, 144 visual-monitor images,
+and 600 development images. HPSv3 and VQAScore each returned all 648 requested
+results with no failures; HPS `log_sigma` remains a diagnostic channel. All three
+arms use the same checkpoint, CFG 1 and their configured shifted grids. No
+posttraining updates or variant-selection experiments were run.
+
+DrawBench development means (200 prompts per arm, one fixed seed per prompt):
+
+| Sampling arm | HPSv3 `mu` | VQAScore probability |
+|---|---:|---:|
+| Euler, 50 steps | -3.32768 | 0.153911 |
+| Undistilled Euler, 8 steps | -7.06620 | 0.119670 |
+| Undistilled clean-prediction renoise, 8 steps | -9.98205 | 0.021698 |
+
+Blinded-position inspection covered all bringup and monitor images and a
+24-prompt development subset selected without scores. The 50-step control gives
+recognizable detailed scenes but frequently misses objects, counts, relations
+and text. Euler8 often ghosts or washes out structure; untrained renoise8 often
+produces low-information textures or silhouettes. Retain the latter as a weak
+starting control, not a usable distilled sampler. These observations do not
+select a training method or establish independent reward-model validity.
+
+On one 16-NPU Ascend node, the resident 12 learner / 2 HPS / 2 VQA allocation
+fit batch size 2. Maximum recorded allocated memory per process was 5.64 GiB
+for generation, 16.17 GiB for HPS and 16.57 GiB for VQA. These are allocator
+peaks, not whole-device HBM usage or training/optimizer-state requirements.
+The 600-image development pipeline took 85.1 seconds after readiness and
+228.1 seconds including resident loading; complete invocation took 248.4
+seconds. Mean client acquisition per two-image batch was 0.538 seconds for
+HPS and 0.365 seconds for VQA. This qualifies one working allocation; it is not
+an optimized throughput claim.
+
+Both real services were restarted and reused disk-cached scores through fresh
+clients. Partial final score records were restored through external endpoints
+without regenerating images. A completed development resume preserved all
+1,801 report/record/score files and started no new sampling workers. Mechanism
+coverage separately verifies config-only substitution by an unfamiliar service
+and channel through the same collection, joining and reporting code.
+
+Scope limits: actual images cover 640×640, 560×736 and 736×560; the two wider/taller
+configured shapes remain unqualified. Visual review was by the implementation
+agent, not a human preference study, and only 24 of the 200 development prompts
+were inspected in that panel. The monitor is visual-only; bilingual automatic
+scoring and diversity across seeds remain unqualified. The shared implementation
+allowance has consumed 0.779 of 24 allocated node-hours, including failed work,
+startup and retained allocation time; both jobs are confirmed released.
 
 ## Selected recipe and decision evidence
 
