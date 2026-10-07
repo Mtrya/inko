@@ -100,3 +100,30 @@ enabled = false
 horizon = 2
 alpha_start = 4.0
 beta_start = 1.0
+
+[stages]
+cold_steps = 2
+joint_steps = 0
+initial_checkpoint = ""
+initial_sha256 = ""
+[joint]
+dmd_coefficient = 0.0
+nft_coefficient = 0.0
+reference_coefficient = 0.0
+[nft]
+parameterization = "clean_adaptive"
+advantage_scale = "group"
+advantage_clip = 5.0
+beta = 1.0
+epsilon = 1e-5
+updates_per_round = 1
+time_draws = 1
+time_distribution = "uniform"
+time_min = 0.02
+time_max = 0.98
+[old_policy]
+strategy = "copy"
+decay = 0.9
+decay_start = 0.0
+decay_end = 0.9
+horizon = 8

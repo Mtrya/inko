@@ -1,4 +1,4 @@
-"""Complete cold-stage training configuration, separate from benchmark arms."""
+"""Complete cold/joint training configuration, separate from benchmark arms."""
 
 import math
 import tomllib
@@ -149,6 +149,44 @@ class DynaRS:
 
 
 @dataclass(frozen=True)
+class Stages:
+    cold_steps: int
+    joint_steps: int
+    initial_checkpoint: str
+    initial_sha256: str
+
+
+@dataclass(frozen=True)
+class Joint:
+    dmd_coefficient: float
+    nft_coefficient: float
+    reference_coefficient: float
+
+
+@dataclass(frozen=True)
+class NFT:
+    parameterization: str
+    advantage_scale: str
+    advantage_clip: float
+    beta: float
+    epsilon: float
+    updates_per_round: int
+    time_draws: int
+    time_distribution: str
+    time_min: float
+    time_max: float
+
+
+@dataclass(frozen=True)
+class OldPolicy:
+    strategy: str
+    decay: float
+    decay_start: float
+    decay_end: float
+    horizon: int
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     initialization: Checkpoint
     teacher: Checkpoint
@@ -164,6 +202,23 @@ class TrainingConfig:
     rewards: Rewards
     dyna_dg: DynaDG
     dyna_rs: DynaRS
+    stages: Stages
+    joint: Joint
+    nft: NFT
+    old_policy: OldPolicy
+
+    @property
+    def joint_updates(self):
+        return self.nft.updates_per_round if self.joint.nft_coefficient > 0 else 1
+
+    @property
+    def requires_scores(self):
+        return (self.stages.cold_steps > 0 and self.objective.mode == "rtdm") or (
+            self.stages.joint_steps > 0 and self.joint.nft_coefficient > 0
+        )
+
+    def dmd_enabled(self, stage):
+        return stage == "cold" or self.joint.dmd_coefficient > 0
 
     def __post_init__(self):
         s, f, o, c, e, t = (
@@ -211,7 +266,7 @@ class TrainingConfig:
         require(
             o.mode in {"dmd", "rtdm"}
             and o.estimator in {"teacher_residual", "clean_difference", "score_kl"},
-            "only cold DMD/RT-DM is implemented",
+            "cold objective must be DMD or RT-DM",
         )
         require(
             o.epsilon > 0
@@ -269,11 +324,89 @@ class TrainingConfig:
             and 0 <= t.ema_decay < 1,
             "invalid training length/seed/EMA",
         )
+        stages, joint, nft, old = self.stages, self.joint, self.nft, self.old_policy
         require(
-            self.student_optimizer.warmup_steps <= t.steps
-            and self.fake_optimizer.warmup_steps <= t.steps * f.updates,
-            "warmup exceeds role clock horizon",
+            min(stages.cold_steps, stages.joint_steps) >= 0
+            and stages.cold_steps + stages.joint_steps == t.steps,
+            "stage lengths must sum to training steps",
         )
+        if stages.cold_steps:
+            require(
+                not stages.initial_checkpoint and not stages.initial_sha256,
+                "cold stage starts from the declared initial model",
+            )
+        else:
+            require(
+                bool(stages.initial_checkpoint), "joint entry needs a cold checkpoint"
+            )
+            digest(stages.initial_sha256)
+        coefficients = (
+            joint.dmd_coefficient,
+            joint.nft_coefficient,
+            joint.reference_coefficient,
+        )
+        require(
+            all(math.isfinite(v) and v >= 0 for v in coefficients),
+            "invalid joint coefficients",
+        )
+        require(
+            (joint.dmd_coefficient + joint.nft_coefficient > 0)
+            if stages.joint_steps
+            else not any(coefficients),
+            "joint stage requires a main objective; absent stage has zero coefficients",
+        )
+        require(
+            joint.reference_coefficient == 0 or joint.nft_coefficient > 0,
+            "reference prediction penalty requires NFT forward inputs",
+        )
+        require(
+            nft.parameterization in {"clean_adaptive", "velocity_mse"}
+            and nft.advantage_scale in {"group", "round"}
+            and min(
+                nft.advantage_clip,
+                nft.beta,
+                nft.epsilon,
+                nft.updates_per_round,
+                nft.time_draws,
+            )
+            > 0
+            and all(
+                math.isfinite(v) for v in (nft.advantage_clip, nft.beta, nft.epsilon)
+            )
+            and nft.time_distribution in {"uniform", "grid"}
+            and 0 < nft.time_min < nft.time_max < 1,
+            "invalid NFT loss/time/group configuration",
+        )
+        require(
+            old.strategy in {"copy", "constant", "linear_ramp"}
+            and 0 <= old.decay < 1
+            and 0 <= old.decay_start <= old.decay_end < 1
+            and old.horizon > 0,
+            "invalid old-policy refresh schedule",
+        )
+        if stages.joint_steps and joint.nft_coefficient > 0:
+            require(
+                c.draws_per_prompt >= 2, "NFT requires at least two draws per prompt"
+            )
+            require(
+                stages.joint_steps % self.joint_updates == 0
+                and t.checkpoint_every % self.joint_updates == 0,
+                "NFT joint length/checkpoint interval must contain complete rounds",
+            )
+        for stage, count in (
+            ("cold", stages.cold_steps),
+            ("joint", stages.joint_steps),
+        ):
+            if count:
+                require(
+                    self.student_optimizer.warmup_steps <= count,
+                    "student warmup exceeds stage horizon",
+                )
+                if self.dmd_enabled(stage):
+                    require(
+                        self.fake_optimizer.warmup_steps <= count * f.updates,
+                        "fake warmup exceeds stage horizon",
+                    )
         dg, rs, reward = self.dyna_dg, self.dyna_rs, self.rewards
         require(dg.horizon > 0 and dg.start_scale >= 0, "invalid DynaDG schedule")
         require(
@@ -281,8 +414,8 @@ class TrainingConfig:
             "DynaRS requires positive alpha_start > beta_start",
         )
         require(
-            (not dg.enabled or dg.horizon <= t.steps)
-            and (not rs.enabled or rs.horizon <= t.steps),
+            (not dg.enabled or dg.horizon <= stages.cold_steps)
+            and (not rs.enabled or rs.horizon <= stages.cold_steps),
             "dynamic horizon exceeds cold generator steps",
         )
         require(
@@ -313,11 +446,12 @@ class TrainingConfig:
                 "invalid reward orientation/weight/standardization",
             )
             require(
-                reward.weighting != "paper_max_exp"
+                not (stages.cold_steps and o.mode == "rtdm")
+                or reward.weighting != "paper_max_exp"
                 or channel.standardization == "none",
                 "paper-max requires raw nonnegative rewards, not standardized channels",
             )
-        if o.mode == "rtdm":
+        if self.requires_scores:
             require(
                 bool(channels)
                 and math.isclose(sum(c.weight for c in channels), 1, abs_tol=1e-7),
@@ -329,7 +463,10 @@ class TrainingConfig:
                 "reward/scorer service set differs",
             )
         else:
-            require(not channels and not self.scorers, "DMD has no reward acquisition")
+            require(
+                not channels and not self.scorers,
+                "unscored run has no reward services/channels",
+            )
 
 
 def load_training_config(path):

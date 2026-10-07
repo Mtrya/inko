@@ -204,6 +204,8 @@ def rollouts_for(c, roles, step):
                 cond,
                 None,
                 "cpu",
+                stage="cold",
+                generator_step=step,
             )
         )
     return result
@@ -287,7 +289,7 @@ def test_incomplete_rewards_cannot_step_fake(sampling_config):
     fo = RoleOptimizer(roles.fake, c.fake_optimizer, 6)
     batches = rollouts_for(c, roles, 0)
     before = copy.deepcopy(roles.fake.state_dict())
-    with pytest.raises(ValueError, match="complete finite global"):
+    with pytest.raises(ValueError, match="complete.*global"):
         update_round(
             c,
             roles,
@@ -307,10 +309,10 @@ def test_actual_selected_prediction_and_independent_time_noise_streams():
     c = replace(dmd_config(), dyna_rs=DynaRS(True, 2, 4, 1))
     roles = Roles(small_model(), small_model(), c)
     r = rollouts_for(c, roles, 0)[0]
-    t, e = score_inputs(c, r, 0, "fake", 0)
-    u, f = score_inputs(c, r, 0, "fake", 1)
+    t, e = score_inputs(c, r, "fake", 0)
+    u, f = score_inputs(c, r, "fake", 1)
     assert not torch.equal(t, u) and not torch.equal(e, f)
-    assert score_inputs(c, r, 0, "fake", 0)[0].equal(t)
+    assert score_inputs(c, r, "fake", 0)[0].equal(t)
     assert cold_point(c, 0)["alpha"] == 4
     with torch.no_grad():
         next(p for p in roles.student.parameters() if p.requires_grad).add_(1)
@@ -373,7 +375,7 @@ def test_config_only_http_scorer_substitution_through_cold_update(
                 c.execution.learner_devices,
                 10,
             ) as services:
-                result = acquire_round(c, services.clients, records)
+                result = acquire_round(c, services.clients, records, stage="cold")
             torch.testing.assert_close(
                 torch.tensor(result["reward"]["weights"]), torch.tensor(expected)
             )
@@ -515,6 +517,8 @@ def test_cfg_selected_replay_retains_both_conditioning_branches():
         conditioning,
         empty,
         "cpu",
+        stage="cold",
+        generator_step=0,
     )
     predicted = clean_prediction(
         r.selected_input,

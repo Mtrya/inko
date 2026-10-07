@@ -6,7 +6,8 @@ strategies, three explicit DMD gradients, learner DDP, optimization, recovery an
 student export are available. No final training recipe is selected.
 `configs/posttrain.toml` defines sampling/scoring; `configs/posttrain_dmd.toml`
 defines plain DMD; `configs/posttrain_cold.toml` enables the independent RT-DM,
-DynaDG and DynaRS controls. NFT remains later work.
+DynaDG and DynaRS controls. `configs/posttrain_joint.toml` adds NFT/joint training
+and explicit stage transitions with bounded target-run qualification.
 
 See the [mathematical contract](posttrain_contract.md),
 [evaluation protocol](posttrain_evaluation.md), and
@@ -181,7 +182,7 @@ the existing `scripts/eval/blind_panel.py` workflow. Scores and reports retain
 both metric scales separately; no reward mixture is applied by this harness.
 
 For implementation smokes, `scripts.posttrain.qualify` consumes explicit
-cases with an explicit `kind` (`sampling` or `cold`) and a shared budget ledger. Its external watchdog
+cases with an explicit `kind` (`sampling` or `training`) and a shared budget ledger. Its external watchdog
 reserves one 16-NPU job, charges from provider allocation through confirmed
 release, and stops near the cumulative 24-node-hour limit with shutdown margin.
 It imposes no independent per-job cap. Provider/accounting uncertainty blocks
@@ -253,9 +254,9 @@ python -m src.posttrain.train --config configs/posttrain_dmd.toml \
   --assets /external/posttrain-assets.json --output /external/dmd-run
 python -m src.posttrain.train --config configs/posttrain_dmd.toml \
   --assets /external/posttrain-assets.json --output /external/dmd-run \
-  --resume /external/dmd-run/checkpoints/round-000002
+  --resume /external/dmd-run/checkpoints/step-000002
 python -m scripts.posttrain.export \
-  --checkpoint /external/dmd-run/checkpoints/round-000004 \
+  --checkpoint /external/dmd-run/checkpoints/step-000004 \
   --weights ema --output /external/dmd-export
 ```
 
@@ -428,6 +429,98 @@ is square640p, CFG1 and activation checkpointing disabled; CFG replay and
 checkpointing have separate mechanism coverage. Real VLM substitution, broader
 quality/diversity, hero prompts and optimized placement remain unqualified.
 
-All four implementation allocations are released. Cumulative usage is4.132 of
-24 node-hours, including failures, preparation, transfer and retained time.
-NFT and variant-selection experiments have not started.
+Through cold-stage qualification, all four allocations were released. Usage was
+4.132 of24 node-hours, including failures, preparation, transfer and retained time.
+NFT implementation and variant-selection experiments were unstarted at that gate.
+
+## NFT/joint configuration and recovery
+
+`configs/posttrain_joint.toml` is the complete full-student 8-cold + 8-joint
+integration input; `configs/experiments/posttrain/joint_integrated_lora.toml`
+provides the LoRA integration with attention+MLP adapters, matching the pinned
+cold LoRA capacity used by the stage-two controls. They are implementation coverage inputs. No final
+algorithm, coefficient or optimization setting has been selected.
+
+```bash
+python -m src.posttrain.train --config configs/posttrain_joint.toml --validate-only
+python -m src.posttrain.train --config configs/posttrain_joint.toml \
+  --assets /external/posttrain-assets.json --output /external/joint-run
+python -m src.posttrain.train --config configs/posttrain_joint.toml \
+  --assets /external/posttrain-assets.json --output /external/joint-run \
+  --resume /external/joint-run/checkpoints/step-000008
+```
+
+The `joint_dmd_{full,lora}`, `joint_nft_{full,lora}` and
+`joint_both_{full,lora}` TOMLs in `configs/experiments/posttrain/` are complete
+stage-two controls. Each uses an explicitly pinned matching cold boundary;
+machine-local `training_checkpoints` maps `cold_full`/`cold_lora` to those
+checkpoint directories. The pin is the manifest SHA; all manifest-listed files
+are checked. These inputs exercise separate mechanisms with different branch
+settings and are unsuitable for ranking algorithms.
+
+| Input | Covered branches |
+|---|---|
+| DMD-only full/LoRA | Matching cold live/fake initialization, reset optimizers, no old/reference or training reward acquisition |
+| NFT-only full | Adaptive clean loss, group scaling, hard-copy old, continuous time, frozen reference, two inner updates/time draws |
+| NFT-only LoRA | Velocity MSE, round scaling, constant old EMA, deployed-grid times, frozen reference, two inner updates/time draws |
+| Joint full | Adaptive/group loss, ramped old EMA, continuous time, q=2 fake updates, two inner updates/time draws |
+| Joint LoRA | Adaptive/group loss, hard-copy old, grid times, q=2, two inner updates/time draws |
+| Both integrations | Cold RT-DM/DynaDG/DynaRS followed by joint NFT+DMD; explicit stage reset and separate evaluation EMA |
+
+`[stages]` declares generator-step lengths and optional cold initialization.
+`[joint]` selects independent nonnegative DMD/NFT/reference coefficients.
+`[nft]` declares branch parameterization, advantage scaling/clip, beta, reduction
+epsilon, inner-update/time-draw counts and time distribution. `[old_policy]`
+declares copy/constant/ramped refresh on committed joint rounds. Disabled roles
+are absent. The [contract](posttrain_contract.md#nft-joint-objectives-and-complete-round-transitions)
+defines the equations and clocks.
+
+Initialize and resume are separate operations. A pinned cold initialization
+imports matching live student/active fake weights and resets optimizers, cursor
+and RNG. Exact resume requires the unchanged source/config/runtime/artifact
+contract and restores the last entire collection round. The cold boundary
+identifies its pending transition; stopping inside an NFT inner round is invalid.
+Checkpoint names count run-local generator steps. Exported live/EMA students still use
+`scripts.posttrain.export` and the independent benchmark/scorer pipeline.
+
+## NFT/joint qualification
+
+The six stage-two controls completed four generator updates each from matching
+pinned full/LoRA cold boundaries. Both integrations completed eight cold and
+eight joint updates. Each used 24 global samples, 12 learners and 640×640 collection.
+The cases cover both NFT parameterizations, group/round scaling, copy/constant/
+ramped old refresh, optional frozen reference, q=2 and multiple inner updates/
+time draws. Different settings cover mechanisms rather than isolate effects.
+
+Both tuning modes survived a deliberate learner SIGKILL after the first update
+of an unfinished two-update NFT round. No intermediate checkpoint was published.
+New-process recovery from step 2 to step 4 matched uninterrupted role/optimizer/
+clock/reward state, all 12 rank RNG/cursors and 24 recollected sample records
+exactly. This is numerical/container equality under the pinned deterministic
+runtime; serialized checkpoint byte equality is not claimed. Cold-boundary
+transition recovery also has CPU mechanism coverage; a separate new-process
+restart at that exact cold boundary was not exercised in these target runs.
+
+Twelve live/EMA exports, including both matching cold boundaries, reloaded
+exactly. Evaluating those exports and the undistilled 480k control produced
+208 images and 416/416 required HPSv3/VQAScore results on 16 fixed DrawBench prompts. All images decoded
+and none was uniformly colored, which does not establish useful generations.
+Thumbnail inspection shows weak LoRA outputs near their weak starting control,
+repeated-object collage in full DMD, and severe fragmentation in the full
+integration live output. NFT/joint full outputs retain recognizable but incorrect
+scenes. The quality anomalies remain unresolved and join the investigation
+scheduled after implementation qualification and before variant selection.
+No winner, convergence, quality improvement or independent scorer validity is
+inferred from this short one-seed suite or its reward-model metrics.
+
+Across all 12 learners, including interrupted recovery, maximum allocated memory
+was 30.75 GiB. Export evaluation took 117.2 seconds including generator loading and
+cleanup, with the four scorer replicas already resident. This qualifies one
+12/2/2 placement, not optimized throughput or whole-device HBM. These target
+cases use CFG 1, Q/V fake adapters, AdamW and disabled activation checkpointing;
+broader family coverage remains a separate qualification step. CPU math,
+role/state/DDP and grouped config-only HTTP substitution checks verify mechanisms.
+
+All five implementation allocations are released. Cumulative cost is 5.561 of 24
+node-hours, including preparation, failures/retries and retained time. Variant
+selection and full-run preparation remain unstarted; no release recipe is selected.

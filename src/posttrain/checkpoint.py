@@ -79,7 +79,7 @@ def publish(root, step, contract, state, rank_state, rank, device):
     if rank == 0:
         save_tensor_file(staging / "state.pt", cpu_state(state))
     barrier()
-    destination = root / f"round-{step:06d}"
+    destination = root / f"step-{step:06d}"
     if rank == 0:
         files = {p.name: file_hash(p) for p in staging.iterdir()}
         require(
@@ -136,8 +136,13 @@ def inspect(path, expected_contract=None):
 def load(path, contract, rank):
     manifest = inspect(path, contract)
     require(manifest["world_size"] == world_size(), "resume learner count differs")
+    state = torch.load(Path(path) / "state.pt", map_location="cpu", weights_only=False)
+    if "step" in state:
+        require(
+            state["step"] == manifest["step"], "checkpoint manifest/state step differs"
+        )
     return (
-        torch.load(Path(path) / "state.pt", map_location="cpu", weights_only=False),
+        state,
         torch.load(
             Path(path) / f"rank-{rank:03d}.pt", map_location="cpu", weights_only=False
         ),

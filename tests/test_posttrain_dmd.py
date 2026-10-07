@@ -35,13 +35,17 @@ from src.posttrain.optim import RoleOptimizer
 from src.posttrain.roles import Roles
 from src.posttrain.rollout import PromptCursor, collect, score_inputs
 from src.posttrain.training_config import (
+    NFT,
     Collection,
     DynaDG,
     DynaRS,
     Fake,
+    Joint,
     Objective,
+    OldPolicy,
     Optimizer,
     Rewards,
+    Stages,
     Student,
     Training,
     TrainingConfig,
@@ -154,6 +158,10 @@ def config(mode="full", strategy="teacher_qv"):
         rewards=Rewards((), 1e-4, "mean_one_exp", 1),
         dyna_dg=DynaDG(False, 3, 1),
         dyna_rs=DynaRS(False, 3, 4, 1),
+        stages=Stages(3, 0, "", ""),
+        joint=Joint(0, 0, 0),
+        nft=NFT("clean_adaptive", "group", 5, 1, 1e-5, 1, 1, "uniform", 0.02, 0.98),
+        old_policy=OldPolicy("copy", 0.9, 0, 0.9, 3),
     )
 
 
@@ -225,7 +233,18 @@ def test_round_roles_and_resume(tmp_path, mode, strategy, target):
 
     def round_at(step):
         rows = [
-            collect(roles.student_field, c, [], [str(i)], step, cond, None, "cpu")
+            collect(
+                roles.student_field,
+                c,
+                [],
+                [str(i)],
+                step,
+                cond,
+                None,
+                "cpu",
+                stage="cold",
+                generator_step=step,
+            )
             for i in range(2)
         ]
         return update_round(
@@ -296,11 +315,33 @@ def test_cursor_and_training_noise_recovery():
     c = config()
     roles = Roles(small_model(), small_model(), c)
     cond = (torch.randn(1, 2, 1024), torch.randn(1, 1024), torch.ones(1, 2))
-    a = collect(roles.student_field, c, [], ["0"], 0, cond, None, "cpu")
-    b = collect(roles.student_field, c, [], ["0"], 1, cond, None, "cpu")
+    a = collect(
+        roles.student_field,
+        c,
+        [],
+        ["0"],
+        0,
+        cond,
+        None,
+        "cpu",
+        stage="cold",
+        generator_step=0,
+    )
+    b = collect(
+        roles.student_field,
+        c,
+        [],
+        ["0"],
+        1,
+        cond,
+        None,
+        "cpu",
+        stage="cold",
+        generator_step=1,
+    )
     assert a.seeds != b.seeds
-    t, e = score_inputs(c, a, 0, "fake", 0)
-    u, f = score_inputs(c, a, 0, "fake", 1)
+    t, e = score_inputs(c, a, "fake", 0)
+    u, f = score_inputs(c, a, "fake", 1)
     assert not torch.equal(e, f) and not torch.equal(t, u)
 
 
@@ -313,7 +354,7 @@ def test_checkpoint_unpublished_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "atomic_json", fail)
     with pytest.raises(OSError):
         publish(tmp_path, 1, {}, {}, {}, 0, torch.device("cpu"))
-    assert not (tmp_path / "round-000001").exists()
+    assert not (tmp_path / "step-000001").exists()
 
 
 def test_manifest_in_staging_is_not_a_published_checkpoint(tmp_path):
@@ -360,9 +401,9 @@ def test_checkpointed_blocks_preserve_forward_and_gradients():
         torch.testing.assert_close(left.grad, right.grad)
 
 
-def test_config_rejects_unimplemented_objectives_and_uneven_rounds():
+def test_config_rejects_invalid_cold_objectives_and_uneven_rounds():
     c = config()
-    with pytest.raises(ValueError, match="cold DMD/RT-DM"):
+    with pytest.raises(ValueError, match="cold objective"):
         replace(c, objective=replace(c.objective, mode="nft"))
     with pytest.raises(ValueError, match="evenly"):
         replace(c, execution=replace(c.execution, learner_devices=(0, 1, 2)))

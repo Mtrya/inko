@@ -15,6 +15,9 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 def training_contract(config, assets, prompts):
+    from .initialization import boundary_manifest
+
+    boundary = boundary_manifest(config, assets)
     for checkpoint in (config.initialization, config.teacher):
         path = Path(assets["checkpoints"][checkpoint.asset])
         require(file_hash(path) == checkpoint.sha256, "initial checkpoint bytes differ")
@@ -39,6 +42,7 @@ def training_contract(config, assets, prompts):
         json.dumps(
             {
                 "config": asdict(config),
+                "boundary": boundary,
                 "prompts": prompts,
                 "device_type": assets["device_type"],
                 "runtime": json.loads(runtime.stdout),

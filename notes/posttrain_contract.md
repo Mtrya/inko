@@ -3,7 +3,9 @@
 Status: independent sampling/scoring services and cold DMD/RT-DM training are
 implemented. The DMD contract below covers full/LoRA students, fake-score roles,
 learner-only DDP, optimizer clocks, complete-round recovery and export. Independent
-RT-DM/DynaDG/DynaRS controls are implemented; NFT remains later work.
+RT-DM/DynaDG/DynaRS and NFT/joint controls are implemented. Full/LoRA NFT,
+stage transitions and whole-round recovery have bounded target-run evidence;
+algorithm quality and release-recipe choices remain open.
 Numerical choices belong in the runnable config; this contract defines their
 meaning. See the [recipe](posttrain_recipe.md) and
 [evaluation protocol](posttrain_evaluation.md).
@@ -13,7 +15,7 @@ meaning. See the [recipe](posttrain_recipe.md) and
 Core training logic, rollout sampling, model-state management, and reward/score
 clients belong in `src/posttrain/`. Benchmark execution and reporting belong in
 `src/evaluation/benchmarks/`. Rollout and evaluation prompt suites belong in
-`configs/prompts/`. Independent sampling/scoring and the plain-DMD trainer are implemented.
+`configs/prompts/`. Independent sampling/scoring and the cold/joint trainer are implemented.
 
 The starting recipe has two training stages: RT-DM with DynaDG and DynaRS,
 then DiffusionNFT with persistent distribution-matching regularization.
@@ -36,7 +38,8 @@ Config-only substitution through collection/evaluation and later reward/NFT
 paths is required qualification. The independent services and generic client satisfy collection/evaluation
 substitution. An unfamiliar service/channel also has HTTP mechanism coverage
 through cold reward transformation and update admission. Grouped NFT
-substitution remains a later gate; this does not qualify a real VLM backend.
+reward normalization and update admission also have generic HTTP mechanism
+coverage; this does not qualify a real VLM backend.
 
 ## Flow convention
 
@@ -111,14 +114,16 @@ only that step's clean prediction. Training inputs then follow the deployed
 student sampler. The DMD renoise time is a separate draw from the selected
 generator grid index; NFT forward-noising time is another distinct input.
 Plain DMD uses an explicit selected-index PMF, bounded uniform score times and
-a configured fake-update ratio; NFT remains later implementation work.
+a configured fake-update ratio. NFT uses a frozen old policy for terminal
+collection and fresh independent forward time/noise for each generator update.
 
 Implemented RT-DM associates a complete rollout score with the corresponding
 trajectory and selected generator update through the
 [detached-state procedure](#detached-rollout-state). Global reward transforms
 and selected-call replay have mechanism and real cold-path qualification.
-NFT remains later implementation work; it learns from terminal latents and
-needs no gradient through their rollout.
+NFT learns from detached old-policy terminal latents and needs no gradient
+through their rollout. Joint DMD recollects current-student prefixes for each
+inner update; old-policy terminals are not DMD selected-state replay data.
 
 ## Initial data and sampler interfaces
 
@@ -349,8 +354,12 @@ new retry budget. Temporary/unrecorded generation is recollected. Plain-DMD trai
 round boundary and restores optimizer state, per-rank RNG and prompt cursor.
 
 This inference harness performs no learner DDP updates. Its memory measurements
-cover the resident generator, text encoder, VAE, and scorers. DMD training memory is reported separately in the recipe; NFT role memory
-remains unqualified.
+cover the resident generator, text encoder, VAE, and scorers. Training memory is
+reported separately in the recipe. Full/LoRA NFT and joint qualification retained
+twelve learners, two HPSv3 replicas and two VQAScore replicas, with a maximum
+learner allocation of 30.75 GiB including interrupted recovery. This placement
+is qualified only for CFG 1, square 640p, Q/V fake adapters, AdamW and activation
+checkpointing disabled; these are allocator measurements, not whole-device HBM.
 
 ## Model roles and gradients
 
@@ -386,8 +395,8 @@ equations and evidence here as each training increment is implemented and qualif
 | Joint objective | Starting form: `L_DMD + lambda_NFT * L_NFT`. Fix each term's reduction before interpreting the coefficient; record gradient contributions as diagnostics. |
 
 Plain-DMD and reward-weighted RT-DM objectives, reductions and guards are
-implemented and specified below. NFT and stage-transition behavior remain later
-implementation work. Distinguish an intentional algorithm change from a
+implemented and specified below, alongside NFT/joint objectives and stage
+transitions. Distinguish an intentional algorithm change from a
 numerical implementation detail. Record any departure from the selected
 reference and the reason for it.
 
@@ -524,6 +533,93 @@ Checkpoint state includes generator/fake clocks, dynamic schedule definitions
 and current point, last global reward statistics and scored/used sample counts.
 An interrupted round is discarded and recollected from the last committed
 boundary; attempted work and retry accounting remain recorded.
+
+## NFT, joint objectives and complete-round transitions
+
+NFT collects detached terminal latents with a frozen old policy. Exact prompt ID
+is the group identity; all required scores join globally before advantages are
+computed or any optimizer steps. For combined reward R, use population statistics:
+
+```text
+A_i = (R_i - mean_group(R)) / (std_group(R) + epsilon_reward)
+# The round-scaled control substitutes std_round(R) in the denominator.
+p_i = 0.5 + clip(A_i, -C, C) / (2*C)
+```
+
+Constant groups remain with p=0.5. Their gradient cancels at student=old, but
+anchors the student after it moves; equal rewards do not imply an always-zero
+update. Config-selected scorer channels pass through the shared client. Group
+normalization and NFT admission contain no scorer backend names or model imports.
+
+For old terminal x, independent noise e and physical time t, evaluate raw
+conditional old/new velocities even when terminal collection uses CFG:
+
+```text
+z = t*x + (1-t)*e
+v_plus  = (1-beta)*stopgrad(v_old) + beta*v_new
+v_minus = (1+beta)*stopgrad(v_old) - beta*v_new
+x_plus/minus = z + (1-t)*v_plus/minus
+h_plus/minus = stopgrad(max(mean_elements(abs(x_plus/minus-x)), epsilon_nft))
+l_plus/minus = mean_elements((x_plus/minus-x)^2) / h_plus/minus
+l_nft = C/beta * (p*l_plus + (1-p)*l_minus)
+```
+
+C and beta are distinct positive parameters. The two detached normalizers are
+separate. Inko reduces in FP32, checked against an independent CPU double oracle;
+the inspected reference calculates its adaptive normalizers in double precision.
+The velocity-MSE control instead uses `mean_elements((v_plus/minus-(x-e))^2)`
+without adaptive denominators. Forward times are bounded continuous uniform or
+draws from the deployed collection grid excluding its terminal endpoint t=1.
+Every inner update/time draw uses independent keyed time and noise. Average time
+draws within sample before the global sample mean.
+
+The generator objective is
+`lambda_dmd*mean(l_dmd) + lambda_nft*mean(l_nft) + lambda_ref*mean(l_ref)`.
+The optional frozen stage-entry reference uses raw conditional prediction MSE,
+`l_ref=mean_elements((v_new-stopgrad(v_reference))^2)`, on the same NFT inputs.
+It is a prediction penalty, not an exact distribution KL. Its coefficient is zero
+in the integration candidate. A reference requires an active NFT term. NFT-only
+allocates no fake/DMD teacher; DMD-only allocates no old/reference policy.
+
+Old stays fixed across all inner updates of one collection round. Joint DMD
+recollects detached current-student prefixes/targets at each inner update, performs
+its unweighted q fake updates and verifies selected-call replay before the student
+step. Its real score is the original frozen teacher, with bounded uniform score
+times. RT-DM, DynaDG and DynaRS apply only in the cold stage. Term loss and weighted
+latent-prediction gradient norms are diagnostics; these norms stop at forward
+outputs and do not traverse parameter/DDP hooks.
+
+At joint entry, hard-copy old/reference from the live boundary student, retain
+enabled fake weights, reset student/fake optimizers and schedules, and reset the
+separate evaluation EMA. Full tuning has actual frozen model copies. LoRA has
+independent adapter/module state over shared immutable base tensors. After a whole
+round, refresh old with `old <- d(r)*old + (1-d(r))*student`:
+
+- `copy`: d=0.
+- `constant`: the configured decay.
+- `linear_ramp`: `decay_start + (decay_end-decay_start)*min(r/horizon,1)`.
+
+Here r counts previously committed joint rounds, starting at zero. It advances
+only after every inner update and the old refresh succeed. Evaluation EMA advances
+on each successful generator step; its state and clock are independent of old.
+
+Complete configs declare cold/joint generator-step counts. NFT joint length and
+checkpoint interval must contain whole inner-update rounds; explicit early stops
+inside a round fail before launch. Checkpoints are named `step-<run-local-generator-step>`
+and retain stage, local/global generator and fake clocks, committed round and old
+versions, scored/used counts, next action, every active role/optimizer, old/reference
+and evaluation EMA, last global reward, source/config/runtime identities and rank
+RNG/cursor state. Cold boundary checkpoints identify the pending transition.
+No intermediate NFT inner-update checkpoint is published. A failed inner update
+is discarded; exact resume restores the last whole boundary and recollects.
+
+Training RNG v3 keys include run seed, stage, global generator step, collection
+round, sample ID, role and update/time-draw index. Old collection additionally
+identifies its frozen policy version. An explicit SHA-pinned cold initialization
+imports matching live student and enabled fake weights while resetting declared
+optimization/cursor/RNG state. It preserves lineage offsets for global generator
+and fake clocks. This is separate from exact resume, which requires unchanged
+source/config/runtime/artifact identities.
 
 ## Verification and references
 
