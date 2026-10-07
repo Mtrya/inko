@@ -73,3 +73,6 @@ swanlog
 *.pem
 *.key
 /INSPIRE.md
+
+# Reusable checkpoint logic is source, not a checkpoint artifact.
+!src/posttrain/checkpoint.py

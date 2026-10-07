@@ -1,9 +1,11 @@
 # Posttraining recipe
 
-Status: Stage 6.1.2 sampling/scoring qualification is complete, including
-independent review and real 640p bringup, monitor and development suites. No final training recipe is selected and
-the optimizer/trainer is not implemented yet. The canonical config is
-`configs/posttrain.toml`; its current scope is the sampling/scoring baseline.
+Status: Plain distribution matching is implemented alongside the independent
+sampling/scoring pipeline. Full-parameter and LoRA students, two fake-score
+strategies, three explicit DMD gradients, learner DDP, optimization, recovery and
+student export are available. No final training recipe is selected.
+`configs/posttrain.toml` defines sampling/scoring; `configs/posttrain_dmd.toml`
+defines plain DMD. RT-DM, dynamic cold-start schedules and NFT remain later work.
 
 See the [mathematical contract](posttrain_contract.md),
 [evaluation protocol](posttrain_evaluation.md), and
@@ -31,8 +33,9 @@ open possibilities requiring a concrete motivation and comparison.
 |---|---|
 | `src/posttrain/` | Trainer, objectives, sampling, model states, reward/score clients, and reward transforms |
 | `src/evaluation/benchmarks/` | Independently runnable benchmark execution and reporting |
-| `configs/posttrain.toml` | Complete implemented baseline; currently sampling/scoring, extended with each training increment |
-| `configs/experiments/posttrain/` | Complete configs for retained experimental comparisons |
+| `configs/posttrain.toml` | Complete sampling/scoring baseline |
+| `configs/posttrain_dmd.toml` | Complete plain-DMD training configuration |
+| `configs/experiments/posttrain/` | Complete coverage configurations; later retained comparisons |
 | `configs/prompts/` | Rollout and evaluation prompt suites with explicit split identity |
 
 Sampling/scoring paths and initial prompt manifests are implemented. Validate
@@ -53,7 +56,7 @@ in local project configuration.
 | Optimization | Configured separately for trainable roles | Optimizers, learning rates, accumulation, clipping, precision, and EMA |
 | Rewards | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; source/weight pins and separate raw outputs | Training mixture and normalization; broader scorer validity remains unestablished |
 | Prompts | Prepared 512/32 rollout and 200/16 DrawBench manifests, plus the 48-entry visual panel | Semantic overlap review and later reward group size |
-| Execution | Ascend with resident learner/rollout and HPSv3/VQAScore worker groups from the first version | 12/2/2 fits sampling and development scoring; training-state memory, distributed updates and systematic throughput tuning remain unqualified |
+| Execution | Ascend with resident learner/rollout and HPSv3/VQAScore worker groups from the first version | 12 learner replicas fit the qualified DMD paths; export evaluation uses 12/2/2. Systematic throughput tuning remains separate |
 | Scorer boundary | Independently runnable services behind a versioned shared client; configuration selects services and channels | Generic collection/report substitution implemented and mechanism-tested; future production VLM backend needs its own qualification |
 | Final selection | Real generations, benchmarks, diversity, and cost | Comparison protocol, repeat budget, and acceptable regressions |
 
@@ -68,7 +71,7 @@ Stage 6 has four work layers, separate from the recipe's two training stages:
 | 3. Real-run preparation | Curate real-run prompts and evaluation suites; select/calibrate scorers and reward composition | Frozen input/scorer identities and a bounded pipeline qualification, including remeasurement if scorer speed changes |
 | 4. Real run and monitoring | Launch, monitor, recover, evaluate, and select the final checkpoint | Completed run, final held-out evaluation, preserved artifacts, and a qualified release recipe |
 
-Current work is layer 1, sampling and scoring. Use a preserved
+Current work is layer 1, algorithm implementation. Use a preserved
 pretrained checkpoint and a small working suite; algorithm development does not
 wait for the hero-run prompt pool or a particular pretraining endpoint. Keep
 initialization fixed within comparisons and assess transfer when moving to a
@@ -177,7 +180,7 @@ the existing `scripts/eval/blind_panel.py` workflow. Scores and reports retain
 both metric scales separately; no reward mixture is applied by this harness.
 
 For implementation smokes, `scripts.posttrain.qualify` consumes explicit
-sampling cases and a separate shared budget ledger. Its external watchdog
+cases with an explicit `kind` (`sampling` or `dmd`) and a shared budget ledger. Its external watchdog
 reserves one 16-NPU job, charges from provider allocation through confirmed
 release, and stops near the cumulative 24-node-hour limit with shutdown margin.
 It imposes no independent per-job cap. Provider/accounting uncertainty blocks
@@ -228,9 +231,118 @@ Scope limits: actual images cover 640×640, 560×736 and 736×560; the two wider
 configured shapes remain unqualified. Visual review was by the implementation
 agent, not a human preference study, and only 24 of the 200 development prompts
 were inspected in that panel. The monitor is visual-only; bilingual automatic
-scoring and diversity across seeds remain unqualified. The shared implementation
-allowance has consumed 0.779 of 24 allocated node-hours, including failed work,
-startup and retained allocation time; both jobs are confirmed released.
+scoring and diversity across seeds remain unqualified. Sampling/scoring qualification consumed 0.779 allocated node-hours, including
+failed work, startup and retained allocation time; its two jobs were released.
+Later training qualification uses the same cumulative 24-node-hour allowance.
+
+## Plain-DMD commands and controls
+
+Validate a complete training recipe without model loading:
+
+```bash
+python -m src.posttrain.train --config configs/posttrain_dmd.toml --validate-only
+```
+
+Training uses the same machine-local checkpoint/text/runtime assets as sampling.
+It starts resident learners and no scorer processes; plain DMD does not acquire
+rewards. Export evaluation calls the existing independent scoring services.
+
+```bash
+python -m src.posttrain.train --config configs/posttrain_dmd.toml \
+  --assets /external/posttrain-assets.json --output /external/dmd-run
+python -m src.posttrain.train --config configs/posttrain_dmd.toml \
+  --assets /external/posttrain-assets.json --output /external/dmd-run \
+  --resume /external/dmd-run/checkpoints/round-000002
+python -m scripts.posttrain.export \
+  --checkpoint /external/dmd-run/checkpoints/round-000004 \
+  --weights ema --output /external/dmd-export
+```
+
+`--stop-after` permits an earlier committed boundary without changing the
+configured schedule horizon. Resume requires the same source, algorithm,
+runtime, prompts, artifacts and learner map. Export directories are immutable;
+use their actual weight/architecture hashes in benchmark arms. Both `live` and
+`ema` export views are supported, including LoRA merging.
+
+The three complete coverage configs exercise different required mechanisms:
+
+| Config | Student / fake | DMD / sampling / optimizer |
+|---|---|---|
+| `configs/posttrain_dmd.toml` | Full / teacher-base Q/V | Teacher-residual normalization; renoise; AdamW; selected-clean fake target |
+| `configs/experiments/posttrain/dmd_lora_full.toml` | Attention+MLP LoRA / full | Clean difference; Euler; two fake updates; terminal target; LR warmup/cosine |
+| `configs/experiments/posttrain/dmd_full_muon.toml` | Full / teacher-base Q/V | Score-KL time factor; renoise with CFG; Muon+AdamW |
+
+These configurations change several axes to cover execution paths cheaply.
+Their short runs cannot isolate treatment effects or rank variants. Student
+evaluation EMA is enabled to qualify export and recovery, not as a selected
+training choice. The shared Muon implementation lives in `src/optim/` and remains
+used by pretraining.
+
+Execution declares deterministic kernel policy and intra-host RoCE explicitly.
+On the qualified Ascend topology, learner devices cross two interconnect planes;
+HCCL required intra-host RoCE. Native fused-attention backward was nonrepeatable
+under the default policy on identical BF16 inputs. The deterministic policy
+removed that difference in a direct repeated-backward probe. DDP bucket
+rebuilding also changed native reduction rounding; startup primes both wrappers
+with a zero-loss backward, clears gradients and restores RNG before initialization
+or resume. Full recovery evidence is recorded separately. Activation checkpointing has mechanism
+coverage; it is disabled in the initial hardware cases.
+
+## Plain-DMD qualification
+
+Three 640×640 training cases used 24 samples per round and 12 learner replicas:
+four full-student/Q/V-fake updates, four LoRA-student/full-fake updates, and two
+full-student Muon/score-KL/CFG updates. Every trainable student/fake tensor changed;
+frozen teacher and LoRA base tensors remained unchanged. These cases exercise
+different mechanisms and cannot isolate or select variants.
+
+Both four-update paths were repeated with a process exit at committed round 2
+and a new-process resume to round 4. Role weights, optimizer state, EMA, clocks,
+per-rank RNG/cursors, recorded inputs and updates matched the uninterrupted run
+exactly under the declared deterministic execution policy and primed DDP layout.
+This establishes repeatability on the exercised hardware/runtime, not across
+different hardware, software, rank maps or arbitrary future kernels.
+
+All six live/EMA exports reloaded exactly and were evaluated against matching
+initial controls on 16 DrawBench prompts. The final evaluation produced 160
+images and 320/320 required HPSv3/VQAScore results. Means below retain separate
+metric scales; each cell is HPS `mu` / VQAScore probability.
+
+| Coverage path | Matching initialization | Live export | EMA export |
+|---|---:|---:|---:|
+| Full / Q/V fake, renoise CFG 1 | -10.23899 / 0.000257 | -10.05377 / 0.000007 | -10.23961 / 0.000162 |
+| LoRA / full fake, Euler CFG 1 | -8.18376 / 0.007350 | -8.19105 / 0.013606 | -8.13965 / 0.011561 |
+| Full Muon / Q/V fake, renoise CFG 1.5 | -9.40974 / 0.087945 | -9.97678 / 0.004905 | -9.40572 / 0.014797 |
+
+Thumbnail inspection covered all 160 final images with shuffled arm positions.
+The initial controls already have poor prompt following. The full/Q/V live export
+shows repetitive texture collapse across prompts; its EMA preserves the weak
+initial silhouettes. HPS rises despite this visible regression. LoRA exports
+remain visually close to the weak short-Euler control; the Muon case also fails
+to establish usable renoise quality. These configurations are unqualified as
+release recipes. Operator and execution evidence does not establish convergence,
+scorer validity or successful distillation. Broader development suites, multiple
+seeds and controlled comparisons remain separately budgeted selection work.
+
+Maximum allocated memory per learner was 19.79 GiB for full/Q/V, 19.97 GiB for
+LoRA/full fake and 20.94 GiB for full Muon/Q/V. After startup, observed round
+times were approximately 1.9, 2.5–2.8 and 3.2 seconds respectively, excluding
+checkpoint I/O. Different objectives, fake-update ratios and guidance prevent
+interpreting these as a tuning-mode speed comparison. Export evaluation took
+226.7 seconds including model/service loading and cleanup. These measurements
+qualify one resident placement, not optimized throughput or whole-device HBM.
+
+The numerical training/recovery/export runs used the recorded source before a
+checkpoint-admission-only guard was added. That guard rejects unpublished staging
+directories even if a manifest exists; its regression reproduced the old failure
+and passed after correction. The final guard also verified all actual committed
+full/LoRA/Muon checkpoint files. Numerical source and final source identities are
+preserved separately; no resume under mismatched source is claimed.
+
+All implementation jobs are released. The shared allowance totals 1.987
+of 24 allocated node-hours, leaving 22.013; failures, preparation and
+retained allocations are included. No RT-DM, dynamic controls, NFT or selection
+experiments were run in this phase.
 
 ## Selected recipe and decision evidence
 

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.pretrain.muon import Muon
+from src.optim.muon import Muon
 
 
 @pytest.mark.parametrize("shape,chunks", [

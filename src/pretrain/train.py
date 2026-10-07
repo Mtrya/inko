@@ -66,7 +66,7 @@ from .stage_control import (
     write_checkpoint_record,
     verify_restored_rng,
 )
-from .muon import build_param_groups as build_muon_param_groups
+from src.optim.muon import build_param_groups as build_muon_param_groups
 from .health import (
     ema_rel_distance,
     qk_gain_stats,

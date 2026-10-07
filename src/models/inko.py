@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin, hf_hub_download
+from torch import nn
 
 from .dit_blocks import (
     DoubleStreamDiTBlock,
@@ -57,6 +57,7 @@ class Inko(nn.Module, PyTorchModelHubMixin):
         self.double_stream_depth = double_stream_depth
         self.single_stream_depth = single_stream_depth
         self.mlp_ratio = mlp_ratio
+        self.activation_checkpointing = False
         self.x_embedder = nn.Conv2d(16, hidden_size, kernel_size=2, stride=2)
         self.txt_embedder = nn.Linear(1024, hidden_size)
         self.t_embedder = TimestepEmbeddings(hidden_size)
@@ -148,6 +149,14 @@ class Inko(nn.Module, PyTorchModelHubMixin):
                     (keep > 0).unsqueeze(1).unsqueeze(2), x.dtype
                 )
         for block in self.blocks:
+            if self.activation_checkpointing and torch.is_grad_enabled():
+                from torch.utils.checkpoint import checkpoint
+
+                x, txt = checkpoint(
+                    block, x, txt, c, img_hw, txt_seq_len, txt_mask,
+                    use_reentrant=False,
+                )
+                continue
             if isinstance(block, SingleStreamDiTBlock):
                 x, txt = block(
                     x,

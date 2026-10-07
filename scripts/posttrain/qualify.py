@@ -11,6 +11,7 @@ from pathlib import Path
 from src.posttrain.config import load_config
 from src.posttrain.records import atomic_json
 from src.posttrain.schema import require
+from src.posttrain.training_config import load_training_config
 
 from .budget import locked_ledger, reserve
 
@@ -22,7 +23,28 @@ def validate_matrix(matrix):
     )
     for case in matrix["cases"]:
         require(
-            set(case) == {"config", "assets", "output", "suite"},
+            case.get("kind") in {"sampling", "dmd"},
+            "explicit qualification case kind required",
+        )
+        if case["kind"] == "dmd":
+            require(
+                set(case)
+                == {"kind", "config", "assets", "output", "resume", "stop_after"},
+                "invalid DMD case fields",
+            )
+            config = load_training_config(case["config"])
+            require(
+                type(case["stop_after"]) is int
+                and 0 < case["stop_after"] <= config.training.steps,
+                "invalid committed stop boundary",
+            )
+            require(
+                case["resume"] is None or isinstance(case["resume"], str),
+                "invalid resume path",
+            )
+            continue
+        require(
+            set(case) == {"kind", "config", "assets", "output", "suite"},
             "invalid sampling case fields",
         )
         require(
@@ -57,6 +79,24 @@ def execute_cases(matrix):
     from src.evaluation.benchmarks.run import REPO, run
 
     for case in matrix["cases"]:
+        if case["kind"] == "dmd":
+            argv = [
+                sys.executable,
+                "-m",
+                "src.posttrain.train",
+                "--config",
+                case["config"],
+                "--assets",
+                case["assets"],
+                "--output",
+                case["output"],
+                "--stop-after",
+                str(case["stop_after"]),
+            ]
+            if case["resume"] is not None:
+                argv += ["--resume", case["resume"]]
+            subprocess.run(argv, check=True)
+            continue
         config = load_config(case["config"])
         key = {
             "bringup": "bringup_suite",

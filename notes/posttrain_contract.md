@@ -1,11 +1,9 @@
 # Posttraining mathematical and execution contract
 
-Status: the full Stage 6.1 specification gate (6.1.1) is closed after independent
-review. This public note describes the initial sampling/evaluation contract and
-the required training boundaries. The existing 6.1.2 harness is partial: scorer
-decoupling and target-hardware qualification remain pending. Training objectives
-are specified for implementation in 6.1.3 through 6.1.5; they are not implemented
-or qualified capabilities.
+Status: independent sampling/scoring services and plain-DMD training are
+implemented. The DMD contract below covers full/LoRA students, fake-score roles,
+learner-only DDP, optimizer clocks, complete-round recovery and export. RT-DM,
+dynamic cold-start controls and NFT remain later implementation work.
 Numerical choices belong in the runnable config; this contract defines their
 meaning. See the [recipe](posttrain_recipe.md) and
 [evaluation protocol](posttrain_evaluation.md).
@@ -15,8 +13,7 @@ meaning. See the [recipe](posttrain_recipe.md) and
 Core training logic, rollout sampling, model-state management, and reward/score
 clients belong in `src/posttrain/`. Benchmark execution and reporting belong in
 `src/evaluation/benchmarks/`. Rollout and evaluation prompt suites belong in
-`configs/prompts/`. The initial sampling/scoring harness is present; the
-posttraining optimizer/trainer is not implemented yet.
+`configs/prompts/`. Independent sampling/scoring and the plain-DMD trainer are implemented.
 
 The starting recipe has two training stages: RT-DM with DynaDG and DynaRS,
 then DiffusionNFT with persistent distribution-matching regularization.
@@ -36,8 +33,8 @@ numeric channels. A protocol-compatible VLM scorer can replace an initial
 scorer through caller configuration; an unfamiliar upstream API needs an isolated
 adapter. Scorer model/rubric identity enters score provenance and cache identity.
 Config-only substitution through collection/evaluation and later reward/NFT
-paths is required qualification. The current backend-specific worker dispatch
-does not yet satisfy this boundary.
+paths is required qualification. The independent services and generic client satisfy collection/evaluation
+substitution; production reward and NFT substitution remain later gates.
 
 ## Flow convention
 
@@ -65,8 +62,8 @@ least in FP32. The proposed few-step update below is a separate sampling rule.
 
 ## Initial sampling design
 
-Status: selected for the first algorithm-development comparison, with quality
-qualification pending. Initial development uses 640p and the preserved 480k EMA.
+Status: implemented and exercised with real generations and scores. The
+undistilled controls have weak generation quality; no training method is selected. Initial development uses 640p and the preserved 480k EMA.
 Its SHA256 identity is pinned in [the config](../configs/posttrain.toml).
 Availability of a newer checkpoint does not automatically advance the teacher.
 
@@ -106,17 +103,18 @@ translates the clean-prediction/renoise sampler in the
 Euler instead uses `x_(k+1) = x_k + (t_(k+1) - t_k) v_theta(...)`.
 The transition rule, grid, and all noise streams are part of sampler identity.
 
-For the proposed DMD backward simulation, select a grid index, generate its
+For the implemented DMD backward simulation, select a grid index, generate its
 prefix without gradients, detach the state at that index, and differentiate
 only that step's clean prediction. Training inputs then follow the deployed
 student sampler. The DMD renoise time is a separate draw from the selected
 generator grid index; NFT forward-noising time is another distinct input.
-Their distributions and update schedules remain to be specified.
+Plain DMD uses an explicit selected-index PMF, bounded uniform score times and
+a configured fake-update ratio; NFT remains later implementation work.
 
 RT-DM must associate a complete rollout score with the corresponding trajectory
 and selected generator update. The proposed [detached-state procedure](#detached-rollout-state)
-below makes this association explicit; the reward transform and full objective
-derivation remain open. NFT learns from terminal latents and needs no gradient
+below makes this association explicit; its reward-transform implementation and
+qualification remain later work. NFT learns from terminal latents and needs no gradient
 through their rollout.
 
 ## Initial data and sampler interfaces
@@ -283,9 +281,8 @@ can be drawn after scoring and is not required in the collection record.
 
 NFT needs the terminal latent, conditioning, rewards/group identity, and frozen
 old-policy role; its loss does not need the selected RT-DM input. Its configured
-training epochs and old-policy refresh are a separate contract. Exact RT-DM
-reward transforms, selected-step distribution, DMD reductions, and fake-score
-ordering still belong to the objective derivation before training implementation.
+training epochs and old-policy refresh are a separate contract. RT-DM reward weighting remains later implementation work. Plain-DMD selected-step
+distribution, global reductions and fake-score ordering are implemented below.
 
 ## Sampling/scoring implementation contract
 
@@ -318,8 +315,8 @@ shape's shift is `max(1, sqrt((latent_height * latent_width / 4) / 256))`, appli
 once when the arm selects shape shift; unshifted grids are explicit. CFG uses
 true empty-prompt conditioning through the same encoder contract. Initial noise uses the prompt seed; transition noise
 uses separate SHA256-derived seeds. The student harness retains one uniformly
-assigned step for interface qualification; the cold-start training step
-distribution will be derived with its objective.
+assigned step for interface qualification; plain-DMD training selects from its
+explicit configured PMF.
 
 The generation record includes prompt/sample/policy identity, grid, shape,
 noise specification, terminal and selected-step tensors, and image/latent
@@ -342,13 +339,12 @@ content hashes, reuses completed records, and resubmits unresolved work within i
 Each attempt is charged durably before transport; successful rows survive a
 partial batch failure, and retries preserve request/seed identity.
 Exhausted score failures remain recorded; a restart does not silently grant a
-new retry budget. Temporary/unrecorded generation is recollected. Training
-recovery will initially restart incomplete collection from the preceding
-committed round boundary; optimizer-state recovery belongs to 6.1.3.
+new retry budget. Temporary/unrecorded generation is recollected. Plain-DMD training restarts incomplete collection from the preceding committed
+round boundary and restores optimizer state, per-rank RNG and prompt cursor.
 
 This inference harness performs no learner DDP updates. Its memory measurements
-cover the resident generator, text encoder, VAE, and scorers. Trainable/frozen
-DMD and NFT role memory must be measured when those increments are implemented.
+cover the resident generator, text encoder, VAE, and scorers. DMD training memory is reported separately in the recipe; NFT role memory
+remains unqualified.
 
 ## Model roles and gradients
 
@@ -383,10 +379,69 @@ equations and evidence here as each training increment is implemented and qualif
 | DiffusionNFT | Specify positive/negative implicit predictions, old-policy detachment, grouped score-to-optimality mapping, branch normalization, and refresh schedule. |
 | Joint objective | Starting form: `L_DMD + lambda_NFT * L_NFT`. Fix each term's reduction before interpreting the coefficient; record gradient contributions as diagnostics. |
 
-The exact objectives, reductions across samples/ranks/accumulation, numerical
-guards, and stage-transition behavior are open. Distinguish an intentional
+Plain-DMD objectives, reductions and guards are specified below. Reward-weighted
+objectives and stage-transition behavior remain later implementation work. Distinguish an intentional
 algorithm change from a numerical implementation detail. Record any departure
 from the selected reference and the reason for it.
+
+## Implemented plain DMD
+
+For Inko time `t` (noise at zero, data at one), a velocity prediction gives
+`clean(x,t) = x + (1-t)v(x,t)`. Let `y` be the selected student clean prediction,
+`z = t·stopgrad(y) + (1-t)ε`, and `r`, `f` be the detached real/fake clean
+predictions at `(z,t)`. The configured generator direction is one of:
+
+- `clean_difference`: `g = f-r`.
+- `teacher_residual`: `g = (f-r)/(mean_elements(abs(y-r))+epsilon)`, per sample.
+- `score_kl`: `g = t²/(1-t)² · (f-r)`, the explicit flow-coordinate score factor.
+
+Backpropagate `0.5·mean_elements((y-stopgrad(y-g))²)`. Its derivative is `g`
+divided by the latent element count. Minimize the global mean across samples.
+Teacher and fake forwards have no generator gradient. Score times are uniform
+within explicit open-endpoint bounds; nonfinite directions fail without repair.
+
+Collection holds the student fixed, samples a selected index from the explicit
+PMF, and retains its input/time plus conditioning and terminal latent. Euler or
+clean-prediction renoise prefixes are detached. Recompute only that selected
+student prediction with gradients after the fake updates. Fake learning uses
+either the detached selected clean prediction or terminal latent `y_target`,
+fresh independent time/noise, and `mean_elements((v_fake-(y_target-ε))²)`.
+Each round performs `q` fake steps, then one student step, then evaluation EMA.
+All random streams identify round, sample and role; noise is generated from
+keyed CPU seeds so packing does not change draws.
+
+Full student tuning trains all parameters. Weight LoRA freezes the base and
+adds `B(A(input))·alpha/rank` to resolved fused QKV/output projections, optionally
+including MLP projections. A uses Kaiming initialization and B is zero. The
+teacher-Q/V fake strategy instead adapts projected Q and V at full hidden width
+before head splitting, normalization and RoPE; K is unchanged. Its frozen real
+view sets the adapter scale to zero. The independent-full-fake strategy owns a
+separate trainable teacher copy. DynaDG is not enabled by either strategy.
+
+Resident learner replicas alone join DDP. With L learners and N global samples,
+each backward uses `L/N` times its local sample sum; DDP averaging produces the
+global mean without another accumulation divisor. Round divisibility ensures
+matching collective schedules. FP32 master weights, losses and reductions are
+separate from configured BF16 forward autocast. Each role has its own optimizer,
+clip limit and successful-update LR clock. All of that role's loss, parameters,
+gradients and optimizer state must be finite before any optimizer steps.
+
+Complete-round checkpoints retain role weights/adapters, optimizer state and
+clocks, EMA, cursor/permutation, per-rank RNG, source/config/runtime/artifact
+identities and sample counts. Attempt journals retain discarded work. Files are
+fsynced before publishing a manifest and atomically renaming the checkpoint;
+incomplete directories are never recovery points. Resume rejects changed
+contracts and verifies exact restoration before collecting again. Deterministic
+kernel and HCCL policies are explicit in configuration. Student/fake DDP wrappers
+receive a zero-loss setup backward before initialization or restore so their
+first real forward uses the steady reduction layout. Setup gradients are cleared
+and RNG restored without optimizer, cursor or clock updates. Numerical
+repeatability remains a measured property separate from exact state restoration.
+
+Exports merge only student weight LoRA, optionally substitute evaluation EMA,
+and verify an exact reload of the materialized FP32 weights. Fake Q/V adapters
+never enter an inference export. The export manifest pins initialization,
+architecture, tuning, resolved parameter names and source checkpoint identity.
 
 ## Reward and rollout records
 
