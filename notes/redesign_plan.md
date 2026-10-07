@@ -69,7 +69,7 @@ one strict run config covering the entire resolution curriculum.
 | 3.5: captions and buckets | Complete | Multi-caption row sampling, length curriculum and variable-aspect planning. |
 | 4: Ascend qualification | Reference workloads and 640p restart verified | 16×910B2C plans, native transitions, recovery and monitoring; the 640p continuation passes all-rank restore and initial updates. The configured 896p pool needs its own qualification. |
 | 5: pretraining | 640p continuation | Migrated 480k input, audited source weights, explicit sampler rebuild and exact all-rank restoration in `inko`; monitor through the 570k boundary. |
-| 6: post-training | Contract and evaluation scaffolding | Sampling/measurement, DMD, RT-DM/DynaDG/DynaRS cold start, then NFT+DMD and comparative experiments; 640p pilot before final 896p qualification. |
+| 6: post-training | Layer 1: full specification closed; sampling/scoring qualification next | Independently reviewed design includes full/LoRA training and independent scorer services; qualify implementation before variant selection, hardware efficiency, real-run preparation, and the monitored run. |
 | 7: publication | Pending completed training | Final inference pipeline, model release and demo. |
 
 The following measurements explain retained choices; their experimental
@@ -133,22 +133,32 @@ comparison axes. The exact losses and state transitions will be specified in the
 [contract](posttrain_contract.md); benchmark and generation evidence determine
 selection under the [evaluation protocol](posttrain_evaluation.md).
 
-Develop through sampling and measurement, minimal distribution matching,
-complete cold start, and joint training before broader comparisons. These are
-implementation increments inside Stage 6, distinct from the two training stages.
+Organize Stage 6 into four work layers, distinct from the two training stages:
+
+1. Algorithm implementation, experiments, and comparisons to select the
+   algorithm, including a small initial prompt suite, scorer, and benchmark.
+2. An infrastructure pass to optimize the complete pipeline on target hardware.
+3. Real-run prompt/evaluation suite and scorer preparation, with infrastructure
+   recalibration where scorer throughput or workload shape changes.
+4. Launch the real run, monitor/recover it, and perform final evaluation.
+
+Current work is layer 1. Develop through sampling/scoring, minimal distribution
+matching, complete cold start, and joint training before broader comparisons.
 Core logic, including reward/score clients, belongs in `src/posttrain/`;
 benchmarks belong in `src/evaluation/benchmarks/`; rollout prompts belong in
 `configs/prompts/`. The planned trainer uses complete explicit configs.
 
-Qualify real rollout/decode, score acquisition, training updates, distributed
-execution, and recovery on Ascend. Measure memory, compute, synchronization,
-and reward waiting before choosing the topology and experiment budgets. Scorer
-placement and any asynchronous execution follow measured workload needs.
+Start with a preserved checkpoint and the small evaluation protocol. Full-run
+data preparation and completion of a particular pretraining endpoint do not
+block algorithm development. Keep each comparison's teacher and evaluation
+conditions fixed; qualify transfer when changing resolution or teacher.
 
-Use preserved intermediate weights for infrastructure bring-up, the 570k
-endpoint for the 640p pilot, and the completed 600k teacher for final 896p
-decisions. The pilot informs cold-start transition timing and candidate settings;
-transfer to the final resolution requires its own evidence.
+Layer 1 establishes resident learner/scorer groups and explicit rank allocation,
+including enough timing/memory and recovery evidence to run sound experiments.
+Layer 2 tunes end-to-end throughput, including rollout/decode,
+score waiting, training, and synchronization. Layer 3 prepares the intended
+real workload and repeats affected measurements before setting the main budget.
+The final run uses the selected completed-pretraining teacher and recipe.
 
 Exit: a selected 8-step checkpoint with reproducible config and inference
 settings, held-out benchmarks and image review, domain/diversity evidence,

@@ -1,0 +1,29 @@
+{
+  "repository": "https://github.com/NVlabs/DiffusionNFT",
+  "revision": "cbb14f84b8312b620390dfcbe2fab69c1383b104",
+  "sources": {
+    "dataset/pickscore/train.txt": "2f425adcbb9a6d0feee7c6c448e1cb83a1f71deca9434b803907e2578eca837f",
+    "dataset/drawbench/test.txt": "9006b98feabb94b28a2bc0c88de42fd4f31a9ec3c2a19e308a02c5385b7172f0"
+  },
+  "monitor_sha256": "170e250f28e7e2a841e535bd76890947ac4546161788db05af0b23ace7f415d7",
+  "outputs": {
+    "posttrain_rollout.jsonl": {
+      "count": 512,
+      "sha256": "94bfc99161c97c931f7b607d899531abe31e556cf5f384196689d6a8bab756ac"
+    },
+    "posttrain_rollout_bringup.jsonl": {
+      "count": 32,
+      "sha256": "c1441361041f58c2bcd6c45ddc672234957762ded92e22a8354e9fe20c62179a"
+    },
+    "posttrain_drawbench.jsonl": {
+      "count": 200,
+      "sha256": "7e7392e20941e7b45bf7e4a2c8d0511f6fcfce8dde3b118e006767f275651302"
+    },
+    "posttrain_drawbench_bringup.jsonl": {
+      "count": 16,
+      "sha256": "2ab710c967fdbec1a73ba48e4ea305c2a8ae5d84562aa86f3d7641c6d441cb45"
+    }
+  },
+  "selection": "NFKC/casefold/whitespace deduplication; exclude development and monitor exact-normalized texts; SHA256(namespace:text) ordering",
+  "overlap_scope": "Exact-normalized exclusion only; semantic paraphrase overlap is not certified."
+}

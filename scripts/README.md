@@ -5,6 +5,17 @@ Each command documents its arguments through `--help`. Run corpus processing
 where the data is mounted. Platform setup and credentials are in the local
 `INSPIRE.md`; training settings come from one complete run TOML.
 
+## Posttraining preparation (`scripts/posttrain/`)
+
+| Command | Purpose |
+|---|---|
+| `posttrain.prepare_prompts` | Rebuild the fixed small rollout/DrawBench manifests from the pinned reference prompt source. |
+| `posttrain.prepare_assets` | Download pinned scorer sources/weights and write a machine-local artifact map without changing installed runtimes. |
+
+The standalone harness is `python -m src.evaluation.benchmarks.run`.
+Its current commands and qualification limits are in
+[the posttraining recipe](../notes/posttrain_recipe.md#samplingscoring-commands).
+
 ## Pretraining (`scripts/pretrain/`)
 
 | Command | Purpose |
