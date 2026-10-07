@@ -1,9 +1,9 @@
 # Posttraining mathematical and execution contract
 
-Status: independent sampling/scoring services and plain-DMD training are
+Status: independent sampling/scoring services and cold DMD/RT-DM training are
 implemented. The DMD contract below covers full/LoRA students, fake-score roles,
-learner-only DDP, optimizer clocks, complete-round recovery and export. RT-DM,
-dynamic cold-start controls and NFT remain later implementation work.
+learner-only DDP, optimizer clocks, complete-round recovery and export. Independent
+RT-DM/DynaDG/DynaRS controls are implemented; NFT remains later work.
 Numerical choices belong in the runnable config; this contract defines their
 meaning. See the [recipe](posttrain_recipe.md) and
 [evaluation protocol](posttrain_evaluation.md).
@@ -34,7 +34,9 @@ scorer through caller configuration; an unfamiliar upstream API needs an isolate
 adapter. Scorer model/rubric identity enters score provenance and cache identity.
 Config-only substitution through collection/evaluation and later reward/NFT
 paths is required qualification. The independent services and generic client satisfy collection/evaluation
-substitution; production reward and NFT substitution remain later gates.
+substitution. An unfamiliar service/channel also has HTTP mechanism coverage
+through cold reward transformation and update admission. Grouped NFT
+substitution remains a later gate; this does not qualify a real VLM backend.
 
 ## Flow convention
 
@@ -111,11 +113,12 @@ generator grid index; NFT forward-noising time is another distinct input.
 Plain DMD uses an explicit selected-index PMF, bounded uniform score times and
 a configured fake-update ratio; NFT remains later implementation work.
 
-RT-DM must associate a complete rollout score with the corresponding trajectory
-and selected generator update. The proposed [detached-state procedure](#detached-rollout-state)
-below makes this association explicit; its reward-transform implementation and
-qualification remain later work. NFT learns from terminal latents and needs no gradient
-through their rollout.
+Implemented RT-DM associates a complete rollout score with the corresponding
+trajectory and selected generator update through the
+[detached-state procedure](#detached-rollout-state). Global reward transforms
+and selected-call replay have mechanism and real cold-path qualification.
+NFT remains later implementation work; it learns from terminal latents and
+needs no gradient through their rollout.
 
 ## Initial data and sampler interfaces
 
@@ -246,20 +249,23 @@ The inspected references establish different parts of the execution pattern:
   detached reward weighting using the completed few-step rollout, but does not
   specify a replay-buffer layout.
 
-Proposed Inko RT-DM procedure: combine a detached full rollout with a single
+Implemented Inko RT-DM procedure: combine a detached full rollout with a single
 recomputed generator call. This is an explicit adaptation, not an assertion
 that the local DMDR demo implements this procedure.
 
 1. Select the generator training index `k` independently of the resulting reward.
    Run the configured full trajectory under `no_grad` with fixed student weights.
    Save the actual noisy input `x_k` immediately before its generator call,
-   together with `k`, physical time `t_k`, and conditioning identity.
+   together with `k`, physical time `t_k`, its actual clean prediction, and
+   conditioning identity.
 2. Retain the terminal normalized latent `x_terminal`; decode and score that
    terminal output. Both scorer requests reference the same sample and round.
 3. Once required scores are joined, recompute
    `y_k = x_k + (1 - t_k) v_theta(x_k, t_k, c)` with gradients, treating saved
    `x_k` as constant. Keep student weights and forward settings identical to
    collection; disable stochastic model behavior or retain its replay RNG state.
+   The recomputed prediction must equal the retained selected-call prediction
+   exactly under the declared execution policy. A mismatch aborts the round.
 4. Draw the separate DMD renoise time/noise, compute detached teacher/fake-score
    targets, and weight the per-sample DMD surrogate by the detached terminal
    reward transform before reducing across samples.
@@ -270,8 +276,8 @@ that the local DMDR demo implements this procedure.
    own explicit algorithm contract. Fake-score updates follow their separately
    specified schedule.
 
-The learner therefore retains two detached latent tensors per RT-DM sample:
-the selected noisy input and terminal latent, plus conditioning (or an immutable
+The learner therefore retains three detached latent tensors per RT-DM sample:
+the selected noisy input, selected clean prediction and terminal latent, plus conditioning (or an immutable
 cache reference), step/time, sample/round identity, policy version, and score
 records. Weights are retained once per policy role, not copied per sample. Keep
 the scored image or reproducible decode inputs available for retries. Generation
@@ -281,7 +287,7 @@ can be drawn after scoring and is not required in the collection record.
 
 NFT needs the terminal latent, conditioning, rewards/group identity, and frozen
 old-policy role; its loss does not need the selected RT-DM input. Its configured
-training epochs and old-policy refresh are a separate contract. RT-DM reward weighting remains later implementation work. Plain-DMD selected-step
+training epochs and old-policy refresh are a separate contract. Cold reward weighting, selected-step
 distribution, global reductions and fake-score ordering are implemented below.
 
 ## Sampling/scoring implementation contract
@@ -379,10 +385,11 @@ equations and evidence here as each training increment is implemented and qualif
 | DiffusionNFT | Specify positive/negative implicit predictions, old-policy detachment, grouped score-to-optimality mapping, branch normalization, and refresh schedule. |
 | Joint objective | Starting form: `L_DMD + lambda_NFT * L_NFT`. Fix each term's reduction before interpreting the coefficient; record gradient contributions as diagnostics. |
 
-Plain-DMD objectives, reductions and guards are specified below. Reward-weighted
-objectives and stage-transition behavior remain later implementation work. Distinguish an intentional
-algorithm change from a numerical implementation detail. Record any departure
-from the selected reference and the reason for it.
+Plain-DMD and reward-weighted RT-DM objectives, reductions and guards are
+implemented and specified below. NFT and stage-transition behavior remain later
+implementation work. Distinguish an intentional algorithm change from a
+numerical implementation detail. Record any departure from the selected
+reference and the reason for it.
 
 ## Implemented plain DMD
 
@@ -416,7 +423,8 @@ including MLP projections. A uses Kaiming initialization and B is zero. The
 teacher-Q/V fake strategy instead adapts projected Q and V at full hidden width
 before head splitting, normalization and RoPE; K is unchanged. Its frozen real
 view sets the adapter scale to zero. The independent-full-fake strategy owns a
-separate trainable teacher copy. DynaDG is not enabled by either strategy.
+separate trainable teacher copy. DynaDG is a separate explicit switch requiring
+the teacher-Q/V strategy; fake capacity alone does not enable it.
 
 Resident learner replicas alone join DDP. With L learners and N global samples,
 each backward uses `L/N` times its local sample sum; DDP averaging produces the
@@ -469,6 +477,53 @@ reward-normalization state, and any retained rollout/reward work. Record the
 complete config, code revision, and input artifact hashes. Define whether an
 interrupted collection round is restored or explicitly discarded and recollected.
 Recovery and a deliberate experimental branch are separate operations.
+
+## Cold reward and dynamic-control contract
+
+`objective.mode` independently selects `dmd` or `rtdm`; `dyna_dg.enabled` and
+`dyna_rs.enabled` are independent of that choice. All eight toggle combinations
+are supported with teacher-Q/V fake score. Full independent fake is incompatible
+with DynaDG and remains usable when that control is disabled. NFT is rejected.
+
+RT-DM decodes the detached terminal normalized latent with the pinned frozen VAE.
+Each learner publishes immutable PNG/latent identities and retains conditioning
+and selected replay state. The CPU coordinator acquires scores through the shared
+client and admits the complete global round before any optimizer update. Failed
+or missing required channels abort; they never become zero rewards or dropped
+samples. Raw channels and service identities remain separate from rewards.
+
+Orient each configured channel by its declared `higher`/`lower` direction. With
+round standardization, use population mean/std over all N samples and
+`(oriented-mean)/(std+epsilon_reward)`; constant channels become zero. Mix with
+explicit nonnegative weights summing to one. Statistics, transformed values,
+combined rewards and weights are retained. Canonical sample-ID ordering makes
+normalization independent of rank packing and score completion order.
+
+For positive temperature, `mean_one_exp` uses
+`w = N*softmax((reward-max(reward))/temperature)` in FP32. `paper_max_exp` uses
+`exp(reward/max(reward))`; it requires raw, nonnegative combined rewards with a
+positive global maximum and is incompatible with standardized channels. Its
+weights are not mean-normalized. The student objective is the global mean of
+detached weights times per-sample DMD loss; fake regression stays unweighted.
+Weight concentration and effective sample size are observations, not controls.
+
+DynaDG's real adapter scale is
+`a_start*0.5*(1+cos(pi*min(g/H_dg,1)))`, where g counts committed cold student
+updates. Disabled DynaDG uses real scale zero; fake scale stays one. Scoped views
+restore after exceptions and reject overlapping views or cross-thread forwards.
+The base teacher stays frozen.
+
+DynaRS draws a sample-local host Beta noise coordinate with
+`alpha=1+(alpha_start-1)*c(g)` and `beta=1+(beta_start-1)*c(g)`, using its own
+cosine horizon, then maps `t=t_min+(t_max-t_min)*(1-u)`. The host draw is cast to
+FP32 before latent arithmetic. Disabled DynaRS uses uniform physical time on
+the same bounds. Fake and DMD streams remain separate; all q fake updates use
+the same schedule point. Neither control changes the sampler grid/index PMF.
+
+Checkpoint state includes generator/fake clocks, dynamic schedule definitions
+and current point, last global reward statistics and scored/used sample counts.
+An interrupted round is discarded and recollected from the last committed
+boundary; attempted work and retry accounting remain recorded.
 
 ## Verification and references
 

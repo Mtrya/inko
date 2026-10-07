@@ -1,4 +1,4 @@
-"""Run explicit sampling qualification cases or submit their single guarded job."""
+"""Run explicit sampling/cold qualification cases or submit one guarded job."""
 
 import argparse
 import json
@@ -23,14 +23,14 @@ def validate_matrix(matrix):
     )
     for case in matrix["cases"]:
         require(
-            case.get("kind") in {"sampling", "dmd"},
+            case.get("kind") in {"sampling", "cold"},
             "explicit qualification case kind required",
         )
-        if case["kind"] == "dmd":
+        if case["kind"] == "cold":
             require(
                 set(case)
                 == {"kind", "config", "assets", "output", "resume", "stop_after"},
-                "invalid DMD case fields",
+                "invalid cold training case fields",
             )
             config = load_training_config(case["config"])
             require(
@@ -79,7 +79,7 @@ def execute_cases(matrix):
     from src.evaluation.benchmarks.run import REPO, run
 
     for case in matrix["cases"]:
-        if case["kind"] == "dmd":
+        if case["kind"] == "cold":
             argv = [
                 sys.executable,
                 "-m",

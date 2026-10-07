@@ -85,3 +85,18 @@ muon_momentum = 0.95
 schedule = "constant"
 warmup_steps = 0
 minimum_ratio = 0.1
+
+[rewards]
+channels = []
+epsilon = 1e-4
+weighting = "mean_one_exp"
+temperature = 1.0
+[dyna_dg]
+enabled = false
+horizon = 2
+start_scale = 1.0
+[dyna_rs]
+enabled = false
+horizon = 2
+alpha_start = 4.0
+beta_start = 1.0

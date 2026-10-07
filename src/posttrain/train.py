@@ -1,4 +1,4 @@
-"""Single-host plain DMD with resident learner-only DDP and round recovery."""
+"""Single-host cold DMD/RT-DM with resident learners and independent scorers."""
 
 import argparse
 import fcntl
@@ -34,6 +34,8 @@ def learner(
     from .optim import RoleOptimizer
     from .roles import Roles
     from .rollout import PromptCursor, collect, tensor_digest
+    from .round_scoring import publish_collection, wait_for_rewards
+    from .schedules import cold_point
 
     device = set_device(
         assets["device_type"],
@@ -89,6 +91,21 @@ def learner(
         tokenizer = AutoTokenizer.from_pretrained(
             assets["text_encoder"], local_files_only=True
         )
+        vae = stats = None
+        if config.objective.mode == "rtdm":
+            from diffusers import AutoencoderKLQwenImage
+
+            from src.utils.vae_codec import get_vae_stats
+
+            vae = (
+                AutoencoderKLQwenImage.from_pretrained(
+                    assets["vae"], torch_dtype=dtype, local_files_only=True
+                )
+                .to(device)
+                .eval()
+                .requires_grad_(False)
+            )
+            stats = get_vae_stats(assets["vae"], device)
         # Prime both wrappers before initialization or restore so every real
         # update uses the steady reduction layout, including the first resumed
         # update. This is setup work: no cursor, role clock or optimizer steps.
@@ -144,6 +161,7 @@ def learner(
         )
         cursor = PromptCursor(len(contract["prompts"]), seed)
         step = 0
+        last_reward = None
 
         def state():
             return {
@@ -158,7 +176,13 @@ def learner(
                 "stage_generator_steps": step,
                 "global_generator_steps": so.steps,
                 "fake_steps": fo.steps,
-                "samples_scored": 0,
+                "samples_scored": step
+                * config.collection.prompts_per_round
+                * config.collection.draws_per_prompt
+                if config.objective.mode == "rtdm"
+                else 0,
+                "last_reward": last_reward,
+                "cold_schedule": cold_point(config, step),
                 "samples_used": step
                 * config.collection.prompts_per_round
                 * config.collection.draws_per_prompt,
@@ -179,6 +203,7 @@ def learner(
                 for name, value in roles.ema.items():
                     value.copy_(saved["ema"][name].to(device))
             step = saved["step"]
+            last_reward = saved["last_reward"]
             cursor.load_state_dict(rank_saved["cursor"])
             checkpoint.assert_exact(saved, state())
             checkpoint.restore_rng(rank_saved["rng"], device)
@@ -275,9 +300,26 @@ def learner(
                         device,
                     )
                 )
+            reward_weights = None
+            if config.objective.mode == "rtdm":
+                records = publish_collection(
+                    config,
+                    rollouts,
+                    {p["id"]: p for p in contract["prompts"]},
+                    vae,
+                    stats,
+                    output,
+                    attempt,
+                    step,
+                    rank,
+                )
+                reward_weights, last_reward = wait_for_rewards(
+                    config, output, attempt, step, rank, records
+                )
             evidence = update_round(
-                config, roles, student, fake, rollouts, so, fo, step
+                config, roles, student, fake, rollouts, so, fo, step, reward_weights
             )
+            evidence["reward"] = last_reward
             step += 1
             synchronize(device)
             evidence.update(
@@ -341,7 +383,8 @@ def learner(
 def launch(
     config, assets, contract, output, resume, stop_after, config_path, assets_path
 ):
-    from .scoring.lifecycle import isolated_environment
+    from .round_scoring import score_ready_round
+    from .scoring.lifecycle import Services, isolated_environment
 
     output.mkdir(parents=True, exist_ok=True)
     with (output / ".writer.lock").open("a") as lock:
@@ -370,7 +413,23 @@ def launch(
             environment["HCCL_DETERMINISTIC"] = (
                 "true" if config.execution.deterministic_algorithms else "false"
             )
+        services = Services(
+            config.scorers,
+            assets.get("services", {}),
+            output,
+            config.execution.learner_devices,
+            config.execution.startup_timeout,
+        )
+        next_score_step = 0
+        if resume:
+            from .checkpoint import inspect
+
+            next_score_step = inspect(resume)["step"]
         try:
+            services.__enter__()
+            atomic_json(
+                output / "service_startup" / f"{attempt}.json", services.startup
+            )
             for rank in range(len(config.execution.learner_devices)):
                 log = (output / f"{attempt}-learner-{rank:03d}.log").open("w")
                 logs.append(log)
@@ -402,6 +461,15 @@ def launch(
                 )
             started = time.time()
             while any(p.poll() is None for p in processes):
+                services.check()
+                if (
+                    config.objective.mode == "rtdm"
+                    and next_score_step < stop_after
+                    and score_ready_round(
+                        config, services, output, attempt, next_score_step
+                    )
+                ):
+                    next_score_step += 1
                 for rank, process in enumerate(processes):
                     if process.poll() is not None:
                         continue
@@ -445,6 +513,7 @@ def launch(
                     process.wait()
             for log in logs:
                 log.close()
+            services.close()
     return {
         "completed_step": stop_after,
         "attempt": attempt,

@@ -1,6 +1,7 @@
 """Separate weight LoRA and post-projection Q/V score parameterizations."""
 
 import math
+import threading
 from contextlib import contextmanager
 
 import torch
@@ -51,8 +52,13 @@ class OutputQV(nn.Module):
         for layer in (self.qb, self.vb):
             nn.init.zeros_(layer.weight)
         self.multiplier, self.view_scale = multiplier, 1.0
+        self.view_owner = None
 
     def forward(self, x):
+        if self.view_owner is not None and self.view_owner != threading.get_ident():
+            raise RuntimeError(
+                "score forward overlaps a different worker thread's view"
+            )
         q, k, v = self.base(x).chunk(3, dim=-1)
         if self.view_scale != 0:
             scale = self.multiplier * self.view_scale
@@ -100,21 +106,54 @@ def install_adapters(model, *, kind, rank, scale, targets="attention"):
     return tuple(selected)
 
 
+def prepare_score_views(model):
+    """Only shared Q/V models need a lock; student exports remain copyable."""
+    if any(isinstance(m, OutputQV) for m in model.modules()):
+        model.__dict__.setdefault("_score_forward_lock", threading.RLock())
+
+
+@contextmanager
+def score_forward(model, *, real=False):
+    """Hold view admission through the complete conditional/CFG forward."""
+    lock = model.__dict__.get("_score_forward_lock")
+    if lock is None:
+        yield
+        return
+    if not lock.acquire(blocking=False):
+        raise RuntimeError("overlapping score forwards/views are forbidden")
+    try:
+        active = model.__dict__.get("_score_view_owner") is not None
+        if real != active:
+            raise RuntimeError("score forward role does not match the active view")
+        yield
+    finally:
+        lock.release()
+
+
 @contextmanager
 def score_view(model, scale):
     adapters = [m for m in model.modules() if isinstance(m, OutputQV)]
-    if getattr(model, "_score_view_active", False):
+    if not adapters:
+        raise ValueError("score views require shared Q/V adapters")
+    prepare_score_views(model)
+    lock = model.__dict__["_score_forward_lock"]
+    if not lock.acquire(blocking=False):
         raise RuntimeError("overlapping score views are forbidden")
-    model._score_view_active = True
-    previous = [m.view_scale for m in adapters]
+    if model.__dict__.get("_score_view_owner") is not None:
+        lock.release()
+        raise RuntimeError("overlapping score views are forbidden")
+    previous = [(m.view_scale, m.view_owner) for m in adapters]
     try:
+        model.__dict__["_score_view_owner"] = threading.get_ident()
         for m in adapters:
             m.view_scale = scale
+            m.view_owner = threading.get_ident()
         yield model
     finally:
-        for m, old in zip(adapters, previous, strict=True):
-            m.view_scale = old
-        model._score_view_active = False
+        for m, (old, owner) in zip(adapters, previous, strict=True):
+            m.view_scale, m.view_owner = old, owner
+        model.__dict__["_score_view_owner"] = None
+        lock.release()
 
 
 def merge_student(model):

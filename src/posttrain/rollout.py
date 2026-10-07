@@ -5,14 +5,14 @@ from dataclasses import dataclass
 
 import torch
 
-from .objectives.dmd import clean_prediction
 from .records import identity
 from .sampling import sample, sample_noise, time_grid
+from .schedules import cold_point, time_draws
 
 
 def stream_seed(seed, round_index, sample_id, stream, update=0):
     payload = [
-        "dmd-cpu-fp32-v1",
+        "cold-cpu-fp32-v2",
         seed,
         "cold",
         round_index,
@@ -124,17 +124,6 @@ def collect(
         device=device,
         selected_indices=indices,
     )
-    selected = clean_prediction(
-        result.selected_input,
-        result.selected_times,
-        field(
-            result.selected_input,
-            result.selected_times,
-            conditioning,
-            unconditional,
-            c.guidance,
-        ),
-    )
     return TrainingRollout(
         sample_ids,
         [p["id"] for p in prompts],
@@ -143,7 +132,7 @@ def collect(
         result.selected_input,
         result.selected_times,
         result.selected_indices,
-        selected.detach(),
+        result.selected_prediction.detach(),
         result.terminal,
         conditioning,
         unconditional,
@@ -155,11 +144,10 @@ def score_inputs(config, rollout, round_index, stream, update):
         stream_seed(config.training.seed, round_index, key, stream, update)
         for key in rollout.sample_ids
     ]
-    draws = torch.stack(
-        [torch.rand((), generator=torch.Generator().manual_seed(s)) for s in seeds]
-    )
     o = config.objective
-    times = (o.time_min + (o.time_max - o.time_min) * draws).to(rollout.terminal.device)
+    times = time_draws(
+        seeds, cold_point(config, round_index), o.time_min, o.time_max
+    ).to(rollout.terminal.device)
     noise = sample_noise(
         seeds,
         tuple(rollout.terminal.shape[1:]),

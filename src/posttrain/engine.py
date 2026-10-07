@@ -1,4 +1,4 @@
-"""One plain-DMD round: fixed-student collection, fake updates, student update."""
+"""One cold round: fixed-student collection, fake updates, student update."""
 
 from contextlib import nullcontext
 
@@ -12,7 +12,9 @@ from .objectives.dmd import (
     forward_noise,
     surrogate,
 )
+from .objectives.rtdm import verify_replay, weighted_losses
 from .rollout import score_inputs, tensor_digest
+from .schedules import cold_point
 
 
 def accumulation(model, last):
@@ -20,12 +22,39 @@ def accumulation(model, last):
 
 
 def update_round(
-    config, roles, student, fake, rollouts, student_optimizer, fake_optimizer, step
+    config,
+    roles,
+    student,
+    fake,
+    rollouts,
+    student_optimizer,
+    fake_optimizer,
+    step,
+    reward_weights=None,
 ):
     if not rollouts or any(r.student_version != step for r in rollouts):
         raise ValueError("stale or empty student collection")
     total = config.collection.prompts_per_round * config.collection.draws_per_prompt
     device = rollouts[0].terminal.device
+    point = cold_point(config, step)
+    if config.objective.mode == "rtdm" and reward_weights is None:
+        raise ValueError(
+            "RT-DM requires complete global rewards before any optimizer update"
+        )
+    if config.objective.mode == "rtdm":
+        expected = {
+            f"{step}:{slot}:{draw}"
+            for slot in range(config.collection.prompts_per_round)
+            for draw in range(config.collection.draws_per_prompt)
+        }
+        if (
+            set(reward_weights) != expected
+            or not bool(
+                torch.isfinite(torch.tensor(list(reward_weights.values()))).all()
+            )
+            or min(reward_weights.values()) < 0
+        ):
+            raise ValueError("RT-DM requires the complete finite global weight set")
     student_optimizer.zero_grad()
     fake_optimizer.zero_grad()
     inputs = []
@@ -93,12 +122,13 @@ def update_round(
                     config.collection.guidance,
                 ),
             )
+            verify_replay(predicted, rollout.selected_prediction)
             with torch.no_grad():
                 z = forward_noise(predicted, times, noise)
                 fake_clean = clean_prediction(
                     z, times, roles.fake_field(z, times, rollout.conditioning)
                 )
-                with roles.real_view():
+                with roles.real_view(point["real_scale"]):
                     real_clean = clean_prediction(
                         z,
                         times,
@@ -118,7 +148,16 @@ def update_round(
                     estimator=config.objective.estimator,
                     epsilon=config.objective.epsilon,
                 )
-            loss = global_loss(surrogate(predicted, gradient), total)
+            losses = surrogate(predicted, gradient)
+            if config.objective.mode == "rtdm":
+                losses = weighted_losses(
+                    losses,
+                    torch.tensor(
+                        [reward_weights[key] for key in rollout.sample_ids],
+                        device=device,
+                    ),
+                )
+            loss = global_loss(losses, total)
             loss.backward()
             loss_total += loss.detach()
     if any(p.grad is not None for p in roles.fake.parameters()):
@@ -132,4 +171,6 @@ def update_round(
         "student_grad_norm": student_norm,
         "fake_grad_norms": fake_norms,
         "inputs": inputs,
+        "cold_schedule": point,
+        "selected_replay_exact": True,
     }

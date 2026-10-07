@@ -6,17 +6,22 @@ from contextlib import nullcontext
 import torch
 from torch import nn
 
-from .adapters import install_adapters, score_view
+from .adapters import install_adapters, prepare_score_views, score_forward, score_view
 
 
 class Velocity(nn.Module):
-    def __init__(self, model, precision):
+    def __init__(self, model, precision, *, real=False):
         super().__init__()
         self.model, self.precision = model, precision
+        self.real = real
+        prepare_score_views(model)
 
     def forward(self, x, t, conditioning, unconditional=None, guidance=1.0):
         dtype = getattr(torch, self.precision)
-        with torch.autocast(x.device.type, dtype=dtype, enabled=dtype != torch.float32):
+        with (
+            score_forward(self.model, real=self.real),
+            torch.autocast(x.device.type, dtype=dtype, enabled=dtype != torch.float32),
+        ):
             output = self.model(x, t.float(), *conditioning).float()
             if guidance != 1:
                 if unconditional is None:
@@ -55,7 +60,9 @@ class Roles:
             model.activation_checkpointing = config.execution.activation_checkpointing
         self.student_field = Velocity(self.student, config.execution.precision)
         self.fake_field = Velocity(self.fake, config.execution.precision)
-        self.teacher_field = Velocity(self.teacher, config.execution.precision)
+        self.teacher_field = Velocity(
+            self.teacher, config.execution.precision, real=True
+        )
         self.ema = (
             {
                 name: p.detach().clone()
@@ -66,8 +73,10 @@ class Roles:
             else None
         )
 
-    def real_view(self):
-        return score_view(self.teacher, 0) if self.shared_fake else nullcontext()
+    def real_view(self, scale=0):
+        if not self.shared_fake and scale != 0:
+            raise ValueError("independent full fake cannot supply DynaDG")
+        return score_view(self.teacher, scale) if self.shared_fake else nullcontext()
 
     @torch.no_grad()
     def update_ema(self, decay):

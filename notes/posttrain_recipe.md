@@ -5,7 +5,8 @@ sampling/scoring pipeline. Full-parameter and LoRA students, two fake-score
 strategies, three explicit DMD gradients, learner DDP, optimization, recovery and
 student export are available. No final training recipe is selected.
 `configs/posttrain.toml` defines sampling/scoring; `configs/posttrain_dmd.toml`
-defines plain DMD. RT-DM, dynamic cold-start schedules and NFT remain later work.
+defines plain DMD; `configs/posttrain_cold.toml` enables the independent RT-DM,
+DynaDG and DynaRS controls. NFT remains later work.
 
 See the [mathematical contract](posttrain_contract.md),
 [evaluation protocol](posttrain_evaluation.md), and
@@ -51,7 +52,7 @@ in local project configuration.
 | Student sampling | 8-step clean-prediction/renoise, shifted uniform grid, conditional CFG 1 | Generation quality and subsequent train/inference correspondence |
 | Distribution matching | Online fake-score learning with backward simulation | Parameterization, normalization, update ratio, trainable parameter scope |
 | Student tuning | Both full-parameter and LoRA training are in the initial implementation scope | Separate training/state/export qualification and later controlled quality/cost comparisons |
-| Cold start | RT-DM, DynaDG, DynaRS | Score transform, adapter design, schedules, and transition timing |
+| Cold start | Independent RT-DM, DynaDG, DynaRS switches implemented | Effects, schedule horizons, reward controls and transition timing remain unselected |
 | Joint objective | NFT with persistent DMD regularization | Loss reductions/balance, NFT old-policy update, and any additional regularization |
 | Optimization | Configured separately for trainable roles | Optimizers, learning rates, accumulation, clipping, precision, and EMA |
 | Rewards | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; source/weight pins and separate raw outputs | Training mixture and normalization; broader scorer validity remains unestablished |
@@ -180,7 +181,7 @@ the existing `scripts/eval/blind_panel.py` workflow. Scores and reports retain
 both metric scales separately; no reward mixture is applied by this harness.
 
 For implementation smokes, `scripts.posttrain.qualify` consumes explicit
-cases with an explicit `kind` (`sampling` or `dmd`) and a shared budget ledger. Its external watchdog
+cases with an explicit `kind` (`sampling` or `cold`) and a shared budget ledger. Its external watchdog
 reserves one 16-NPU job, charges from provider allocation through confirmed
 release, and stops near the cumulative 24-node-hour limit with shutdown margin.
 It imposes no independent per-job cap. Provider/accounting uncertainty blocks
@@ -339,7 +340,7 @@ and passed after correction. The final guard also verified all actual committed
 full/LoRA/Muon checkpoint files. Numerical source and final source identities are
 preserved separately; no resume under mismatched source is claimed.
 
-All implementation jobs are released. The shared allowance totals 1.987
+Through plain-DMD qualification, all three jobs were released. The shared allowance totaled 1.987
 of 24 allocated node-hours, leaving 22.013; failures, preparation and
 retained allocations are included. No RT-DM, dynamic controls, NFT or selection
 experiments were run in this phase.
@@ -358,3 +359,75 @@ Pending. Record the selected checkpoint identity, exact config and prompt
 versions, 8-step inference settings, final evaluation results and sample panels,
 domain/diversity limitations, measured training/inference cost, and recovery
 qualification. The final recipe is selected only after these results exist.
+
+## Cold-stage controls and commands
+
+`configs/posttrain_cold.toml` is a complete full-student RT-DM/DynaDG/DynaRS
+coverage input. It retains the same initial checkpoint,640p,8-step collection,
+24 global samples and12 learners. Validation and launch use the training CLI:
+
+```bash
+python -m src.posttrain.train --config configs/posttrain_cold.toml --validate-only
+python -m src.posttrain.train --config configs/posttrain_cold.toml \
+  --assets /external/posttrain-assets.json --output /external/cold-run
+```
+
+Required scorers are config-declared independent services. Owned deployments
+reserve their devices outside learner collectives; empty launch lists use
+external endpoints. Learners keep a frozen VAE resident for terminal decode.
+No scorer model or differentiable reward path enters a learner. The coordinator
+persists raw score envelopes and complete-round normalization/weight statistics;
+student updates wait for every required channel. Exact selected-call replay is
+checked after fake updates and before the student step.
+
+| Complete config | RT-DM / DynaDG / DynaRS | Student | Reward control |
+|---|---|---|---|
+| `cold_plain.toml` | Off / off / off | Full | No acquisition |
+| `cold_dg.toml` | Off / on / off | LoRA | No acquisition |
+| `cold_rs.toml` | Off / off / on | Full | No acquisition |
+| `cold_dg_rs.toml` | Off / on / on | LoRA | No acquisition; q2 |
+| `cold_rtdm.toml` | On / off / off | LoRA | Standardized HPS, mean-one |
+| `cold_rtdm_dg.toml` | On / on / off | Full | Raw VQA, paper-max |
+| `cold_rtdm_rs.toml` | On / off / on | LoRA | Raw HPS/VQA mixture, mean-one |
+| `configs/posttrain_cold.toml` | On / on / on | Full | Standardized HPS/VQA mixture, mean-one |
+| `cold_plain_lora.toml` | Off / off / off | LoRA | Baseline mode coverage |
+| `cold_all_lora.toml` | On / on / on | LoRA | All-on mode coverage |
+
+Short filenames in this table resolve under `configs/experiments/posttrain/`.
+These cases deliberately combine execution branches; they do not isolate effects
+or identify a winner. Dynamic horizons use committed student steps; q fake updates
+do not advance them. Checkpoints retain their definitions/current points and the
+last global reward record. Interrupted rounds are recollected from the last
+committed boundary, with attempted work and score retries retained.
+
+The ten cold coverage cases ran at640×640 with24 samples per round and12
+learners, spanning all eight toggles plus both baseline/all-on student modes.
+Full and LoRA all-on runs also exited at round2 and resumed in new processes
+to round6. Weights, optimizers, EMA, clocks, all rank RNG/cursors, rewards,
+schedules and recorded update inputs matched the uninterrupted runs exactly.
+Serialized checkpoint byte equality is not claimed. All intended376 full or
+208 LoRA student tensors and104 fake adapter tensors changed; frozen tensors
+remained unchanged. Executed source/config bytes and final formatting changes
+are recorded separately: Python ASTs and parsed TOML are unchanged. Exact resume
+still requires identical source bytes.
+
+Twelve live/EMA exports reloaded exactly and were evaluated with the three
+initial controls on16 fixed DrawBench prompts:240 images and480/480 required
+HPSv3/VQAScore results. Thumbnail inspection covered every image with shuffled
+arm positions. Some full-student paths still collapse to texture/noise; other
+paths retain recognizable scenes, and LoRA largely stays near the weak initial
+renoise control. These observations select no variant or release recipe.
+The unresolved quality investigation remains after6.1.6 and before selection.
+
+Final-source training/recovery scored864 terminal samples and retained1,536
+required score envelopes, including valid paper-max, standardized and raw
+mixture controls. Raw-mixture ESS reached1.44 of24 without censoring. Maximum
+learner allocated memory was20.04GiB; acquisition includes legitimate cached
+responses and is not a throughput optimization result. Current hardware coverage
+is square640p, CFG1 and activation checkpointing disabled; CFG replay and
+checkpointing have separate mechanism coverage. Real VLM substitution, broader
+quality/diversity, hero prompts and optimized placement remain unqualified.
+
+All four implementation allocations are released. Cumulative usage is4.132 of
+24 node-hours, including failures, preparation, transfer and retained time.
+NFT and variant-selection experiments have not started.

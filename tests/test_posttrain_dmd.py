@@ -36,9 +36,12 @@ from src.posttrain.roles import Roles
 from src.posttrain.rollout import PromptCursor, collect, score_inputs
 from src.posttrain.training_config import (
     Collection,
+    DynaDG,
+    DynaRS,
     Fake,
     Objective,
     Optimizer,
+    Rewards,
     Student,
     Training,
     TrainingConfig,
@@ -148,6 +151,9 @@ def config(mode="full", strategy="teacher_qv"):
         ),
         training=Training(7, 3, 1, True, 0.9),
         scorers=(),
+        rewards=Rewards((), 1e-4, "mean_one_exp", 1),
+        dyna_dg=DynaDG(False, 3, 1),
+        dyna_rs=DynaRS(False, 3, 4, 1),
     )
 
 
@@ -356,8 +362,8 @@ def test_checkpointed_blocks_preserve_forward_and_gradients():
 
 def test_config_rejects_unimplemented_objectives_and_uneven_rounds():
     c = config()
-    with pytest.raises(ValueError, match="plain DMD"):
-        replace(c, objective=replace(c.objective, mode="rtdm"))
+    with pytest.raises(ValueError, match="cold DMD/RT-DM"):
+        replace(c, objective=replace(c.objective, mode="nft"))
     with pytest.raises(ValueError, match="evenly"):
         replace(c, execution=replace(c.execution, learner_devices=(0, 1, 2)))
     with pytest.raises(ValueError, match="PMF"):

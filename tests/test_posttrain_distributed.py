@@ -9,7 +9,7 @@ import torch.multiprocessing as mp
 from src.posttrain.distributed import global_loss, initialize, prime_buckets, wrap
 
 
-def worker(rank, path, destination, microbatch):
+def worker(rank, path, destination, microbatch, weighted):
     torch.set_num_threads(1)
     initialize(rank, 2, torch.device("cpu"), "file://" + path, 30)
     try:
@@ -19,6 +19,9 @@ def worker(rank, path, destination, microbatch):
         learner = wrap(model, torch.device("cpu"))
         # Global x=[1,3,5,7], E[x²]=21. d(0.5*(w*x)²)/dw = 2*21 = 42.
         values = torch.tensor([1.0, 3.0, 5.0, 7.0])[rank::2].reshape(-1, 1)
+        weights = (
+            torch.tensor([0.4, 0.8, 1.2, 1.6])[rank::2] if weighted else torch.ones(2)
+        )
         before = model.weight.detach().clone()
         random_before = torch.get_rng_state().clone()
         prime_buckets(learner, values[:microbatch])
@@ -31,6 +34,7 @@ def worker(rank, path, destination, microbatch):
                 losses = (
                     0.5 * learner(values[start : start + microbatch]).square().flatten()
                 )
+                losses = losses * weights[start : start + microbatch]
                 global_loss(losses, 4).backward()
         torch.save(model.weight.grad, destination + str(rank))
     finally:
@@ -38,18 +42,23 @@ def worker(rank, path, destination, microbatch):
 
 
 def test_global_mean_across_ranks_and_microbatches(tmp_path):
-    for microbatch in (1, 2):
-        target = str(tmp_path / f"gradient-{microbatch}-")
+    for microbatch, weighted in ((1, False), (2, False), (1, True), (2, True)):
+        target = str(tmp_path / f"gradient-{microbatch}-{weighted}-")
         mp.spawn(
             worker,
-            args=(str(tmp_path / f"rendezvous-{microbatch}"), target, microbatch),
+            args=(
+                str(tmp_path / f"rendezvous-{microbatch}-{weighted}"),
+                target,
+                microbatch,
+                weighted,
+            ),
             nprocs=2,
             join=True,
         )
         for rank in range(2):
             torch.testing.assert_close(
                 torch.load(target + str(rank), weights_only=True),
-                torch.tensor([[42.0]]),
-                rtol=0,
-                atol=0,
+                torch.tensor([[58.0 if weighted else 42.0]]),
+                rtol=1e-7 if weighted else 0,
+                atol=1e-6 if weighted else 0,
             )

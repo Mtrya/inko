@@ -11,11 +11,12 @@ where the data is mounted. Platform setup and credentials are in the local
 |---|---|
 | `posttrain.prepare_prompts` | Rebuild the fixed small rollout/DrawBench manifests from the pinned reference prompt source. |
 | `posttrain.prepare_assets` | Download or verify one pinned scorer, produce model inventories and isolated snapshot views, and write local service assets. |
-| `posttrain.qualify` | Validate explicit sampling/DMD coverage cases and launch one allocation under the shared external watchdog. |
-| `posttrain.export` | Materialize live/EMA student weights from a complete DMD checkpoint, merge weight LoRA, and verify reload. |
+| `posttrain.qualify` | Validate explicit sampling/cold coverage cases and launch one allocation under the shared external watchdog. |
+| `posttrain.export` | Materialize live/EMA student weights from a complete cold checkpoint, merge weight LoRA, and verify reload. |
 | `posttrain.budget` | Inspect the durable cumulative implementation ledger or run its external allocation watchdog. |
 
-The standalone harness is `python -m src.evaluation.benchmarks.run`.
+The cold trainer is `python -m src.posttrain.train`; the standalone evaluation
+harness is `python -m src.evaluation.benchmarks.run`.
 Its current commands and qualification limits are in
 [the posttraining recipe](../notes/posttrain_recipe.md#samplingscoring-commands).
 

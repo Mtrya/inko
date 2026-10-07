@@ -59,6 +59,7 @@ class Rollout:
     selected_indices: torch.Tensor | None
     selected_times: torch.Tensor | None
     grid: tuple[float, ...]
+    selected_prediction: torch.Tensor | None
 
 
 @torch.no_grad()
@@ -85,7 +86,7 @@ def sample(
     if not seeds:
         raise ValueError("empty sampling batch")
     x = sample_noise(seeds, shape, stream="initial", device=device)
-    selected = indices = times = None
+    selected = indices = times = prediction = None
     if selected_indices is not None:
         if len(selected_indices) != len(seeds) or any(
             type(k) is not int or not 0 <= k < len(grid) - 1 for k in selected_indices
@@ -93,6 +94,7 @@ def sample(
             raise ValueError("one valid selected index is required per sample")
         indices = torch.tensor(selected_indices, device=device)
         selected = torch.empty_like(x)
+        prediction = torch.empty_like(x)
         times = torch.tensor([grid[k] for k in selected_indices], device=device)
     for k, (t, next_t) in enumerate(itertools.pairwise(grid)):
         if selected is not None:
@@ -103,6 +105,8 @@ def sample(
         ).float()
         if velocity.shape != x.shape:
             raise ValueError("model velocity shape differs from latent")
+        if prediction is not None:
+            prediction[mask] = (x + (1 - t) * velocity)[mask]
         if rule == "euler":
             x = x + (next_t - t) * velocity
         else:
@@ -120,4 +124,4 @@ def sample(
             )
         if not torch.isfinite(x).all():
             raise FloatingPointError(f"nonfinite {rule} latent at step {k}")
-    return Rollout(x.detach(), selected, indices, times, grid)
+    return Rollout(x.detach(), selected, indices, times, grid, prediction)

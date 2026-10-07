@@ -1,4 +1,4 @@
-"""Complete plain-DMD training configuration, separate from benchmark arms."""
+"""Complete cold-stage training configuration, separate from benchmark arms."""
 
 import math
 import tomllib
@@ -118,6 +118,37 @@ class Training:
 
 
 @dataclass(frozen=True)
+class RewardChannel:
+    channel: str
+    direction: str
+    weight: float
+    standardization: str
+
+
+@dataclass(frozen=True)
+class Rewards:
+    channels: tuple[RewardChannel, ...]
+    epsilon: float
+    weighting: str
+    temperature: float
+
+
+@dataclass(frozen=True)
+class DynaDG:
+    enabled: bool
+    horizon: int
+    start_scale: float
+
+
+@dataclass(frozen=True)
+class DynaRS:
+    enabled: bool
+    horizon: int
+    alpha_start: float
+    beta_start: float
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     initialization: Checkpoint
     teacher: Checkpoint
@@ -130,6 +161,9 @@ class TrainingConfig:
     execution: TrainingExecution
     training: Training
     scorers: tuple[Scorer, ...]
+    rewards: Rewards
+    dyna_dg: DynaDG
+    dyna_rs: DynaRS
 
     def __post_init__(self):
         s, f, o, c, e, t = (
@@ -175,9 +209,9 @@ class TrainingConfig:
             "fake adapters require AdamW",
         )
         require(
-            o.mode == "dmd"
+            o.mode in {"dmd", "rtdm"}
             and o.estimator in {"teacher_residual", "clean_difference", "score_kl"},
-            "only plain DMD is implemented",
+            "only cold DMD/RT-DM is implemented",
         )
         require(
             o.epsilon > 0
@@ -240,10 +274,62 @@ class TrainingConfig:
             and self.fake_optimizer.warmup_steps <= t.steps * f.updates,
             "warmup exceeds role clock horizon",
         )
+        dg, rs, reward = self.dyna_dg, self.dyna_rs, self.rewards
+        require(dg.horizon > 0 and dg.start_scale >= 0, "invalid DynaDG schedule")
         require(
-            not self.scorers,
-            "plain DMD has no reward acquisition; scoring belongs to export evaluation",
+            rs.horizon > 0 and rs.alpha_start > rs.beta_start > 0,
+            "DynaRS requires positive alpha_start > beta_start",
         )
+        require(
+            (not dg.enabled or dg.horizon <= t.steps)
+            and (not rs.enabled or rs.horizon <= t.steps),
+            "dynamic horizon exceeds cold generator steps",
+        )
+        require(
+            not dg.enabled or f.strategy == "teacher_qv",
+            "DynaDG requires teacher_qv fake",
+        )
+        require(
+            reward.epsilon > 0
+            and reward.temperature > 0
+            and reward.weighting in {"mean_one_exp", "paper_max_exp"},
+            "invalid RT-DM reward transform",
+        )
+        require(
+            len({s.id for s in self.scorers}) == len(self.scorers), "duplicate scorer"
+        )
+        available = {f"{s.id}.{c.name}": c for s in self.scorers for c in s.outputs}
+        channels = reward.channels
+        require(
+            len({c.channel for c in channels}) == len(channels),
+            "duplicate reward channel",
+        )
+        for channel in channels:
+            require(channel.channel in available, "reward channel is undeclared")
+            require(
+                channel.direction == available[channel.channel].direction
+                and channel.weight >= 0
+                and channel.standardization in {"none", "round"},
+                "invalid reward orientation/weight/standardization",
+            )
+            require(
+                reward.weighting != "paper_max_exp"
+                or channel.standardization == "none",
+                "paper-max requires raw nonnegative rewards, not standardized channels",
+            )
+        if o.mode == "rtdm":
+            require(
+                bool(channels)
+                and math.isclose(sum(c.weight for c in channels), 1, abs_tol=1e-7),
+                "reward weights must sum to one",
+            )
+            require(
+                {c.channel.split(".")[0] for c in channels}
+                == {s.id for s in self.scorers},
+                "reward/scorer service set differs",
+            )
+        else:
+            require(not channels and not self.scorers, "DMD has no reward acquisition")
 
 
 def load_training_config(path):
