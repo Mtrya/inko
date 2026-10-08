@@ -15,13 +15,14 @@ from src.posttrain.records import atomic_json
 from src.posttrain.schema import require
 
 CAP_SECONDS = 24 * 3600
+ALLOWANCES = {"implementation": CAP_SECONDS, "collapse": 12 * 3600}
 SHUTDOWN_MARGIN = 600
 POLL_SECONDS = 15
 TERMINAL = {"job_succeeded", "job_failed", "job_stopped", "job_cancelled"}
 
 
 @contextmanager
-def locked_ledger(path):
+def locked_ledger(path, *, cap_seconds):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.with_suffix(".lock").open("a") as lock:
@@ -29,10 +30,10 @@ def locked_ledger(path):
         state = (
             json.loads(path.read_text())
             if path.exists()
-            else {"schema": 1, "cap_seconds": CAP_SECONDS, "jobs": [], "blocked": None}
+            else {"schema": 1, "cap_seconds": cap_seconds, "jobs": [], "blocked": None}
         )
         require(
-            state["schema"] == 1 and state["cap_seconds"] == CAP_SECONDS,
+            state["schema"] == 1 and state["cap_seconds"] == cap_seconds,
             "budget ledger contract differs",
         )
         yield state
@@ -59,7 +60,7 @@ def reserve(state, name, workspace, now):
     )
     require(
         consumed(state, now) + SHUTDOWN_MARGIN < state["cap_seconds"],
-        "implementation budget exhausted",
+        "allocation budget exhausted",
     )
     row = {
         "name": name,
@@ -213,7 +214,7 @@ def event_time(event):
     )
 
 
-def watch(path, job, provider=None, clock=time.time, sleep=time.sleep):
+def watch(path, job, provider=None, clock=time.time, sleep=time.sleep, *, cap_seconds):
     provider = provider or InspireProvider()
     path = Path(path)
     # A second watchdog must not race control actions or overwrite observations.
@@ -221,7 +222,7 @@ def watch(path, job, provider=None, clock=time.time, sleep=time.sleep):
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         failures = 0
         while True:
-            with locked_ledger(path) as state:
+            with locked_ledger(path, cap_seconds=cap_seconds) as state:
                 row = next(j for j in state["jobs"] if j["name"] == job)
                 if row["released_at"] is not None:
                     return
@@ -237,7 +238,7 @@ def watch(path, job, provider=None, clock=time.time, sleep=time.sleep):
                 continue
             try:
                 observation = provider.observe(snapshot)
-                with locked_ledger(path) as state:
+                with locked_ledger(path, cap_seconds=cap_seconds) as state:
                     row = next(j for j in state["jobs"] if j["name"] == job)
                     stop = reconcile(state, row, observation, clock()) or bool(
                         state["blocked"]
@@ -246,14 +247,14 @@ def watch(path, job, provider=None, clock=time.time, sleep=time.sleep):
                         return
                 failures = 0
             except OwnershipError:
-                with locked_ledger(path) as state:
+                with locked_ledger(path, cap_seconds=cap_seconds) as state:
                     state["blocked"] = "remote job ownership mismatch; no stop sent"
                 return
             except MissingJob:
                 if clock() - snapshot["submitted_at"] < 120:
                     sleep(1)
                     continue
-                with locked_ledger(path) as state:
+                with locked_ledger(path, cap_seconds=cap_seconds) as state:
                     state["blocked"] = (
                         "submitted job missing; reconcile submission before another launch"
                     )
@@ -264,7 +265,7 @@ def watch(path, job, provider=None, clock=time.time, sleep=time.sleep):
                 continue
             except Exception as exc:  # noqa: BLE001 - retain uncertainty and fail closed
                 failures += 1
-                with locked_ledger(path) as state:
+                with locked_ledger(path, cap_seconds=cap_seconds) as state:
                     row = next(j for j in state["jobs"] if j["name"] == job)
                     row["errors"].append(
                         {"at": clock(), "error": f"{type(exc).__name__}: {exc}"}
@@ -276,11 +277,11 @@ def watch(path, job, provider=None, clock=time.time, sleep=time.sleep):
             if stop:
                 try:
                     provider.stop(snapshot)
-                    with locked_ledger(path) as state:
+                    with locked_ledger(path, cap_seconds=cap_seconds) as state:
                         row = next(j for j in state["jobs"] if j["name"] == job)
                         row["stop_requested_at"] = clock()
                 except Exception as exc:  # noqa: BLE001 - never infer successful release
-                    with locked_ledger(path) as state:
+                    with locked_ledger(path, cap_seconds=cap_seconds) as state:
                         state["blocked"] = f"provider stop failed: {exc}"
                         next(j for j in state["jobs"] if j["name"] == job)[
                             "errors"
@@ -291,15 +292,17 @@ def watch(path, job, provider=None, clock=time.time, sleep=time.sleep):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ledger", type=Path, required=True)
+    parser.add_argument("--allowance", choices=ALLOWANCES, required=True)
     parser.add_argument("--job")
     parser.add_argument("--watch", action="store_true")
     args = parser.parse_args()
+    cap_seconds = ALLOWANCES[args.allowance]
     if args.watch:
         if not args.job:
             parser.error("--watch requires --job")
-        watch(args.ledger, args.job)
+        watch(args.ledger, args.job, cap_seconds=cap_seconds)
     else:
-        with locked_ledger(args.ledger) as state:
+        with locked_ledger(args.ledger, cap_seconds=cap_seconds) as state:
             print(
                 json.dumps(
                     {

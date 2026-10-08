@@ -13,7 +13,14 @@ from src.posttrain.records import atomic_json, identity
 from src.posttrain.schema import digest, require
 from src.posttrain.training_config import load_training_config
 
-from .budget import CAP_SECONDS, SHUTDOWN_MARGIN, consumed, locked_ledger, reserve
+from .budget import (
+    ALLOWANCES,
+    CAP_SECONDS,
+    SHUTDOWN_MARGIN,
+    consumed,
+    locked_ledger,
+    reserve,
+)
 from .coverage import Evidence, coverage_report, validate_matrix, validate_reuse
 
 
@@ -87,9 +94,11 @@ def budget_admission(path, *, now=None):
     )
 
 
-def launch(matrix, ledger):
+def launch(matrix, ledger, *, allowance):
+    require(allowance in ALLOWANCES, "unapproved allocation allowance")
+    cap_seconds = ALLOWANCES[allowance]
     job = {**matrix["job"], "name": matrix["job"]["name"] + "-" + uuid.uuid4().hex[:12]}
-    with locked_ledger(ledger) as state:
+    with locked_ledger(ledger, cap_seconds=cap_seconds) as state:
         reserve(state, job["name"], job["workspace"], time.time())
     log_path = ledger.with_name(f"{ledger.stem}.{job['name']}.watch.log")
     with log_path.open("a") as log:
@@ -103,6 +112,8 @@ def launch(matrix, ledger):
                 "--job",
                 job["name"],
                 "--watch",
+                "--allowance",
+                allowance,
             ],
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -110,7 +121,7 @@ def launch(matrix, ledger):
         )
     deadline = time.monotonic() + 10
     while True:
-        with locked_ledger(ledger) as state:
+        with locked_ledger(ledger, cap_seconds=cap_seconds) as state:
             ready = state["jobs"][-1].get("watchdog_ready_at")
         require(
             watchdog.poll() is None and time.monotonic() < deadline,
@@ -135,7 +146,7 @@ def launch(matrix, ledger):
     # No per-job time cap. The external watchdog enforces the cumulative allowance.
     # Persist intent before the create RPC: timeout or launcher death must not
     # strand a remotely accepted allocation outside watchdog observation.
-    with locked_ledger(ledger) as state:
+    with locked_ledger(ledger, cap_seconds=cap_seconds) as state:
         state["jobs"][-1]["submitted_at"] = time.time()
     result = subprocess.run(
         argv, capture_output=True, text=True, timeout=120, check=False
@@ -149,7 +160,7 @@ def launch(matrix, ledger):
             "stderr": result.stderr,
         },
     )
-    with locked_ledger(ledger) as state:
+    with locked_ledger(ledger, cap_seconds=cap_seconds) as state:
         if result.returncode:
             state["blocked"] = (
                 "submission uncertain; watchdog must reconcile named job before further launches"
@@ -282,7 +293,14 @@ def main():
         if args.budget_ledger is None:
             parser.error("submission requires --budget-ledger")
         budget_admission(args.budget_ledger)
-        print(json.dumps(launch(deployment, args.budget_ledger.resolve()), indent=2))
+        print(
+            json.dumps(
+                launch(
+                    deployment, args.budget_ledger.resolve(), allowance="implementation"
+                ),
+                indent=2,
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -29,6 +29,61 @@ The DMD/DMD2 component comparison is one possible question, not the scope of the
 research. GAN supervision, alternative RL objectives, and targeted SFT remain
 open possibilities requiring a concrete motivation and comparison.
 
+## Fake-score fitting and texture-collapse disposition
+
+Insufficient fake-score fitting is the best-supported main cause of the severe
+full/QV texture collapse observed during implementation qualification. The fake
+model must estimate the current student's generated distribution; initializing
+it from the same teacher does not make that estimate accurate for an undistilled
+few-step student. An inaccurate fake field biases the subsequent DMD update.
+
+The original failed four-update trajectory was reproduced exactly. With student
+updates, learning rates, loss, prompts, noise seeds, sampler and precision held
+fixed, increasing fake updates from 1 to 128 removed the dominant full-frame
+mosaic on the original 16 evaluation prompts. Two severe cold-stage failures
+also lost their dominant texture/fragmentation under the same intervention.
+Fresh generated samples showed lower fake regression error, including the
+diffusion-score time weighting, so the evidence extends beyond fitting the
+retained targets. Additional fitting only before the first student update also
+suppressed the original four-update mosaic. This directly identifies an initial
+fitting mismatch; continuing tracking lag is not required to explain that
+specific short-run failure.
+
+The corrective mechanism is **fit the fake score before trusting its generator
+gradient**, using the existing `fake.updates` control. Each generator update
+already holds the student fixed, performs those fake optimizer steps with fresh
+renoise draws, and then uses the fitted score views. The tested value 128 is a
+causal intervention, not a selected ratio, an accuracy guarantee or a recommended
+production default. The initial-only schedule was a diagnostic driver, not an
+implemented warmup option. The coverage configs retain their original settings
+and are not release recipes. No new trainer algorithm or compatibility path is
+needed to express the tested recurring-fitting correction.
+
+The investigation found no separate mathematical or implementation defect that
+explains the original failure. Weight-drift, score-precision, native/merged export
+and scorer-trace checks did not support those alternative explanations. This is
+a bounded finding, not proof that every configuration is correct or every later
+artifact has the same cause. Later full-path interventions had mixed effects;
+remaining repetition, scene errors and weak initial/LoRA/EMA outputs are retained
+as quality observations, without a universal-fix claim.
+
+The final 32-update temporal comparison reinforces that limit. Constant q128
+produced mostly low-contrast fields and weak silhouettes at updates 16 and 32;
+initial-only fitting produced more recognizable subjects at 16, then repeated,
+display-like compositions at 32. The former had lower HPS and VQA means at 32.
+Neither schedule is qualified as a recipe. More fitting explains the early
+causal correction; it does not establish that increasing q monotonically
+improves learning or that continuing lag explains all later deterioration.
+
+Four to 32 updates are mechanism probes, not convergence tests for a coldstart
+expected to require thousands of updates. Repeated objects within one image do
+not establish mode collapse; the one-seed-per-prompt smoke suite cannot measure
+conditional diversity. HPS can rise on visibly degraded outputs, so neither
+reward nor finite loss is an acceptance proxy. Long-horizon stability, useful
+fake update ratios, diversity, capacity and final recipe quality belong to the
+separately budgeted selection stage. They are not additional requirements for
+closing the texture-collapse mechanism investigation.
+
 ## Implementation and config layout
 
 | Path | Responsibility |
@@ -236,6 +291,13 @@ through confirmed release, and stops near the cumulative24-node-hour limit
 with shutdown margin. It imposes no independent per-job cap. Preparation,
 failures, retries and retained time count; provider/accounting uncertainty
 blocks subsequent launches. Qualification is not variant selection.
+
+Budget inspection and watchdog startup require an explicit
+`--allowance implementation` or `--allowance collapse`. The latter binds a
+separate 12-node-hour investigation ledger. Opening an existing ledger with a
+different allowance fails; unused implementation hours do not enlarge the
+investigation allowance. Provider release must be observed before removing
+job history.
 
 ## Sampling/scoring qualification
 
@@ -467,7 +529,8 @@ HPSv3/VQAScore results. Thumbnail inspection covered every image with shuffled
 arm positions. Some full-student paths still collapse to texture/noise; other
 paths retain recognizable scenes, and LoRA largely stays near the weak initial
 renoise control. These observations select no variant or release recipe.
-The unresolved quality investigation remains after6.1.6 and before selection.
+The subsequent [texture-collapse investigation](#fake-score-fitting-and-texture-collapse-disposition)
+establishes a fake-fitting mechanism; these historical images remain unchanged.
 
 Final-source training/recovery scored864 terminal samples and retained1,536
 required score envelopes, including valid paper-max, standardized and raw
@@ -557,8 +620,9 @@ and none was uniformly colored, which does not establish useful generations.
 Thumbnail inspection shows weak LoRA outputs near their weak starting control,
 repeated-object collage in full DMD, and severe fragmentation in the full
 integration live output. NFT/joint full outputs retain recognizable but incorrect
-scenes. The quality anomalies remain unresolved and join the investigation
-scheduled after implementation qualification and before variant selection.
+scenes. These historical observations are retained in the subsequent
+[mechanism disposition](#fake-score-fitting-and-texture-collapse-disposition);
+no common cause is asserted for every remaining scene error.
 No winner, convergence, quality improvement or independent scorer validity is
 inferred from this short one-seed suite or its reward-model metrics.
 
@@ -629,7 +693,8 @@ fragmentation/repeated-object collage and weak short LoRA outputs. These
 observations do not establish a shared cause, convergence or a quality winner.
 The generic paired table references the first initial arm; arms with different
 samplers require their matching initial control before interpreting a delta.
-The mandatory texture-collapse investigation remains open before selection.
+The [texture-collapse mechanism disposition](#fake-score-fitting-and-texture-collapse-disposition)
+is separate from selecting a stable, high-quality training recipe.
 HPS/VQA metrics are descriptive reward-model measurements, not independent
 scorer validation. Multi-seed diversity, larger held-out evaluation, production
 prompts, aspect-ratio coverage and systematic efficiency remain unrun.

@@ -14,7 +14,7 @@ where the data is mounted. Platform setup and credentials are in the local
 | `posttrain.qualify` | Validate pinned qualification cases, launch one guarded allocation, execute missing paths and report coverage. |
 | `posttrain.export` | Materialize live/EMA student weights from a complete checkpoint, merge weight LoRA, and verify reload. |
 | `posttrain.protocol_fixture` | Run an independent deterministic image/rubric scorer for protocol qualification; its scalar has no quality meaning. |
-| `posttrain.budget` | Inspect the durable cumulative implementation ledger or run its external allocation watchdog. |
+| `posttrain.budget` | Inspect a durable cumulative ledger or run its external allocation watchdog; require `--allowance implementation\|collapse` to bind the approved cap. |
 
 The cold/joint trainer is `python -m src.posttrain.train`; the standalone evaluation
 harness is `python -m src.evaluation.benchmarks.run`.

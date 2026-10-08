@@ -423,6 +423,14 @@ student prediction with gradients after the fake updates. Fake learning uses
 either the detached selected clean prediction or terminal latent `y_target`,
 fresh independent time/noise, and `mean_elements((v_fake-(y_target-ε))²)`.
 Each round performs `q` fake steps, then one student step, then evaluation EMA.
+
+`q` is a fitting/exposure control, not a correctness constant. Matching teacher
+initialization does not establish an accurate score for the few-step student's
+output distribution. The [texture-collapse investigation](posttrain_recipe.md#fake-score-fitting-and-texture-collapse-disposition)
+demonstrates a causal initial fitting deficit and its correction through more
+fake updates. No automatic warmup or adaptive stopping rule is implemented;
+neither a low fake loss nor a small generator surrogate certifies score accuracy
+or generation quality.
 All random streams identify round, sample and role; noise is generated from
 keyed CPU seeds so packing does not change draws.
 

@@ -21,9 +21,22 @@ def observation(status, start, released=False):
     }
 
 
+def test_separate_allowance_cannot_reopen_another_ledger(tmp_path):
+    path = tmp_path / "budget.json"
+    with locked_ledger(path, cap_seconds=2000) as state:
+        reserve(state, "one", "workspace", 0)
+    before = path.read_bytes()
+    with (
+        pytest.raises(ValueError, match="contract differs"),
+        locked_ledger(path, cap_seconds=4000),
+    ):
+        pytest.fail("wrong cap admitted")
+    assert path.read_bytes() == before
+
+
 def test_queue_startup_retention_failure_and_restart(tmp_path):
     path = tmp_path / "budget.json"
-    with locked_ledger(path) as state:
+    with locked_ledger(path, cap_seconds=2000) as state:
         row = reserve(state, "one", "workspace", 0)
         reconcile(state, row, observation("queued", None), 50)
         assert consumed(state, 50) == 0
@@ -33,7 +46,7 @@ def test_queue_startup_retention_failure_and_restart(tmp_path):
         assert consumed(state, 120) == 60
         with pytest.raises(ValueError, match="one smoke"):
             reserve(state, "two", "workspace", 130)
-    with locked_ledger(path) as restored:
+    with locked_ledger(path, cap_seconds=2000) as restored:
         assert consumed(restored, 150) == 90
         reconcile(restored, restored["jobs"][0], observation("failed", 60, True), 180)
         assert consumed(restored, 200) == 120
@@ -44,11 +57,10 @@ def test_external_watchdog_survives_lost_workload_and_stops_at_shared_cap(
     tmp_path, monkeypatch
 ):
     # Budget and polling preferences are inputs; expected times come from this timeline.
-    monkeypatch.setattr("scripts.posttrain.budget.CAP_SECONDS", 200)
     monkeypatch.setattr("scripts.posttrain.budget.SHUTDOWN_MARGIN", 20)
     monkeypatch.setattr("scripts.posttrain.budget.POLL_SECONDS", 5)
     path = tmp_path / "budget.json"
-    with locked_ledger(path) as state:
+    with locked_ledger(path, cap_seconds=200) as state:
         previous = reserve(state, "previous", "workspace", 0)
         reconcile(state, previous, observation("done", 0, True), 160)
         current = reserve(state, "current", "workspace", 160)
@@ -76,6 +88,7 @@ def test_external_watchdog_survives_lost_workload_and_stops_at_shared_cap(
         "current",
         provider,
         clock=lambda: now[0],
+        cap_seconds=200,
         sleep=lambda n: now.__setitem__(0, now[0] + n),
     )
     assert provider.stopped
@@ -86,7 +99,7 @@ def test_external_watchdog_survives_lost_workload_and_stops_at_shared_cap(
 
 def test_provider_failure_stops_and_blocks_next_launch(tmp_path):
     path = tmp_path / "budget.json"
-    with locked_ledger(path) as state:
+    with locked_ledger(path, cap_seconds=2000) as state:
         row = reserve(state, "one", "workspace", 10)
         row["submitted_at"] = 10
     now = [20]
@@ -107,9 +120,10 @@ def test_provider_failure_stops_and_blocks_next_launch(tmp_path):
         "one",
         Provider(),
         clock=lambda: now[0],
+        cap_seconds=2000,
         sleep=lambda n: now.__setitem__(0, now[0] + n),
     )
-    with locked_ledger(path) as state:
+    with locked_ledger(path, cap_seconds=2000) as state:
         assert state["blocked"] and state["jobs"][0]["released_at"] == 35
         with pytest.raises(ValueError, match="blocks launches"):
             reserve(state, "two", "workspace", 36)
@@ -124,7 +138,7 @@ def test_submission_timeout_keeps_observable_intent(tmp_path, monkeypatch):
 
     class Watchdog:
         def __init__(self, *args, **kwargs):
-            with locked_ledger(path) as state:
+            with locked_ledger(path, cap_seconds=24 * 3600) as state:
                 state["jobs"][-1]["watchdog_ready_at"] = 1
 
         def poll(self):
@@ -151,7 +165,7 @@ def test_submission_timeout_keeps_observable_intent(tmp_path, monkeypatch):
         )
     }
     with pytest.raises(subprocess.TimeoutExpired):
-        qualify.launch({"job": job}, path)
+        qualify.launch({"job": job}, path, allowance="implementation")
     assert json.loads(path.read_text())["jobs"][-1]["submitted_at"] is not None
 
 
@@ -159,7 +173,7 @@ def test_delayed_provider_visibility_keeps_watchdog_alive(tmp_path):
     from scripts.posttrain.budget import MissingJob
 
     path = tmp_path / "budget.json"
-    with locked_ledger(path) as state:
+    with locked_ledger(path, cap_seconds=2000) as state:
         row = reserve(state, "one", "workspace", 0)
         row["submitted_at"] = 0
     now = [121]
@@ -187,6 +201,7 @@ def test_delayed_provider_visibility_keeps_watchdog_alive(tmp_path):
         "one",
         provider,
         clock=lambda: now[0],
+        cap_seconds=2000,
         sleep=lambda n: now.__setitem__(0, now[0] + n),
     )
     state = json.loads(path.read_text())
@@ -198,7 +213,7 @@ def test_watchdog_never_stops_an_unowned_preexisting_job(tmp_path):
     from scripts.posttrain.budget import InspireProvider
 
     path = tmp_path / "budget.json"
-    with locked_ledger(path) as state:
+    with locked_ledger(path, cap_seconds=2000) as state:
         row = reserve(state, "collision", "workspace", 100)
         row["submitted_at"] = 100
 
@@ -207,7 +222,7 @@ def test_watchdog_never_stops_an_unowned_preexisting_job(tmp_path):
             assert args[1] != "stop", "an unowned job must never receive stop"
             return {"created_at": "1000"}
 
-    watch(path, "collision", Provider(), clock=lambda: 110)
+    watch(path, "collision", Provider(), clock=lambda: 110, cap_seconds=2000)
     state = json.loads(path.read_text())
     assert state["blocked"] == "remote job ownership mismatch; no stop sent"
     assert state["jobs"][0]["stop_requested_at"] is None
