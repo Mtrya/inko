@@ -3,8 +3,6 @@ import json
 import pytest
 
 from scripts.posttrain.budget import (
-    CAP_SECONDS,
-    SHUTDOWN_MARGIN,
     consumed,
     locked_ledger,
     reconcile,
@@ -42,14 +40,20 @@ def test_queue_startup_retention_failure_and_restart(tmp_path):
         reserve(restored, "two", "workspace", 200)
 
 
-def test_external_watchdog_survives_lost_workload_and_stops_at_shared_cap(tmp_path):
+def test_external_watchdog_survives_lost_workload_and_stops_at_shared_cap(
+    tmp_path, monkeypatch
+):
+    # Budget and polling preferences are inputs; expected times come from this timeline.
+    monkeypatch.setattr("scripts.posttrain.budget.CAP_SECONDS", 200)
+    monkeypatch.setattr("scripts.posttrain.budget.SHUTDOWN_MARGIN", 20)
+    monkeypatch.setattr("scripts.posttrain.budget.POLL_SECONDS", 5)
     path = tmp_path / "budget.json"
     with locked_ledger(path) as state:
         previous = reserve(state, "previous", "workspace", 0)
-        reconcile(state, previous, observation("done", 0, True), 80000)
-        current = reserve(state, "current", "workspace", 80000)
-        current["submitted_at"] = 80000
-    now = [CAP_SECONDS - SHUTDOWN_MARGIN]
+        reconcile(state, previous, observation("done", 0, True), 160)
+        current = reserve(state, "current", "workspace", 160)
+        current["submitted_at"] = 160
+    now = [180]
 
     class Provider:
         stopped = False
@@ -58,7 +62,7 @@ def test_external_watchdog_survives_lost_workload_and_stops_at_shared_cap(tmp_pa
             # No learner process is consulted; an allocated crashed/retained job still costs time.
             return observation(
                 "failed_retaining" if not self.stopped else "stopped",
-                80000,
+                160,
                 self.stopped,
             )
 
@@ -76,8 +80,8 @@ def test_external_watchdog_survives_lost_workload_and_stops_at_shared_cap(tmp_pa
     )
     assert provider.stopped
     state = json.loads(path.read_text())
-    assert state["jobs"][-1]["released_at"] == CAP_SECONDS - SHUTDOWN_MARGIN + 15
-    assert consumed(state, now[0]) == CAP_SECONDS - SHUTDOWN_MARGIN + 15
+    assert state["jobs"][-1]["released_at"] == 185
+    assert consumed(state, now[0]) == 185
 
 
 def test_provider_failure_stops_and_blocks_next_launch(tmp_path):
@@ -210,7 +214,7 @@ def test_watchdog_never_stops_an_unowned_preexisting_job(tmp_path):
 
 
 def test_missing_allocation_history_cannot_be_charged_as_zero():
-    state = {"schema": 1, "cap_seconds": CAP_SECONDS, "jobs": [], "blocked": None}
+    state = {"schema": 1, "cap_seconds": 2000, "jobs": [], "blocked": None}
     row = reserve(state, "one", "workspace", 0)
     row["submitted_at"] = 1
     with pytest.raises(ValueError, match="allocation history"):

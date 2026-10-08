@@ -11,14 +11,20 @@ where the data is mounted. Platform setup and credentials are in the local
 |---|---|
 | `posttrain.prepare_prompts` | Rebuild the fixed small rollout/DrawBench manifests from the pinned reference prompt source. |
 | `posttrain.prepare_assets` | Download or verify one pinned scorer, produce model inventories and isolated snapshot views, and write local service assets. |
-| `posttrain.qualify` | Validate explicit sampling/training coverage cases and launch one allocation under the shared external watchdog. |
-| `posttrain.export` | Materialize live/EMA student weights from a complete cold checkpoint, merge weight LoRA, and verify reload. |
+| `posttrain.qualify` | Validate pinned qualification cases, launch one guarded allocation, execute missing paths and report coverage. |
+| `posttrain.export` | Materialize live/EMA student weights from a complete checkpoint, merge weight LoRA, and verify reload. |
+| `posttrain.protocol_fixture` | Run an independent deterministic image/rubric scorer for protocol qualification; its scalar has no quality meaning. |
 | `posttrain.budget` | Inspect the durable cumulative implementation ledger or run its external allocation watchdog. |
 
-The cold trainer is `python -m src.posttrain.train`; the standalone evaluation
+The cold/joint trainer is `python -m src.posttrain.train`; the standalone evaluation
 harness is `python -m src.evaluation.benchmarks.run`.
 Its current commands and qualification limits are in
 [the posttraining recipe](../notes/posttrain_recipe.md#samplingscoring-commands).
+The qualification launcher returns its actual job name. Supply that name to
+`--execute-cases --allocation-job NAME` inside the guarded allocation; reporting
+joins the execution receipt to that allocated, released ledger entry. Execution
+also requires `--budget-ledger` pointing to a fresh snapshot of the externally
+watched ledger; it must show the named job as the sole active allocation.
 
 ## Pretraining (`scripts/pretrain/`)
 

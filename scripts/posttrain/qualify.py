@@ -6,56 +6,23 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 
-from src.posttrain.config import load_config
-from src.posttrain.records import atomic_json
-from src.posttrain.schema import require
+from src.posttrain.records import atomic_json, identity
+from src.posttrain.schema import digest, require
 from src.posttrain.training_config import load_training_config
 
-from .budget import locked_ledger, reserve
+from .budget import CAP_SECONDS, SHUTDOWN_MARGIN, consumed, locked_ledger, reserve
+from .coverage import Evidence, coverage_report, validate_matrix, validate_reuse
 
 
-def validate_matrix(matrix):
+def validate_deployment(deployment, matrix):
     require(
-        set(matrix) == {"job", "cases"} and bool(matrix["cases"]),
-        "qualification requires explicit job and cases",
+        set(deployment) == {"job", "assets", "output_root", "archives", "artifacts"},
+        "invalid qualification deployment fields",
     )
-    for case in matrix["cases"]:
-        require(
-            case.get("kind") in {"sampling", "training"},
-            "explicit qualification case kind required",
-        )
-        if case["kind"] == "training":
-            require(
-                set(case)
-                == {"kind", "config", "assets", "output", "resume", "stop_after"},
-                "invalid training case fields",
-            )
-            config = load_training_config(case["config"])
-            require(
-                type(case["stop_after"]) is int
-                and 0 < case["stop_after"] <= config.training.steps,
-                "invalid committed stop boundary",
-            )
-            require(
-                case["resume"] is None or isinstance(case["resume"], str),
-                "invalid resume path",
-            )
-            from src.posttrain.stages import rounds_before
-
-            rounds_before(config, case["stop_after"])
-            continue
-        require(
-            set(case) == {"kind", "config", "assets", "output", "suite"},
-            "invalid sampling case fields",
-        )
-        require(
-            case["suite"] in {"bringup", "monitor", "development"},
-            "selection/training is not a sampling qualification case",
-        )
-        load_config(case["config"])
-    job = matrix["job"]
+    job = deployment["job"]
     require(
         set(job)
         == {
@@ -72,69 +39,52 @@ def validate_matrix(matrix):
     )
     require(job["quota"].split(",")[0] == "16", "one 16-NPU allocation required")
     require(
-        job["name"].startswith("inko-posttrain-"),
-        "qualification requires a dedicated posttrain job name",
+        job["name"].startswith("inko-posttrain-"), "dedicated posttrain job required"
     )
+    require(
+        bool(deployment["assets"]) and bool(deployment["output_root"]),
+        "explicit local asset/output paths required",
+    )
+    for case in matrix.cases:
+        for key in (case.resume, case.compare):
+            if key:
+                require(
+                    key in deployment["artifacts"],
+                    "missing declared checkpoint artifact",
+                )
+                item = deployment["artifacts"][key]
+                require(
+                    set(item) == {"path", "sha256"} and item["path"],
+                    "invalid artifact declaration",
+                )
+                digest(item["sha256"])
+    evidence = Evidence(deployment["archives"])
+    receipts = []
+    try:
+        for case in matrix.cases:
+            if case.execution == "reuse":
+                receipts.append(
+                    validate_reuse(case, load_training_config(case.config), evidence)
+                )
+    finally:
+        evidence.close()
+    return receipts
 
 
-def execute_cases(matrix):
-    from src.evaluation.benchmarks.prompts import load_prompts
-    from src.evaluation.benchmarks.run import REPO, run
-
-    for case in matrix["cases"]:
-        if case["kind"] == "training":
-            argv = [
-                sys.executable,
-                "-m",
-                "src.posttrain.train",
-                "--config",
-                case["config"],
-                "--assets",
-                case["assets"],
-                "--output",
-                case["output"],
-                "--stop-after",
-                str(case["stop_after"]),
-            ]
-            if case["resume"] is not None:
-                argv += ["--resume", case["resume"]]
-            subprocess.run(argv, check=True)
-            continue
-        config = load_config(case["config"])
-        key = {
-            "bringup": "bringup_suite",
-            "monitor": "monitor_suite",
-            "development": "suite",
-        }[case["suite"]]
-        prompts = load_prompts(
-            REPO / getattr(config.evaluation, key), config.sampling.shapes
-        )
-        report = run(
-            config,
-            json.loads(Path(case["assets"]).read_text()),
-            prompts,
-            Path(case["output"]),
-            visual_only=case["suite"] == "monitor",
-        )
-        if case["suite"] != "monitor":
-            require(
-                all(
-                    metric["complete"]
-                    for arm in report["arms"].values()
-                    for metric in arm.values()
-                ),
-                "qualification has incomplete scores",
-            )
-        print(
-            json.dumps(
-                {
-                    "event": "case_complete",
-                    "suite": case["suite"],
-                    "output": case["output"],
-                }
-            ),
-            flush=True,
-        )
+def budget_admission(path, *, now=None):
+    # Validate a copy; dry-run must not reserve a job or write an accounting ledger.
+    require(path.exists(), "existing shared implementation ledger required")
+    state = json.loads(path.read_text())
+    require(
+        state["schema"] == 1 and state["cap_seconds"] == CAP_SECONDS,
+        "budget ledger contract differs",
+    )
+    reserve(
+        state,
+        "qualification-validation",
+        "validation",
+        time.time() if now is None else now,
+    )
 
 
 def launch(matrix, ledger):
@@ -214,24 +164,125 @@ def launch(matrix, ledger):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--matrix", type=Path, required=True)
+    parser.add_argument("--deployment", type=Path, required=True)
     parser.add_argument("--budget-ledger", type=Path)
     parser.add_argument(
+        "--allocation-job", help="actual guarded job name for execution"
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--execute-cases",
         action="store_true",
         help="inside an already guarded allocation",
     )
-    parser.add_argument("--validate-only", action="store_true")
+    mode.add_argument("--validate-only", action="store_true")
+    mode.add_argument("--report", action="store_true")
+    parser.add_argument("--reviews", type=Path)
+    parser.add_argument(
+        "--promote", action="store_true", help="require every execution and review gate"
+    )
     args = parser.parse_args()
-    matrix = json.loads(args.matrix.read_text())
-    validate_matrix(matrix)
+    if (args.promote or args.reviews is not None) and not args.report:
+        parser.error("--promote and --reviews require --report")
+    if args.execute_cases and not args.allocation_job:
+        parser.error("--execute-cases requires --allocation-job")
+    if args.execute_cases and args.budget_ledger is None:
+        parser.error("--execute-cases requires --budget-ledger")
+    if args.allocation_job and not args.execute_cases:
+        parser.error("--allocation-job requires --execute-cases")
+    matrix = validate_matrix(json.loads(args.matrix.read_text()))
+    deployment = json.loads(args.deployment.read_text())
+    reused = validate_deployment(deployment, matrix)
     if args.validate_only:
-        print(json.dumps(matrix, indent=2))
+        if args.budget_ledger:
+            budget_admission(args.budget_ledger)
+        print(
+            json.dumps(
+                {
+                    "valid": True,
+                    "matrix_sha256": identity(asdict(matrix)),
+                    "reused_cases": [r["case"] for r in reused],
+                    "cases_to_execute": [
+                        c.id for c in matrix.cases if c.execution != "reuse"
+                    ],
+                },
+                indent=2,
+            )
+        )
+    elif args.report:
+        output = Path(deployment["output_root"])
+        require(
+            (output / "results.json").exists()
+            and (output / "evaluation-summary.json").exists(),
+            "missing execution/evaluation evidence",
+        )
+        results = json.loads((output / "results.json").read_text())
+        from .qualification import validate_evaluation
+
+        evidence = Evidence(deployment["archives"])
+        try:
+            evaluation = validate_evaluation(matrix, results, output, evidence=evidence)
+        finally:
+            evidence.close()
+        reviews = [] if args.reviews is None else json.loads(args.reviews.read_text())
+        report = coverage_report(matrix, results, reviews=reviews)
+        report["evaluation"] = {
+            k: v for k, v in evaluation.items() if k != "evaluation"
+        }
+        require(
+            args.budget_ledger is not None,
+            "coverage reporting requires the shared budget ledger",
+        )
+        state = json.loads(args.budget_ledger.read_text())
+        from .receipts import allocation
+
+        owned_job = allocation(
+            state,
+            json.loads((output / "allocation.json").read_text()),
+            json.loads((output / "execution.json").read_text()),
+            results,
+            identity(asdict(matrix)),
+            start=json.loads((output / "allocation-start.json").read_text()),
+            cap_seconds=CAP_SECONDS,
+            max_age=SHUTDOWN_MARGIN,
+        )
+        report["budget"] = {
+            "used_node_hours": consumed(state, time.time()) / 3600,
+            "cap_node_hours": state["cap_seconds"] / 3600,
+            "all_jobs_released": all(
+                j["released_at"] is not None for j in state["jobs"]
+            ),
+            "accounting_block": state["blocked"],
+            "qualification_job": owned_job,
+        }
+        report["qualified"] = (
+            report["qualified"]
+            and not state["blocked"]
+            and report["budget"]["all_jobs_released"]
+            and report["budget"]["used_node_hours"]
+            <= report["budget"]["cap_node_hours"]
+        )
+        atomic_json(output / "coverage-report.json", report)
+        require(
+            not args.promote or report["qualified"],
+            "unrun or unresolved qualification gate",
+        )
+        print(json.dumps({k: v for k, v in report.items() if k != "cases"}, indent=2))
     elif args.execute_cases:
-        execute_cases(matrix)
+        from .qualification import execute
+
+        execute(
+            matrix,
+            deployment,
+            evaluation_config=matrix.evaluation,
+            allocation_job=args.allocation_job,
+            budget_ledger=args.budget_ledger,
+        )
     else:
         if args.budget_ledger is None:
-            parser.error("submission requires --budget-ledger outside the allocation")
-        print(json.dumps(launch(matrix, args.budget_ledger.resolve()), indent=2))
+            parser.error("submission requires --budget-ledger")
+        budget_admission(args.budget_ledger)
+        print(json.dumps(launch(deployment, args.budget_ledger.resolve()), indent=2))
 
 
 if __name__ == "__main__":
