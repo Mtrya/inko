@@ -53,8 +53,8 @@ def test_population_orientation_mixture_and_constant_channel(sampling_config):
     spec = replace(
         sampling_config.scorers[0],
         outputs=(
-            Channel("fit", "higher", (), "input"),
-            Channel("cost", "lower", (), "input"),
+            Channel("fit", "higher"),
+            Channel("cost", "lower"),
         ),
     )
     c = rewarded(
@@ -81,7 +81,7 @@ def test_population_orientation_mixture_and_constant_channel(sampling_config):
 
 def test_raw_orientation_exponential_and_paper_weights(sampling_config):
     spec = replace(
-        sampling_config.scorers[0], outputs=(Channel("fit", "lower", (), "input"),)
+        sampling_config.scorers[0], outputs=(Channel("fit", "lower"),)
     )
     c = rewarded(
         dmd_config(), (spec,), (RewardChannel("unfamiliar.fit", "lower", 1, "none"),)
@@ -92,7 +92,7 @@ def test_raw_orientation_exponential_and_paper_weights(sampling_config):
     )
     extreme = transform_round(["0", "1", "2"], rows([10000, 0, -10000]), c)
     assert extreme["weights"] == [0, 0, 3]
-    spec = replace(spec, outputs=(Channel("fit", "higher", (), "input"),))
+    spec = replace(spec, outputs=(Channel("fit", "higher"),))
     c = rewarded(
         dmd_config(),
         (spec,),
@@ -339,7 +339,7 @@ def test_config_only_http_scorer_substitution_through_cold_update(
         spec = replace(
             sampling_config.scorers[0],
             id=identifier,
-            outputs=(Channel(metric, direction, (), "Fixture"),),
+            outputs=(Channel(metric, direction),),
         )
 
         class Backend:
@@ -359,10 +359,7 @@ def test_config_only_http_scorer_substitution_through_cold_update(
             records = [
                 {
                     "sample_id": f"0:{slot}:0",
-                    "prompt": {
-                        "text": text,
-                        "structured": {"rubric": "identify content"},
-                    },
+                    "prompt": {"text": text},
                     "image_path": str(image),
                     "image_sha256": file_hash(image),
                 }

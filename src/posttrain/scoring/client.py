@@ -10,10 +10,9 @@ import urllib.error
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from ..records import atomic_json, identity
+from ..records import atomic_json
 from ..schema import decode, require
 from .contracts import (
-    PROTOCOL,
     Capabilities,
     ImageInput,
     ScoreError,
@@ -60,15 +59,7 @@ def request_for_record(record, spec):
         record["sample_id"],
         record["prompt"]["text"],
         ImageInput(spec.transport, record["image_sha256"], payload),
-        spec.fingerprint,
-        spec.input_schema,
-        {
-            field: record["prompt"].get("structured", {})[field]
-            for field in spec.structured_fields
-        },
-        seed=None
-        if spec.seed_policy == "none"
-        else int(identity([spec.seed, record["sample_id"]])[:16], 16) % 2**63,
+        seed=None,
     )
 
 
@@ -98,18 +89,7 @@ class ScoreClient:
             if time.monotonic() >= deadline:
                 raise TimeoutError("service handshake deadline exceeded")
             cap = decode(Capabilities, raw)
-            require(
-                cap.fingerprint == self.spec.fingerprint
-                and cap.input_schema == self.spec.input_schema
-                and cap.structured_fields == self.spec.structured_fields,
-                "service fingerprint/input schema mismatch",
-            )
             require(cap.outputs == self.spec.outputs, "service output schema mismatch")
-            require(
-                cap.stable_replay
-                and cap.deterministic == (self.spec.seed_policy == "none"),
-                "service seed policy/stable replay mismatch",
-            )
             require(
                 self.spec.transport in cap.transports
                 and self.spec.batch_size <= cap.max_batch_size,
@@ -159,13 +139,6 @@ class ScoreClient:
         require(bool(self.capabilities), "handshake required before acquisition")
         validate_results(requests, [], self.spec.outputs, complete=False)
         for request in requests:
-            require(
-                request.fingerprint == self.spec.fingerprint
-                and request.input_schema == self.spec.input_schema
-                and set(request.structured) == set(self.spec.structured_fields)
-                and ((request.seed is None) == (self.spec.seed_policy == "none")),
-                "request differs from service contract",
-            )
             request.image.read()
         final = {}
         attempts = {}
@@ -215,15 +188,12 @@ class ScoreClient:
                         "/v1/score",
                         self.spec.timeout,
                         {
-                            "protocol": PROTOCOL,
                             "deadline": time.time() + self.spec.timeout,
                             "requests": [asdict(r) for r in batch],
                         },
                     )
                     require(
-                        set(raw) == {"protocol", "results"}
-                        and raw["protocol"] == PROTOCOL
-                        and isinstance(raw["results"], list),
+                        set(raw) == {"results"} and isinstance(raw["results"], list),
                         "invalid score response",
                     )
                     # Envelope corruption aborts instead of accepting possibly misjoined values.
@@ -239,7 +209,7 @@ class ScoreClient:
                         require(
                             all(
                                 item.get(k) == getattr(request, k)
-                                for k in ("sample_id", "cache_key", "fingerprint")
+                                for k in ("sample_id", "cache_key")
                             ),
                             "score belongs to different inputs",
                         )

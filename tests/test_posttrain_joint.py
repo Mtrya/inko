@@ -30,7 +30,7 @@ def joint_config(spec, mode="full", dmd=1, nft=1, reference=0.1):
         c,
         collection=replace(c.collection, draws_per_prompt=2),
         training=replace(c.training, steps=4, checkpoint_every=2),
-        stages=Stages(0, 4, "cold", "2" * 64),
+        stages=Stages(0, 4, "cold"),
         joint=Joint(dmd, nft, reference if nft else 0),
         nft=replace(c.nft, updates_per_round=2, time_draws=2),
         scorers=(spec,) if nft else (),
@@ -296,7 +296,7 @@ def test_stage_transition_retains_weights_resets_optimizers_and_ema(
     sampling_config, mode, dmd
 ):
     c = joint_config(sampling_config.scorers[0], mode, dmd=dmd)
-    c = replace(c, stages=Stages(1, 4, "", ""), training=replace(c.training, steps=5))
+    c = replace(c, stages=Stages(1, 4, ""), training=replace(c.training, steps=5))
     base = small_model()
     state = new_state(c, base, stage="cold")
     cond = (torch.zeros(1, 2, 1024), torch.zeros(1, 1024), torch.ones(1, 2))
@@ -398,7 +398,7 @@ def test_config_only_http_scorer_substitution_through_grouped_nft(
         spec = replace(
             sampling_config.scorers[0],
             id=identifier,
-            outputs=(Channel(metric, direction, (), "Fixture"),),
+            outputs=(Channel(metric, direction),),
         )
 
         class Backend:
@@ -424,7 +424,6 @@ def test_config_only_http_scorer_substitution_through_grouped_nft(
                     "prompt": {
                         "id": f"p{slot}",
                         "text": "first" if slot == 0 else "second",
-                        "structured": {"rubric": "identify content"},
                     },
                     "image_path": str(path),
                     "image_sha256": file_hash(path),
@@ -534,9 +533,6 @@ def test_explicit_cold_initialization_checks_pins_capacity_and_resets(
         torch.device("cpu"),
     )
     c = joint_config(sampling_config.scorers[0], mode)
-    c = replace(
-        c, stages=replace(c.stages, initial_sha256=file_hash(path / "manifest.json"))
-    )
     assets = {"training_checkpoints": {"cold": str(path)}}
     expected = boundary_manifest(c, assets)
     roles = Roles(copy.deepcopy(base), copy.deepcopy(base), c, stage="joint")
@@ -555,10 +551,6 @@ def test_explicit_cold_initialization_checks_pins_capacity_and_resets(
     )
     assert state.student_optimizer.steps == state.fake_optimizer.steps == 0
     assert not state.student_optimizer.optimizers[0].state
-    with pytest.raises(ValueError, match="manifest bytes"):
-        boundary_manifest(
-            replace(c, stages=replace(c.stages, initial_sha256="9" * 64)), assets
-        )
     if mode == "lora":
         with pytest.raises(ValueError, match="tuning/capacity"):
             boundary_manifest(replace(c, student=replace(c.student, rank=3)), assets)

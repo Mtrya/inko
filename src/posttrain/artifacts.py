@@ -1,10 +1,9 @@
-"""Content inventories and pinned model/source verification."""
+"""Content inventories and prepared-asset verification."""
 
 import hashlib
 import importlib.metadata
 import json
 import re
-import subprocess
 from pathlib import Path
 
 from .records import file_hash
@@ -37,26 +36,9 @@ def tree_identity(path):
     return {str(p.relative_to(path)): file_hash(p) for p in files}
 
 
-def verify_source(path, pin):
-    revision = subprocess.check_output(
-        ["git", "-C", path, "rev-parse", "HEAD"], text=True
-    ).strip()
-    require(revision == pin.revision, "scorer source revision mismatch")
-    dirty = subprocess.check_output(
-        ["git", "-C", path, "status", "--porcelain", "--untracked-files=all"], text=True
-    ).strip()
-    require(not dirty, "scorer source checkout has modifications")
-    return revision
-
-
-def verify_model(path, manifest_path, pin):
-    """Manifest records checksums obtained from the pinned upstream file metadata."""
+def verify_model(path, manifest_path):
+    """Manifest records checksums obtained from the prepared upstream file metadata."""
     manifest = json.loads(Path(manifest_path).read_text())
-    require(
-        manifest["repository"] == pin.repository
-        and manifest["revision"] == pin.revision,
-        "weight manifest revision mismatch",
-    )
     root = Path(path)
     actual = {}
     for relative, expected in manifest["files"].items():
@@ -76,7 +58,7 @@ def verify_model(path, manifest_path, pin):
             value = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
         else:
             raise ValueError("unknown model checksum algorithm")
-        require(value == expected["digest"], f"pinned model bytes differ: {relative}")
+        require(value == expected["digest"], f"prepared model bytes differ: {relative}")
         actual[relative] = value
     require(bool(actual), "empty model manifest")
     if root.is_dir():

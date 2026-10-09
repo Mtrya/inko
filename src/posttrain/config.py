@@ -5,7 +5,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .schema import decode, digest, name, require
+from .schema import decode, name, require
 from .scoring.contracts import Channel
 
 
@@ -13,8 +13,6 @@ from .scoring.contracts import Channel
 class Checkpoint:
     asset: str
     weights: str
-    sha256: str
-    architecture_sha256: str
 
 
 @dataclass(frozen=True)
@@ -49,7 +47,6 @@ class Execution:
 class Diversity:
     enabled: bool
     asset: str
-    sha256: str
     pair_batch_size: int
     cpu_threads: int
 
@@ -60,12 +57,8 @@ class Diversity:
         )
         if self.enabled:
             name(self.asset)
-            digest(self.sha256)
         else:
-            require(
-                not self.asset and not self.sha256,
-                "disabled diversity must not claim metric assets",
-            )
+            require(not self.asset, "disabled diversity must not claim metric assets")
 
 
 @dataclass(frozen=True)
@@ -84,35 +77,16 @@ class Evaluation:
 @dataclass(frozen=True)
 class Scorer:
     id: str
-    fingerprint: str
-    input_schema: str
-    structured_fields: tuple[str, ...]
     outputs: tuple[Channel, ...]
     attempts: int
     timeout: float
     concurrency: int
     batch_size: int
     transport: str
-    seed_policy: str
-    seed: int
 
     def __post_init__(self):
         name(self.id)
-        require(
-            self.seed_policy in {"none", "sample"} and 0 <= self.seed < 2**63,
-            "invalid scoring seed policy",
-        )
-        require(
-            self.seed_policy != "none" or self.seed == 0,
-            "deterministic scoring uses seed=0 with no wire seed",
-        )
         require(self.id != "learner", "learner is reserved for the generation role")
-        digest(self.fingerprint)
-        require(bool(self.input_schema), "input schema required")
-        require(
-            len(set(self.structured_fields)) == len(self.structured_fields),
-            "duplicate structured field",
-        )
         require(
             bool(self.outputs)
             and len({c.name for c in self.outputs}) == len(self.outputs),
@@ -174,8 +148,6 @@ class Config:
         for a in self.arms:
             name(a.name)
             name(a.checkpoint.asset)
-            digest(a.checkpoint.sha256)
-            digest(a.checkpoint.architecture_sha256)
             name(a.checkpoint.weights)
             require(a.rule in {"euler", "renoise"} and a.steps > 0, "invalid sampler")
             require(

@@ -1,4 +1,4 @@
-"""Pinned VQAScore v3.1; resident Qwen3-VL loading only."""
+"""VQAScore v3.1; resident Qwen3-VL loading only."""
 
 import importlib
 import sys
@@ -35,7 +35,7 @@ class VQAScore:
                 self.device = device
 
         self.scorer = ResidentQwen(
-            model_name=spec.model, device=str(device), checkpoint=assets["weights"]
+            model_name="qwen3-vl-8b", device=str(device), checkpoint=assets["weights"]
         )
         self.kwargs = {
             k: getattr(spec, k)

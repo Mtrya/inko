@@ -2,7 +2,7 @@
 
 Status: Stage 6.1.2 real 640p sampling/scoring qualification and independent
 review are complete. The 480k
-EMA, shapes, prompts, and HPSv3/VQAScore v3.1 identities are pinned. These are
+EMA, shapes, prompts, and HPSv3/VQAScore v3.1 identities are fixed. These are
 untrained starting controls, not posttraining quality improvements. Full-run preparation is a later
 work layer. See the [contract](posttrain_contract.md) and
 [recipe](posttrain_recipe.md).
@@ -29,11 +29,11 @@ corpus. The initial inputs are:
 
 | Input | Choice | Evidence and remaining scope |
 |---|---|---|
-| Initialization | Preserved 480k EMA, at 640p; digest in config | Bringup completed; retain observed prompt-following limitations |
+| Initialization | Preserved 480k EMA, at 640p | Bringup completed; retain observed prompt-following limitations |
 | Rollout prompts | Fixed 512-prompt subset of DiffusionNFT's `pickscore/train.txt`; 32 of these for bring-up | Manifests prepared; semantic overlap review can refine later comparisons |
 | Scored development benchmark | 200 unique DrawBench prompts, one fixed seed each; fixed 16-prompt subset for bring-up | 600 real images and 1,200 required scores complete; one seed per prompt |
 | Visual monitoring | All 48 entries of [monitor.jsonl](../configs/prompts/monitor.jsonl), with existing seeds and aspects | All 144 images inspected; three actual shapes exercised |
-| Reward/score clients | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; no custom VLM-rubric scorer | Pins/assets verified; real Ascend bringup and service restart completed |
+| Reward/score clients | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; no custom VLM-rubric scorer | Prepared assets verified; real Ascend bringup and service restart completed |
 | Initial report | Separate raw results, paired differences, scene-clustered bootstrap, failures, and cost telemetry | Raw/paired reports complete; blinded-position review of all bringup/monitor and 24 development prompts |
 | Diversity check | Multiple fixed seeds on a small declared subset when comparing trained variants | Select the subset and draw count before the comparison |
 
@@ -66,17 +66,16 @@ do not silently average them. A training mixture needs explicit transforms and
 weights, while evaluation reports the two metrics separately.
 
 Use the upstream VQAScore v3.1 version announced on 2026-06-04 with the
-Qwen3-VL-8B-Instruct backbone, explicitly selecting `qwen3-vl-8b`. The
+Qwen3-VL-8B-Instruct backbone. The
 [upstream announcement and model list](https://github.com/linzhiqiu/t2v_metrics)
-describe this implementation. Pin the exact source revision and weight revision
-when preparing the runtime rather than relying on a moving branch or an implicit
-model default. Immutable source/model/runtime revisions are recorded in `configs/scorers/`;
-the caller pins their semantic fingerprints in `configs/posttrain.toml`.
-The v3.1 source commit is `74c720890c6ee3916e2f4facf9c671c8fe47ddf4`;
+describe this implementation. The service configs name the source and weight
+repositories and the files to prepare; preparation downloads them and records
+local checksums in the machine-local asset manifest. The v3.1 source commit is
+`74c720890c6ee3916e2f4facf9c671c8fe47ddf4`;
 its commit timestamp is June 5 UTC, while its announcement says June 4.
 
-Pin the question/answer template and probability calculation alongside those
-artifacts. HPSv3 similarly needs exact weights/config and output-field semantics.
+Keep the question/answer template and probability calculation in the service
+config. HPSv3 similarly needs exact weights and output-field names.
 This initial setup uses the scorers' defined scoring procedures;
 it does not add an open-ended VLM judge or custom grading rubric.
 
@@ -108,15 +107,16 @@ choice depends on it, not as a prerequisite for preparing the first suite.
 
 ## Suites and splits
 
-Keep prompt suites under `configs/prompts/` with stable prompt IDs, source and
-revision, split, language, domain, and intended aspect/resolution metadata.
+Keep prompt suites under `configs/prompts/` with stable prompt IDs, text, seed,
+language/variant labels and intended aspect/resolution metadata. The generator
+script verifies its pinned upstream revision and writes the suites.
 Record prompt bytes or their content hashes with every result.
 
 | Split | Use |
 |---|---|
 | Rollout training | Online sample collection and reward optimization. |
 | Development evaluation | Repeated variant selection and diagnosis; disjoint from rollout training. |
-| Final evaluation | Held out from recipe selection and used for the final assessment. |
+| Final evaluation | Held out from recipe selection and used for the final assessment. The confirmation suite (`configs/prompts/posttrain_confirmation.jsonl`, 200 prompts) is reserved for this split and wired as the benchmark's fourth suite slot. |
 | Monitoring panel | Fixed visual comparisons during development; repeated use makes it a development signal. |
 
 Keep translations, paraphrases, and variants of the same underlying scene in the

@@ -1,4 +1,4 @@
-"""Versioned image/score envelopes and semantic versus transport identity."""
+"""Image/score envelopes and semantic versus transport identity."""
 
 import base64
 import hashlib
@@ -9,47 +9,25 @@ from pathlib import Path
 from ..records import identity
 from ..schema import digest, name, require
 
-PROTOCOL = 1
-
 
 @dataclass(frozen=True)
 class Channel:
     name: str
     direction: str
-    bounds: tuple[float, ...]
-    meaning: str
 
     def __post_init__(self):
         name(self.name)
         require(self.direction in {"higher", "lower"}, "invalid channel direction")
-        require(
-            len(self.bounds) in {0, 2} and all(math.isfinite(x) for x in self.bounds),
-            "invalid channel bounds",
-        )
-        require(
-            not self.bounds or self.bounds[0] <= self.bounds[1],
-            "reversed channel bounds",
-        )
-        require(bool(self.meaning), "channel meaning required")
 
 
 @dataclass(frozen=True)
 class Capabilities:
-    protocol: int
-    fingerprint: str
-    input_schema: str
-    structured_fields: tuple[str, ...]
     outputs: tuple[Channel, ...]
     max_batch_size: int
     transports: tuple[str, ...]
-    deterministic: bool
-    stable_replay: bool
 
     def __post_init__(self):
-        require(self.protocol == PROTOCOL, "unsupported protocol version")
-        digest(self.fingerprint)
         require(self.max_batch_size > 0, "invalid service batch size")
-        require(bool(self.input_schema), "input schema required")
         require(
             bool(self.outputs)
             and len({c.name for c in self.outputs}) == len(self.outputs),
@@ -91,24 +69,15 @@ class ImageInput:
 
 @dataclass(frozen=True)
 class ScoreRequest:
-    protocol: int
     sample_id: str
     request_id: str
     cache_key: str
-    fingerprint: str
-    input_schema: str
     prompt: str
     image: ImageInput
-    structured: dict[str, object]
     seed: int | None
 
     def __post_init__(self):
-        require(self.protocol == PROTOCOL, "unsupported protocol version")
-        digest(self.fingerprint)
-        require(
-            bool(self.sample_id) and bool(self.prompt) and bool(self.input_schema),
-            "missing score input",
-        )
+        require(bool(self.sample_id) and bool(self.prompt), "missing score input")
         require(self.seed is None or 0 <= self.seed < 2**63, "invalid scorer seed")
         require(self.cache_key == self.semantic_key(), "score cache identity mismatch")
         require(
@@ -119,49 +88,25 @@ class ScoreRequest:
     def semantic_key(self):
         return identity(
             {
-                "protocol": self.protocol,
-                "fingerprint": self.fingerprint,
-                "input_schema": self.input_schema,
                 "prompt": self.prompt,
                 "image_sha256": self.image.sha256,
-                "structured": self.structured,
-                "seed": self.seed,
             }
         )
 
     @classmethod
-    def create(
-        cls,
-        sample_id,
-        prompt,
-        image,
-        fingerprint,
-        input_schema,
-        structured=None,
-        seed=None,
-    ):
-        structured = {} if structured is None else structured
+    def create(cls, sample_id, prompt, image, seed=None):
         key = identity(
             {
-                "protocol": PROTOCOL,
-                "fingerprint": fingerprint,
-                "input_schema": input_schema,
                 "prompt": prompt,
                 "image_sha256": image.sha256,
-                "structured": structured,
-                "seed": seed,
             }
         )
         return cls(
-            PROTOCOL,
             sample_id,
             identity([sample_id, key]),
             key,
-            fingerprint,
-            input_schema,
             prompt,
             image,
-            structured,
             seed,
         )
 
@@ -178,24 +123,20 @@ class ScoreError:
 
 @dataclass(frozen=True)
 class ScoreResult:
-    protocol: int
     sample_id: str
     request_id: str
     cache_key: str
-    fingerprint: str
     status: str
     values: dict[str, float]
     error: ScoreError | None
     metadata: dict[str, object]
 
     def __post_init__(self):
-        require(self.protocol == PROTOCOL, "unsupported protocol version")
         require(self.status in {"ok", "failed"}, "unknown score status")
         require(
             self.request_id == identity([self.sample_id, self.cache_key]),
             "result wire identity mismatch",
         )
-        digest(self.fingerprint)
         if self.status == "ok":
             require(
                 bool(self.values) and self.error is None,
@@ -217,11 +158,9 @@ class ScoreResult:
     @classmethod
     def for_request(cls, request, *, values=None, error=None, metadata=None):
         return cls(
-            PROTOCOL,
             request.sample_id,
             request.request_id,
             request.cache_key,
-            request.fingerprint,
             "failed" if error else "ok",
             values or {},
             error,
@@ -241,8 +180,8 @@ def validate_results(requests, results, outputs, *, complete):
         )
         request = expected[result.request_id]
         require(
-            (result.sample_id, result.cache_key, result.fingerprint)
-            == (request.sample_id, request.cache_key, request.fingerprint),
+            (result.sample_id, result.cache_key)
+            == (request.sample_id, request.cache_key),
             "score belongs to different inputs",
         )
         if result.status == "ok":
@@ -250,11 +189,6 @@ def validate_results(requests, results, outputs, *, complete):
                 result.values.keys() == channels.keys(),
                 "missing or undeclared score channels",
             )
-            for key, value in result.values.items():
-                bounds = channels[key].bounds
-                require(
-                    not bounds or bounds[0] <= value <= bounds[1], "score out of range"
-                )
         joined[result.request_id] = result
     if complete:
         require(

@@ -65,9 +65,9 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def digest(value, label="digest", length=64):
+def digest(value, label="digest"):
     require(
-        isinstance(value, str) and re.fullmatch(rf"[0-9a-f]{{{length}}}", value),
+        isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value),
         f"{label}: invalid digest",
     )
 

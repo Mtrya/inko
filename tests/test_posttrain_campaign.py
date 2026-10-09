@@ -173,62 +173,6 @@ def collection(state):
     return rows
 
 
-@pytest.mark.parametrize("published", [None, 0, 1, 2])
-def test_qualification_retries_fitting_until_requested_checkpoint_is_published(
-    tmp_path, monkeypatch, published
-):
-    from scripts.posttrain import qualify_campaign
-
-    c = replace(config(), fake=replace(config().fake, initial_steps=3))
-    case = qualify_campaign.Case(
-        "case", "recovery", "unused", "", "unused", "", 2, "", 0
-    )
-    monkeypatch.setattr(
-        qualify_campaign, "validate", lambda path: qualify_campaign.Plan((case,))
-    )
-    monkeypatch.setattr(qualify_campaign, "load_training_config", lambda path: c)
-    assets = tmp_path / "assets.json"
-    assets.write_text("{}")
-    training = tmp_path / "output" / "case" / "training"
-    training.mkdir(parents=True)
-    (training / "manifest.json").write_text("{}")
-    checkpoint = None
-    if published is not None:
-        checkpoint = (
-            training
-            / "checkpoints"
-            / ("step-000000" if published == 0 else f"fit-{published:06d}")
-        )
-        checkpoint.mkdir(parents=True)
-        (checkpoint / "manifest.json").write_text("{}")
-    monkeypatch.setattr(
-        qualify_campaign,
-        "committed_checkpoints",
-        lambda root: [] if published is None else [(0, published, checkpoint)],
-    )
-    calls = []
-
-    def capture(argv, **kwargs):
-        calls.append(argv)
-        raise RuntimeError("captured launch")
-
-    monkeypatch.setattr(qualify_campaign.subprocess, "run", capture)
-    with pytest.raises(RuntimeError, match="captured launch"):
-        qualify_campaign.execute(tmp_path / "plan.json", assets, tmp_path / "output")
-    assert len(calls) == 1
-    argv = calls[0]
-    if published == 2:
-        assert argv[1:3] == ["-m", "scripts.posttrain.run_campaign"]
-        assert "--stop-after-fit" not in argv
-    else:
-        assert argv[1:3] == ["-m", "src.posttrain.train"]
-        assert argv[argv.index("--stop-after-fit") + 1] == "2"
-        if checkpoint is None:
-            assert "--resume" not in argv
-        else:
-            assert argv[argv.index("--resume") + 1] == str(checkpoint)
-
-
 def fit_one(state, rows):
     evidence = fake_updates(
         state.config,
@@ -406,7 +350,7 @@ def test_interval_stops_are_complete_rounds_and_final_evaluation_is_explicit():
         training=replace(config().training, steps=5),
     )
     interval = IntervalEvaluation(
-        "sampling.toml", "0" * 64, 2, ("monitor",), ("live", "ema"), False, 7
+        "sampling.toml", 2, ("monitor",), ("live", "ema"), False, 7
     )
     assert list(boundaries(c, interval)) == [2, 4, 5]
     assert [s for s in (0, 1, 2, 3, 4, 5) if evaluation_due(c, interval, s)] == [
@@ -448,7 +392,6 @@ def test_blind_join_uses_channel_direction_and_rejects_unfilled_ballots(
                 "text": "fixture",
                 "seed": 1,
                 "aspect": "1:1",
-                "structured": {"rubric": "fixture"},
             },
             "image_path": str(image),
             "image_sha256": file_hash(image),
@@ -480,21 +423,19 @@ def test_interval_recovery_evaluation_failure_blocks_further_training(
     tmp_path, monkeypatch
 ):
     from scripts.posttrain import run_campaign
-    from src.posttrain.records import atomic_json, file_hash
+    from src.posttrain.records import atomic_json
 
     source = tmp_path / "config.json"
     atomic_json(source, asdict(config()))
     assets = tmp_path / "assets.json"
     atomic_json(assets, {})
     sampling = tmp_path / "sampling.json"
-    sampling.write_text("fixture sampling configuration")
     interval = tmp_path / "interval.json"
     atomic_json(
         interval,
         asdict(
             IntervalEvaluation(
                 str(sampling),
-                file_hash(sampling),
                 2,
                 ("bringup",),
                 ("live", "ema"),

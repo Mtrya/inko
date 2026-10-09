@@ -29,11 +29,12 @@ NFT-only and joint controls. Implementation qualification and algorithm selectio
 are separate gates; short smoke runs cannot establish a winning recipe.
 
 Scoring must be independently runnable. Training and evaluation use a shared
-versioned client/protocol; scorer services own model loading, preprocessing,
+client/protocol; scorer services own model loading, preprocessing,
 batching, inference and rubric/response parsing. Config selects services and
 numeric channels. A protocol-compatible VLM scorer can replace an initial
 scorer through caller configuration; an unfamiliar upstream API needs an isolated
-adapter. Scorer model/rubric identity enters score provenance and cache identity.
+adapter. Prepared scorer assets carry their own integrity checks; score cache
+identity covers the image bytes and prompt.
 Config-only substitution through collection/evaluation and later reward/NFT
 paths is required qualification. The independent services and generic client satisfy collection/evaluation
 substitution. An unfamiliar service/channel also has HTTP mechanism coverage
@@ -69,7 +70,7 @@ least in FP32. The proposed few-step update below is a separate sampling rule.
 
 Status: implemented and exercised with real generations and scores. The
 undistilled controls have weak generation quality; no training method is selected. Initial development uses 640p and the preserved 480k EMA.
-Its SHA256 identity is pinned in [the config](../configs/posttrain.toml).
+Its identity is the prepared asset name in the run's local asset map.
 Availability of a newer checkpoint does not automatically advance the teacher.
 
 Keep the Inko velocity parameterization for both teacher and student. Use a
@@ -135,7 +136,7 @@ training loop dependency.
 
 | Record | Required content for the first increment |
 |---|---|
-| Prompt | Stable ID, text, scene/family ID, split, language, and domain; evaluation adds explicit seeds and aspect ratio |
+| Prompt | Stable ID, text, scene/family ID, language, and variant; evaluation adds explicit seeds and aspect ratio |
 | Sampling specification | Rule, actual time grid, step count, guidance, spatial shape, precision, conditioning/VAE identities, and weight identity |
 | Sample | Prompt ID, draw index, initial and transition noise identities, collection-policy version, terminal latent and decoded-image identities |
 | Raw score | Sample identity, scorer/model/rubric/preprocessing identity, raw values, request identity, and explicit success/failure |
@@ -155,10 +156,10 @@ Map each development-panel aspect to one recorded shape. Preserve sample IDs
 through bucketing so result matching does not depend on return order.
 
 The initial scorer interface returns separate HPSv3 and VQAScore raw records.
-Use VQAScore v3.1 (announced on 2026-06-04) with Qwen3-VL-8B-Instruct, explicitly
-selecting `qwen3-vl-8b`. Pin HPSv3 weights/config and the VQAScore weight revision,
-template, probability calculation, and immutable source artifact. A custom
-VLM-rubric scorer is excluded from this initial setup. Establish persistent
+Use VQAScore v3.1 (announced on 2026-06-04) with Qwen3-VL-8B-Instruct. The
+service configs name each scorer's source and weight repositories and the files
+to prepare; the loaders fix the adapter, template and probability calculation.
+A custom VLM-rubric scorer is excluded from this initial setup. Establish persistent
 scorer workers with the round/update boundary described below. Scoring requests
 can execute concurrently without changing which policy produced the round.
 
@@ -298,25 +299,24 @@ distribution, global reductions and fake-score ordering are implemented below.
 ## Sampling/scoring implementation contract
 
 The [caller config](../configs/posttrain.toml) uses strict frozen records for
-sampling, explicit per-arm checkpoint/architecture digests and live/EMA choice,
+sampling, per-arm checkpoint asset and live/EMA choice,
 execution limits, suite paths, declared score channels and acquisition limits.
-[Service configs](../configs/scorers/) separately own source/model pins,
-preprocessing, numeric runtime, output meanings and model batching. Asset paths
+[Service configs](../configs/scorers/) separately own source/model repositories,
+output names/directions and model batching. Asset paths
 and endpoint/device placement live in separate local JSON. Unknown fields fail
 validation; no config inheritance or environment hyperparameters are supported.
 
 The CPU coordinator has no scorer model or backend imports. Independently
 runnable services expose `/v1/health`, `/v1/capabilities` and `/v1/score` through
-HTTP JSON protocol version 1. The same client handles owned loopback replicas
+HTTP JSON. The same client handles owned loopback replicas
 and externally managed endpoints. Scorers never join learner collectives.
 Generation and acquisition overlap within a bounded number of unfinished
 batches, held until all configured services respond. `learner` is reserved as
 the generation role ID; scorer IDs and output channels otherwise come from config.
 
-The handshake checks semantic fingerprint, input schema, output direction/range,
-transport, batch size and stable replay. Requests accept verified shared-file
-PNGs or encoded PNG bytes, exact prompts, structured inputs and an explicit seed
-policy for stochastic services. A semantic cache key excludes sample IDs and
+The handshake checks the service's declared output names/directions,
+transport and batch size. Requests accept verified shared-file
+PNGs or encoded PNG bytes and exact prompts. A semantic cache key excludes sample IDs and
 transport locations; wire IDs hash `(sample_id, cache_key)`. Cached results are
 re-enveloped for the current sample. Diagnostic JSON never becomes a reward.
 
@@ -332,8 +332,8 @@ explicit configured PMF.
 The generation record includes prompt/sample/policy identity, grid, shape,
 noise specification, terminal and selected-step tensors, and image/latent
 hashes. Frozen text conditioning can be rebuilt from the recorded prompt,
-encoder/tokenizer artifact identity, and text contract. Score semantics include pinned source/model, preprocessing, adapter, numeric
-runtime and structured-input identities. Results contain validated named raw
+encoder/tokenizer artifact identity, and text contract. Score records name the
+scorer service and carry validated named raw
 channels, typed failures and diagnostic metadata. Request deadlines cover DNS,
 TLS and response bodies through a bounded, model-free transport process.
 Stalled inference retires the owned service instead of leaving a permanently
@@ -344,11 +344,11 @@ Exhaustion produces explicit failure records. Startup failures, dead workers,
 timeouts, duplicate results, or identity mismatches abort execution. Evaluation
 can report score failures; the training join rejects incomplete rounds.
 
-Each run writes an immutable input/code/artifact manifest and atomic sample and
-score records under a single-writer lock. Restart verifies those identities and
-content hashes, reuses completed records, and resubmits unresolved work within its persisted retry allowance.
+Each run writes an immutable input/code/config manifest and atomic sample and
+score records under a single-writer lock. Restart verifies those identities,
+reuses completed records, and resubmits unresolved work within its persisted retry allowance.
 Each attempt is charged durably before transport; successful rows survive a
-partial batch failure, and retries preserve request/seed identity.
+partial batch failure, and retries preserve request identity.
 Exhausted score failures remain recorded; a restart does not silently grant a
 new retry budget. Temporary/unrecorded generation is recollected. Plain-DMD training restarts incomplete collection from the preceding committed
 round boundary and restores optimizer state, per-rank RNG and prompt cursor.
@@ -370,7 +370,7 @@ checkpointing disabled; these are allocator measurements, not whole-device HBM.
 | DynaDG teacher view | An adapted score-estimator view during cold start. Specify adapter ownership, training objective, sharing, and annealing back to the base teacher. |
 | Fake-score estimator | Learns the current student distribution from detached generated samples with its own optimization schedule. Its parameters receive no generator-loss gradients. |
 | NFT old policy | Supplies collection and comparison predictions; frozen during its update interval, with an explicitly scheduled refresh. It is distinct from the base teacher. |
-| Evaluation EMA | Optional student weight average for evaluation; distinguish it from the NFT old policy even if an implementation shares storage. |
+| Student EMA shadows | Optional named weight averages for evaluation and export; distinguish them from the NFT old policy even if an implementation shares storage. |
 | Reward scorer | Returns scores without a gradient path in the starting RT-DM/NFT recipe. A differentiable-reward experiment must specify a different contract. |
 
 Storage sharing between roles must preserve their separate update and gradient
@@ -468,8 +468,8 @@ clip limit and successful-update LR clock. All of that role's loss, parameters,
 gradients and optimizer state must be finite before any optimizer steps.
 
 Complete-round checkpoints retain role weights/adapters, optimizer state and
-clocks, EMA, cursor/permutation, per-rank RNG, source/config/runtime/artifact
-identities and sample counts. Attempt journals retain discarded work. Files are
+clocks, EMA, cursor/permutation, per-rank RNG, the training contract and sample
+counts. Attempt journals retain discarded work. Files are
 fsynced before publishing a manifest and atomically renaming the checkpoint;
 incomplete directories are never recovery points. Resume rejects changed
 contracts and verifies exact restoration before collecting again. Deterministic
@@ -484,14 +484,13 @@ explicit storage device (`learner` or `cpu`). Each successful student optimizer
 step advances every shadow. Initial fake fitting never advances them. Stage
 transition resets all shadows to the live joint-entry student. No fake-score
 shadow exists. Save/resume preserves every named shadow and rejects a changed
-inventory. Checkpoint schema 2 records the initial-fitting and actual fake-step
-counters; earlier checkpoint schemas require their original source.
+inventory. The manifest records the initial-fitting and actual fake-step
+counters; a manifest from an incompatible implementation requires its original source.
 
 Exports merge only student weight LoRA, optionally substitute a named student EMA,
 and verify an exact reload of the materialized FP32 weights. Fake Q/V adapters
-never enter an inference export. The export manifest pins initialization,
-architecture, tuning, resolved parameter names, selected view/decay and source
-checkpoint identity. Export directories publish atomically.
+never enter an inference export. The export record names the selected
+view and step. Export directories publish atomically.
 
 Interval evaluation runs between committed training segments. All learner and
 owned scorer processes exit before export and benchmark workers start. The next
@@ -517,12 +516,12 @@ and credentials remain machine-local.
 Name each clock: generator optimizer updates, fake-score optimizer updates,
 rollout rounds, and samples consumed. Every schedule declares its clock.
 Specify update ordering, accumulation, skipped-update behavior, stage transitions,
-and when the collection policy and evaluation EMA change.
+and when the collection policy and student EMA shadows change.
 
 Checkpoint coverage must include trainable models/adapters, optimizers,
 schedulers, model-role versions, all clocks, stage, RNG, prompt-sampler state,
 reward-normalization state, and any retained rollout/reward work. Record the
-complete config, code revision, and input artifact hashes. Define whether an
+complete config and the prompt suite the run consumes. Define whether an
 interrupted collection round is restored or explicitly discarded and recollected.
 Recovery and a deliberate experimental branch are separate operations.
 
@@ -533,7 +532,7 @@ Recovery and a deliberate experimental branch are separate operations.
 are supported with teacher-Q/V fake score. Full independent fake is incompatible
 with DynaDG and remains usable when that control is disabled. NFT is rejected.
 
-RT-DM decodes the detached terminal normalized latent with the pinned frozen VAE.
+RT-DM decodes the detached terminal normalized latent with the frozen VAE.
 Each learner publishes immutable PNG/latent identities and retains conditioning
 and selected replay state. The CPU coordinator acquires scores through the shared
 client and admits the complete global round before any optimizer update. Failed
@@ -629,8 +628,8 @@ latent-prediction gradient norms are diagnostics; these norms stop at forward
 outputs and do not traverse parameter/DDP hooks.
 
 At joint entry, hard-copy old/reference from the live boundary student, retain
-enabled fake weights, reset student/fake optimizers and schedules, and reset the
-separate evaluation EMA. Full tuning has actual frozen model copies. LoRA has
+enabled fake weights, reset student/fake optimizers and schedules, and reset all
+student EMA shadows. Full tuning has actual frozen model copies. LoRA has
 independent adapter/module state over shared immutable base tensors. After a whole
 round, refresh old with `old <- d(r)*old + (1-d(r))*student`:
 
@@ -639,26 +638,26 @@ round, refresh old with `old <- d(r)*old + (1-d(r))*student`:
 - `linear_ramp`: `decay_start + (decay_end-decay_start)*min(r/horizon,1)`.
 
 Here r counts previously committed joint rounds, starting at zero. It advances
-only after every inner update and the old refresh succeed. Evaluation EMA advances
-on each successful generator step; its state and clock are independent of old.
+only after every inner update and the old refresh succeed. Student EMA shadows advance
+on each successful generator step; their state and clocks are independent of old.
 
 Complete configs declare cold/joint generator-step counts. NFT joint length and
 checkpoint interval must contain whole inner-update rounds; explicit early stops
 inside a round fail before launch. Checkpoints are named `step-<run-local-generator-step>`
 and retain stage, local/global generator and fake clocks, committed round and old
 versions, scored/used counts, next action, every active role/optimizer, old/reference
-and evaluation EMA, last global reward, source/config/runtime identities and rank
+and student EMA shadows, last global reward, the training contract and rank
 RNG/cursor state. Cold boundary checkpoints identify the pending transition.
 No intermediate NFT inner-update checkpoint is published. A failed inner update
 is discarded; exact resume restores the last whole boundary and recollects.
 
 Training RNG v3 keys include run seed, stage, global generator step, collection
 round, sample ID, role and update/time-draw index. Old collection additionally
-identifies its frozen policy version. An explicit SHA-pinned cold initialization
+identifies its frozen policy version. An explicit cold-initialization path
 imports matching live student and enabled fake weights while resetting declared
 optimization/cursor/RNG state. It preserves lineage offsets for global generator
-and fake clocks. This is separate from exact resume, which requires unchanged
-source/config/runtime/artifact identities.
+and fake clocks. This is separate from exact resume, which requires an unchanged
+training contract.
 
 ## Verification and references
 

@@ -79,12 +79,6 @@ class Generator:
         if self.checkpoint == checkpoint:
             return
         path = self.assets["checkpoints"][checkpoint.asset]
-        if (
-            file_hash(path) != checkpoint.sha256
-            or file_hash(Path(path).with_name("transformer_config.json"))
-            != checkpoint.architecture_sha256
-        ):
-            raise ValueError("arm checkpoint/architecture bytes changed")
         # Replace once at an arm boundary; scorers remain resident independently.
         self.model = None
         self.model = (
@@ -203,7 +197,6 @@ class Generator:
                     "seed": prompt["seed"],
                     "selected_index": None if indices is None else indices[i],
                     "noise_specification": {
-                        "version": "benchmark-cpu-fp32-v1",
                         "initial": prompt["seed"],
                         "selected_index": noise_seed(prompt["seed"], "selected_index"),
                         "transitions": [

@@ -34,16 +34,9 @@ def verify_assets(config, assets):
     )
     checkpoints = {}
     for arm in config.arms:
-        checkpoint = arm.checkpoint
-        path = Path(assets["checkpoints"][checkpoint.asset])
-        require(file_hash(path) == checkpoint.sha256, "arm checkpoint bytes differ")
-        require(
-            file_hash(path.with_name("transformer_config.json"))
-            == checkpoint.architecture_sha256,
-            "arm architecture bytes differ",
-        )
+        path = Path(assets["checkpoints"][arm.checkpoint.asset])
         require(path.suffix in {".pt", ".safetensors"}, "unsupported checkpoint format")
-        checkpoints[arm.name] = asdict(checkpoint)
+        checkpoints[arm.name] = asdict(arm.checkpoint)
     probe = subprocess.run(
         [sys.executable, "-m", "src.posttrain.runtime"],
         env=isolated_environment(assets["learner"]["python_paths"]),
@@ -101,9 +94,7 @@ def _run(config, assets, prompts, output, *, visual_only, suite):
     policies = {
         a.name: identity(
             {
-                "checkpoint": {
-                    k: v for k, v in asdict(a.checkpoint).items() if k != "asset"
-                },
+                "checkpoint": asdict(a.checkpoint),
                 "conditioning": conditioning,
                 "vae": artifacts["vae"],
                 "precision": config.sampling.precision,

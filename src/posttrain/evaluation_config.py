@@ -5,13 +5,12 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .schema import decode, digest, name, require
+from .schema import decode, name, require
 
 
 @dataclass(frozen=True)
 class IntervalEvaluation:
     sampling_config: str
-    sampling_sha256: str
     every: int
     suites: tuple[str, ...]
     weights: tuple[str, ...]
@@ -19,7 +18,6 @@ class IntervalEvaluation:
     blind_seed: int
 
     def __post_init__(self):
-        digest(self.sampling_sha256)
         require(
             self.every > 0 and bool(self.sampling_config),
             "invalid evaluation cadence/config",

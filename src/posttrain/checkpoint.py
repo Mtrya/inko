@@ -1,4 +1,4 @@
-"""Durable complete-round checkpoints with per-rank RNG and strict identity."""
+"""Durable complete-round checkpoints with per-rank RNG and a checked contract."""
 
 import json
 import os
@@ -12,7 +12,7 @@ import torch
 import torch.distributed as dist
 
 from .distributed import barrier, world_size
-from .records import atomic_json, file_hash, identity
+from .records import atomic_json
 from .schema import require
 
 
@@ -84,23 +84,19 @@ def publish(root, step, contract, state, rank_state, rank, device):
     fitting = state.get("initial_fit_steps", 0) if step == 0 else 0
     destination = root / (f"fit-{fitting:06d}" if fitting else f"step-{step:06d}")
     if rank == 0:
-        files = {p.name: file_hash(p) for p in staging.iterdir()}
         require(
-            set(files)
+            {p.name for p in staging.iterdir()}
             == {"state.pt", *(f"rank-{r:03d}.pt" for r in range(world_size()))},
             "checkpoint inventory incomplete",
         )
         atomic_json(
             staging / "manifest.json",
             {
-                "schema": 2,
                 "step": step,
                 "initial_fit_steps": state.get("initial_fit_steps", 0),
                 "fake_steps": state.get("fake_steps"),
                 "world_size": world_size(),
                 "contract": contract,
-                "contract_sha256": identity(contract),
-                "files": files,
             },
         )
         require(not destination.exists(), "refusing to overwrite committed checkpoint")
@@ -121,20 +117,11 @@ def inspect(path, expected_contract=None):
         "unpublished checkpoint staging directory",
     )
     record = json.loads((path / "manifest.json").read_text())
-    require(
-        record["schema"] == 2
-        and record["contract_sha256"] == identity(record["contract"]),
-        "invalid checkpoint contract",
-    )
     if expected_contract is not None:
         require(
             record["contract"] == expected_contract,
             "exact resume contract differs; initialize an explicit new run",
         )
-    required = {"state.pt", *(f"rank-{r:03d}.pt" for r in range(record["world_size"]))}
-    require(set(record["files"]) == required, "incomplete checkpoint files")
-    for name, digest in record["files"].items():
-        require(file_hash(path / name) == digest, "checkpoint file digest differs")
     return record
 
 

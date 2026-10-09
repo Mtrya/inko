@@ -25,7 +25,6 @@ def test_config_only_external_service_collection_join_report_and_resume(
             "aspect": "1:1",
             "text": "text",
             "seed": 4,
-            "structured": {"rubric": "identify content"},
         }
     ]
 
@@ -117,7 +116,7 @@ def test_config_only_external_service_collection_join_report_and_resume(
         endpoint.close()
 
 
-def test_arm_checkpoint_is_loaded_and_verified(tmp_path, monkeypatch):
+def test_arm_checkpoint_is_loaded_and_cached(tmp_path, monkeypatch):
     import torch
 
     from src.models.inko import Inko
@@ -149,20 +148,14 @@ def test_arm_checkpoint_is_loaded_and_verified(tmp_path, monkeypatch):
             "ema_weights.pt" if weights == "ema" else "model.safetensors"
         )
         path.write_text(value)
-        architecture = directory / "transformer_config.json"
-        architecture.write_text("{}")
         worker.assets["checkpoints"][asset] = str(path)
-        checkpoints.append(
-            Checkpoint(asset, weights, file_hash(path), file_hash(architecture))
-        )
+        checkpoints.append(Checkpoint(asset, weights))
     worker.select_checkpoint(checkpoints[0])
     assert worker.model(torch.ones(1, 1)).item() == 2
     worker.select_checkpoint(checkpoints[1])
     assert worker.model(torch.ones(1, 1)).item() == 7
     worker.select_checkpoint(checkpoints[1])
     assert len(calls) == 2
-    with pytest.raises(ValueError, match="bytes changed"):
-        worker.select_checkpoint(replace(checkpoints[0], sha256="0" * 64))
 
 
 def test_strict_typed_configs_reject_unknown_and_invalid_fields(sampling_config):
@@ -214,14 +207,9 @@ def test_native_generation_runtime_is_required_and_content_addressed(
     import json
     from types import SimpleNamespace
 
-    weights, architecture = tmp_path / "model.pt", tmp_path / "transformer_config.json"
+    weights = tmp_path / "model.pt"
     weights.write_bytes(b"checkpoint fixture")
-    architecture.write_text("{}")
-    checkpoint = replace(
-        sampling_config.arms[0].checkpoint,
-        sha256=file_hash(weights),
-        architecture_sha256=file_hash(architecture),
-    )
+    checkpoint = sampling_config.arms[0].checkpoint
     config = replace(
         sampling_config, arms=(replace(sampling_config.arms[0], checkpoint=checkpoint),)
     )

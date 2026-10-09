@@ -121,7 +121,7 @@ def config(mode="full", strategy="teacher_qv"):
         warmup_steps=0,
         minimum_ratio=0.1,
     )
-    checkpoint = Checkpoint("fixture", "live", "0" * 64, "1" * 64)
+    checkpoint = Checkpoint("fixture", "live")
     return TrainingConfig(
         initialization=checkpoint,
         teacher=checkpoint,
@@ -161,7 +161,7 @@ def config(mode="full", strategy="teacher_qv"):
         rewards=Rewards((), 1e-4, "mean_one_exp", 1),
         dyna_dg=DynaDG(False, 3, 1),
         dyna_rs=DynaRS(False, 3, 4, 1),
-        stages=Stages(3, 0, "", ""),
+        stages=Stages(3, 0, ""),
         joint=Joint(0, 0, 0),
         nft=NFT("clean_adaptive", "group", 5, 1, 1e-5, 1, 1, "uniform", 0.02, 0.98),
         old_policy=OldPolicy("copy", 0.9, 0, 0.9, 3),
@@ -288,9 +288,6 @@ def test_round_roles_and_resume(tmp_path, mode, strategy, target):
     assert_exact(expected, roles.student.state_dict())
     with pytest.raises(ValueError, match="contract"):
         inspect(path, {"case": "changed"})
-    (path / "state.pt").write_bytes(b"corrupt")
-    with pytest.raises(ValueError, match="digest"):
-        inspect(path)
 
 
 def test_nonfinite_optimizer_state_rejects_whole_role():

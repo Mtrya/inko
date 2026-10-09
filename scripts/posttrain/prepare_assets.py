@@ -1,4 +1,4 @@
-"""Prepare one pinned scorer and checksum manifest in an isolated asset tree."""
+"""Prepare one scorer and checksum manifest in an isolated asset tree."""
 
 import argparse
 import fnmatch
@@ -7,44 +7,40 @@ import subprocess
 from dataclasses import asdict
 from pathlib import Path
 
-from src.posttrain.artifacts import verify_model, verify_source
-from src.posttrain.records import atomic_json, file_hash
+from src.posttrain.artifacts import verify_model
+from src.posttrain.records import atomic_json
 from src.posttrain.schema import require
 from src.posttrain.scoring.config import load_service_config
 
 
-def source_checkout(pin, destination):
+def source_checkout(repository, destination):
     if not destination.exists():
         subprocess.run(
-            ["git", "clone", "--no-checkout", pin.repository, str(destination)],
+            ["git", "clone", "--no-checkout", repository, str(destination)],
             check=True,
         )
         subprocess.run(
-            ["git", "-C", str(destination), "checkout", "--detach", pin.revision],
+            ["git", "-C", str(destination), "checkout", "--detach", "HEAD"],
             check=True,
         )
-    verify_source(str(destination), pin)
 
 
-def model_manifest(pin, destination, *, download, source=None):
+def model_manifest(model, destination, *, download, source=None):
     from huggingface_hub import HfApi, snapshot_download
 
-    info = HfApi().model_info(
-        pin.repository, revision=pin.revision, files_metadata=True
-    )
+    info = HfApi().model_info(model.repository, files_metadata=True)
     files = {}
     for entry in info.siblings:
-        if any(fnmatch.fnmatch(entry.rfilename, pattern) for pattern in pin.files):
+        if any(fnmatch.fnmatch(entry.rfilename, pattern) for pattern in model.files):
             files[entry.rfilename] = {
                 "algorithm": "sha256" if entry.lfs else "git_blob_sha1",
                 "digest": entry.lfs.sha256 if entry.lfs else entry.blob_id,
             }
     if download:
         snapshot_download(
-            pin.repository,
-            revision=pin.revision,
+            model.repository,
             local_dir=destination,
-            allow_patterns=pin.files,
+            allow_patterns=model.files,
         )
     if source is not None:
         destination.mkdir(parents=True, exist_ok=True)
@@ -52,13 +48,13 @@ def model_manifest(pin, destination, *, download, source=None):
             target = source / relative if source.is_dir() else source
             member = destination / relative
             member.parent.mkdir(parents=True, exist_ok=True)
-            require(target.is_file(), f"missing pinned model member: {target}")
+            require(target.is_file(), f"missing prepared model member: {target}")
             if not member.exists():
                 member.symlink_to(target.resolve())
-    manifest = {"repository": pin.repository, "revision": pin.revision, "files": files}
+    manifest = {"repository": model.repository, "files": files}
     manifest_path = destination.parent / (destination.name + "-manifest.json")
     atomic_json(manifest_path, manifest)
-    verify_model(destination, manifest_path, pin)
+    verify_model(destination, manifest_path)
     return str(manifest_path.resolve())
 
 
@@ -72,11 +68,6 @@ def main():
         "--assets", type=Path, help="existing service paths for verify-only preparation"
     )
     parser.add_argument("--output", type=Path)
-    parser.add_argument(
-        "--runtime-files",
-        type=Path,
-        help="local JSON map from native runtime labels to version files",
-    )
     parser.add_argument("--device-type", choices=["npu", "cuda", "cpu"], default="npu")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
@@ -92,7 +83,7 @@ def main():
         root = args.artifact_root.resolve()
         source = root / "source"
         source.parent.mkdir(parents=True, exist_ok=True)
-        source_checkout(config.semantics.source, source)
+        source_checkout(config.semantics.source.repository, source)
         assets = {
             "source": str(source),
             "weights": str(root / "weights"),
@@ -100,18 +91,6 @@ def main():
         }
         if config.semantics.backend == "hpsv3":
             assets["backbone"] = str(root / "backbone")
-    verify_source(assets["source"], config.semantics.source)
-    if args.runtime_files:
-        assets["runtime_files"] = json.loads(args.runtime_files.read_text())
-    require(
-        set(assets.get("runtime_files", {})) == set(config.semantics.runtime_files),
-        "provide the scorer's native runtime file map",
-    )
-    for key, expected in config.semantics.runtime_files.items():
-        require(
-            file_hash(assets["runtime_files"][key]) == expected,
-            f"unqualified native runtime: {key}",
-        )
     source = Path(assets["weights"]) if args.assets and args.artifact_root else None
     if source is not None:
         assets["weights"] = str(args.artifact_root.resolve() / "weights")

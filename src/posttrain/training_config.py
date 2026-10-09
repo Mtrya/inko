@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Checkpoint, Scorer
-from .schema import decode, digest, name, require
+from .schema import decode, name, require
 
 
 @dataclass(frozen=True)
@@ -176,7 +176,6 @@ class Stages:
     cold_steps: int
     joint_steps: int
     initial_checkpoint: str
-    initial_sha256: str
 
 
 @dataclass(frozen=True)
@@ -254,16 +253,10 @@ class TrainingConfig:
             self.training,
         )
         for checkpoint in (self.initialization, self.teacher):
-            digest(checkpoint.sha256)
-            digest(checkpoint.architecture_sha256)
             require(
                 checkpoint.weights in {"live", "ema"},
                 "invalid initialization weight view",
             )
-        require(
-            self.initialization.architecture_sha256 == self.teacher.architecture_sha256,
-            "teacher/student architectures differ",
-        )
         require(
             s.mode in {"full", "lora"}
             and s.rank > 0
@@ -365,14 +358,13 @@ class TrainingConfig:
         )
         if stages.cold_steps:
             require(
-                not stages.initial_checkpoint and not stages.initial_sha256,
+                not stages.initial_checkpoint,
                 "cold stage starts from the declared initial model",
             )
         else:
             require(
                 bool(stages.initial_checkpoint), "joint entry needs a cold checkpoint"
             )
-            digest(stages.initial_sha256)
         coefficients = (
             joint.dmd_coefficient,
             joint.nft_coefficient,

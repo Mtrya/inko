@@ -16,14 +16,13 @@ from pathlib import Path
 from ..records import atomic_json
 from ..schema import decode, require
 from .config import load_service_config
-from .contracts import PROTOCOL, ScoreError, ScoreRequest, ScoreResult, validate_results
+from .contracts import ScoreError, ScoreRequest, ScoreResult, validate_results
 
 
 @dataclass(frozen=True)
 class BackendInput:
     prompt: str
     image_path: str
-    structured: dict[str, object]
     seed: int | None
 
 
@@ -47,17 +46,6 @@ class ScoringEngine:
             0 < len(requests) <= self.capabilities.max_batch_size, "invalid batch size"
         )
         validate_results(requests, [], self.capabilities.outputs, complete=False)
-        for r in requests:
-            require(
-                r.fingerprint == self.capabilities.fingerprint
-                and r.input_schema == self.capabilities.input_schema
-                and set(r.structured) == set(self.capabilities.structured_fields),
-                "request contract mismatch",
-            )
-            require(
-                (r.seed is None) == self.capabilities.deterministic,
-                "service seed policy mismatch",
-            )
         future = concurrent.futures.Future()
         self.queue.put_nowait(
             (
@@ -121,8 +109,7 @@ class ScoringEngine:
                             request, values=hit.values, metadata=hit.metadata
                         )
                         require(
-                            hit.cache_key == request.cache_key
-                            and hit.fingerprint == request.fingerprint,
+                            hit.cache_key == request.cache_key,
                             "service cache identity mismatch",
                         )
                         validate_results(
@@ -140,7 +127,6 @@ class ScoringEngine:
                             BackendInput(
                                 request.prompt,
                                 str(image_path),
-                                request.structured,
                                 request.seed,
                             )
                         )
@@ -221,9 +207,7 @@ def make_server(bind, engine):
                 self.reply(
                     200,
                     {
-                        "protocol": PROTOCOL,
                         "ready": engine.thread.is_alive() and not engine.poisoned,
-                        "fingerprint": engine.capabilities.fingerprint,
                     },
                 )
             elif self.path == "/v1/capabilities":
@@ -241,8 +225,7 @@ def make_server(bind, engine):
                 require(0 < length <= engine.limits.max_body_bytes, "invalid body size")
                 payload = json.loads(self.rfile.read(length))
                 require(
-                    set(payload) == {"protocol", "deadline", "requests"}
-                    and payload["protocol"] == PROTOCOL,
+                    set(payload) == {"deadline", "requests"},
                     "invalid protocol envelope",
                 )
                 deadline = decode(float, payload["deadline"])
@@ -252,9 +235,7 @@ def make_server(bind, engine):
                 results = future.result(
                     timeout=min(engine.limits.request_timeout, deadline - time.time())
                 )
-                self.reply(
-                    200, {"protocol": PROTOCOL, "results": [asdict(r) for r in results]}
-                )
+                self.reply(200, {"results": [asdict(r) for r in results]})
             except queue.Full:
                 self.reply(503, {"error": "queue full"})
             except (ValueError, KeyError, TypeError) as exc:
@@ -339,7 +320,6 @@ def main():
         json.dumps(
             {
                 "event": "ready",
-                "fingerprint": config.fingerprint,
                 "load_seconds": time.perf_counter() - started,
                 **telemetry(),
                 "provenance": provenance,

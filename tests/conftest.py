@@ -18,22 +18,17 @@ from src.posttrain.scoring.contracts import Channel
 @pytest.fixture
 def sampling_config():
     """Explicit test inputs; no expectations are sourced from production configs."""
-    channel = Channel("fit", "higher", (0.0, 1.0), "Fixture alignment")
+    channel = Channel("fit", "higher")
     scorer = Scorer(
         "unfamiliar",
-        "a" * 64,
-        "rubric-v1",
-        ("rubric",),
         (channel,),
         2,
         2.0,
         2,
         2,
         "shared_file",
-        "none",
-        0,
     )
-    checkpoint = Checkpoint("first", "ema", "1" * 64, "2" * 64)
+    checkpoint = Checkpoint("first", "ema")
     arm = Arm("reference", checkpoint, "euler", 2, 1.0, "none")
     return Config(
         Sampling("float32", 1, True, 2, {"1:1": (32, 32)}),
@@ -47,7 +42,7 @@ def sampling_config():
             0,
             100,
             0.95,
-            Diversity(False, "", "", 1, 1),
+            Diversity(False, "", 1, 1),
         ),
         (arm, replace(arm, name="candidate", rule="renoise")),
         (scorer,),

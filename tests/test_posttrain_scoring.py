@@ -28,24 +28,16 @@ def image_input(tmp_path):
     return ImageInput("shared_file", file_hash(path), str(path))
 
 
-def request(spec, image, sample="a", prompt="text", rubric="identify content"):
-    return ScoreRequest.create(
-        sample, prompt, image, spec.fingerprint, spec.input_schema, {"rubric": rubric}
-    )
+def request(image, sample="a", prompt="text"):
+    return ScoreRequest.create(sample, prompt, image)
 
 
 class Endpoint:
     def __init__(self, tmp_path, spec, backend, engine_type=ScoringEngine, port=0):
         cap = Capabilities(
-            1,
-            spec.fingerprint,
-            spec.input_schema,
-            spec.structured_fields,
             spec.outputs,
             2,
             ("shared_file", "png_base64"),
-            True,
-            True,
         )
         self.engine = engine_type(
             backend, cap, Limits(2, 4, 2.0, 1000000, 1), tmp_path / "service-cache"
@@ -68,10 +60,7 @@ class Backend:
 
     def score(self, inputs):
         self.calls.append([i.prompt for i in inputs])
-        return [
-            {"fit": 0.75 if i.structured["rubric"] == "identify content" else 0.25}
-            for i in inputs
-        ]
+        return [{"fit": 0.75 if i.prompt == "text" else 0.25} for i in inputs]
 
 
 def test_real_http_cache_fanout_relocation_and_service_restart(
@@ -80,7 +69,7 @@ def test_real_http_cache_fanout_relocation_and_service_restart(
     spec = sampling_config.scorers[0]
     backend = Backend()
     endpoint = Endpoint(tmp_path, spec, backend)
-    records = [request(spec, image_input, "a"), request(spec, image_input, "b")]
+    records = [request(image_input, "a"), request(image_input, "b")]
     try:
         client = ScoreClient(spec, [endpoint.url], tmp_path / "client")
         client.handshake()
@@ -99,11 +88,11 @@ def test_real_http_cache_fanout_relocation_and_service_restart(
         assert client.acquire(records) == first
         renamed = tmp_path / "relocated.png"
         renamed.write_bytes(Path(image_input.payload).read_bytes())
-        moved = request(spec, replace(image_input, payload=str(renamed)), "third")
+        moved = request(replace(image_input, payload=str(renamed)), "third")
         assert moved.cache_key == records[0].cache_key
         assert client.acquire([moved])[0]["attempts"] == 0
         assert backend.calls == [["text"]]
-        changed = request(spec, image_input, "fourth", rubric="different rubric")
+        changed = request(image_input, "fourth", prompt="different text")
         assert changed.cache_key != records[0].cache_key
         assert client.acquire([changed])[0]["values"] == {"fit": 0.25}
     finally:
@@ -133,7 +122,7 @@ def test_partial_out_of_order_retry_preserves_success(
         client = ScoreClient(spec, [endpoint.url], tmp_path / "client")
         client.handshake()
         rows = client.acquire(
-            [request(spec, image_input, "a"), request(spec, image_input, "b")]
+            [request(image_input, "a"), request(image_input, "b")]
         )
         assert [r["attempts"] for r in rows] == [1, 2]
         assert endpoint.engine.calls == [["a", "b"], ["b"]]
@@ -152,7 +141,7 @@ def test_failure_budget_survives_restart_and_never_becomes_zero(
     spec, backend = sampling_config.scorers[0], Failing()
     endpoint = Endpoint(tmp_path, spec, backend)
     try:
-        requests = [request(spec, image_input)]
+        requests = [request(image_input)]
         for _ in range(2):
             client = ScoreClient(spec, [endpoint.url], tmp_path / "client")
             client.handshake()
@@ -173,16 +162,10 @@ def test_failure_budget_survives_restart_and_never_becomes_zero(
         endpoint.close()
 
 
-def test_encoded_png_schema_mismatch_and_content_hash(
-    tmp_path, sampling_config, image_input
-):
+def test_encoded_png_transport_and_content_hash(tmp_path, sampling_config, image_input):
     spec = sampling_config.scorers[0]
     endpoint = Endpoint(tmp_path, spec, Backend())
     try:
-        with pytest.raises(ValueError, match="schema mismatch"):
-            ScoreClient(
-                replace(spec, input_schema="another"), [endpoint.url], tmp_path
-            ).handshake()
         client = ScoreClient(spec, [endpoint.url], tmp_path / "client")
         client.handshake()
         encoded = replace(
@@ -190,20 +173,35 @@ def test_encoded_png_schema_mismatch_and_content_hash(
             transport="png_base64",
             payload=base64.b64encode(Path(image_input.payload).read_bytes()).decode(),
         )
-        assert request(spec, encoded).cache_key == request(spec, image_input).cache_key
-        assert client.acquire([request(spec, encoded)])[0]["values"] == {"fit": 0.75}
+        assert request(encoded).cache_key == request(image_input).cache_key
+        assert client.acquire([request(encoded)])[0]["values"] == {"fit": 0.75}
         with pytest.raises(ValueError, match="bytes changed"):
-            client.acquire([request(spec, replace(image_input, sha256="0" * 64))])
+            client.acquire([request(replace(image_input, sha256="0" * 64))])
+    finally:
+        endpoint.close()
+
+
+def test_handshake_rejects_mismatched_service_outputs(
+    tmp_path, sampling_config, image_input
+):
+    from src.posttrain.scoring.contracts import Channel
+
+    spec = sampling_config.scorers[0]
+    endpoint = Endpoint(tmp_path, spec, Backend())
+    try:
+        alien = replace(spec, outputs=(Channel("probability", "higher"),))
+        with pytest.raises(ValueError, match="output schema mismatch"):
+            ScoreClient(alien, [endpoint.url], tmp_path).handshake()
     finally:
         endpoint.close()
 
 
 @pytest.mark.parametrize(
-    "values", [{"fit": 1.1}, {"wrong": 0.5}, {"fit": True}, {"fit": float("nan")}]
+    "values", [{"wrong": 0.5}, {"fit": True}, {"fit": float("nan")}]
 )
 def test_channel_value_validation(sampling_config, image_input, values):
     spec = sampling_config.scorers[0]
-    r = request(spec, image_input)
+    r = request(image_input)
     with pytest.raises(ValueError):
         result = ScoreResult.for_request(r, values=values)
         validate_results([r], [result], spec.outputs, complete=True)
@@ -211,7 +209,7 @@ def test_channel_value_validation(sampling_config, image_input, values):
 
 def test_duplicate_and_wrong_envelopes_rejected(sampling_config, image_input):
     spec = sampling_config.scorers[0]
-    r = request(spec, image_input)
+    r = request(image_input)
     result = ScoreResult.for_request(r, values={"fit": 0.3})
     with pytest.raises(ValueError, match="duplicate"):
         validate_results([r], [result, result], spec.outputs, complete=False)
@@ -266,13 +264,13 @@ def test_production_orchestration_config_only_substitution(
         "sample_id": "sample",
         "image_path": image_input.payload,
         "image_sha256": image_input.sha256,
-        "prompt": {"text": "text", "structured": {"rubric": "identify content"}},
+        "prompt": {"text": "text"},
     }
     for identifier, metric in (("alien", "rubric_fit"), ("other", "agreement")):
         spec = replace(
             sampling_config.scorers[0],
             id=identifier,
-            outputs=(Channel(metric, "higher", (0.0, 1.0), "Fixture channel"),),
+            outputs=(Channel(metric, "higher"),),
         )
 
         class GenericBackend:
@@ -357,113 +355,21 @@ def test_service_stall_retires_engine(tmp_path, sampling_config, image_input):
 
     spec = sampling_config.scorers[0]
     cap = Capabilities(
-        1,
-        spec.fingerprint,
-        spec.input_schema,
-        spec.structured_fields,
         spec.outputs,
         1,
         ("shared_file",),
-        True,
-        True,
     )
     engine = ScoringEngine(
         Hung(), cap, Limits(1, 1, 0.1, 10000, 1), tmp_path, on_stall=stalled.set
     )
     try:
-        engine.submit([request(spec, image_input)], time.time() + 0.1)
+        engine.submit([request(image_input)], time.time() + 0.1)
         assert stalled.wait(1) and engine.poisoned
         with pytest.raises(ValueError, match="stalled"):
-            engine.submit([request(spec, image_input)], time.time() + 1)
+            engine.submit([request(image_input)], time.time() + 1)
     finally:
         released.set()
         engine.close()
-
-
-def test_stable_seeded_service_uses_same_generic_client(
-    tmp_path, sampling_config, image_input
-):
-    from src.posttrain.scoring.client import request_for_record
-
-    spec = replace(sampling_config.scorers[0], seed_policy="sample", seed=41)
-    cap = Capabilities(
-        1,
-        spec.fingerprint,
-        spec.input_schema,
-        spec.structured_fields,
-        spec.outputs,
-        2,
-        ("shared_file",),
-        False,
-        True,
-    )
-
-    class Seeded:
-        def __init__(self):
-            self.calls = []
-
-        def score(self, inputs):
-            self.calls.extend(i.seed for i in inputs)
-            return [{"fit": (i.seed % 2) / 2} for i in inputs]
-
-    backend = Seeded()
-    engine = ScoringEngine(
-        backend, cap, Limits(2, 2, 2, 100000, 1), tmp_path / "service"
-    )
-    server = make_server(("127.0.0.1", 0), engine)
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
-    try:
-        client = ScoreClient(
-            spec, [f"http://127.0.0.1:{server.server_port}"], tmp_path / "client"
-        )
-        client.handshake()
-        record = {
-            "sample_id": "a",
-            "image_path": image_input.payload,
-            "image_sha256": image_input.sha256,
-            "prompt": {"text": "text", "structured": {"rubric": "identify content"}},
-        }
-        first = request_for_record(record, spec)
-        second = request_for_record(record, replace(spec, seed=42))
-        assert (
-            first.seed is not None
-            and first.seed != second.seed
-            and first.cache_key != second.cache_key
-        )
-        result = client.acquire([first])
-        assert client.acquire([first]) == result and backend.calls == [first.seed]
-    finally:
-        server.shutdown()
-        thread.join()
-        server.server_close()
-        engine.close()
-
-
-def test_each_service_receives_only_its_declared_structured_inputs(
-    sampling_config, image_input
-):
-    from src.posttrain.scoring.client import request_for_record
-
-    record = {
-        "sample_id": "a",
-        "image_path": image_input.payload,
-        "image_sha256": image_input.sha256,
-        "prompt": {
-            "text": "text",
-            "structured": {
-                "rubric": {"criteria": ["content"]},
-                "context": "other service",
-            },
-        },
-    }
-    spec = sampling_config.scorers[0]
-    assert request_for_record(record, spec).structured == {
-        "rubric": {"criteria": ["content"]}
-    }
-    assert (
-        request_for_record(record, replace(spec, structured_fields=())).structured == {}
-    )
 
 
 def test_handshake_shares_remaining_startup_deadline(
@@ -475,15 +381,9 @@ def test_handshake_shares_remaining_startup_deadline(
 
     spec = sampling_config.scorers[0]
     cap = Capabilities(
-        1,
-        spec.fingerprint,
-        spec.input_schema,
-        spec.structured_fields,
         spec.outputs,
         2,
         ("shared_file",),
-        True,
-        True,
     )
     clock, timeouts = [10.0], []
     monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])

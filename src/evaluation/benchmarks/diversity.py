@@ -24,10 +24,9 @@ def metric_identity(config, assets):
     import torchmetrics
     from torchmetrics.functional.image.lpips import _LPIPS
 
-    path = Path(assets["metrics"][config.asset])
-    require(file_hash(path) == config.sha256, "LPIPS model bytes differ")
+    require(config.asset in assets["metrics"], "metric asset is not provisioned")
     return {
-        "weights_sha256": config.sha256,
+        "asset": config.asset,
         "torchmetrics_version": torchmetrics.__version__,
         "implementation_sha256": file_hash(inspect.getfile(_LPIPS)),
     }
@@ -91,10 +90,10 @@ def measure_diversity(records, config, assets):
     from PIL import Image
     from torchmetrics.functional.image.lpips import _LPIPS
 
-    pin = metric_identity(config, assets)
+    metric = metric_identity(config, assets)
     path = Path(assets["metrics"][config.asset])
     torch.set_num_threads(config.cpu_threads)
-    # A complete pinned state replaces both backbone and linear heads. There
+    # The prepared complete state replaces both backbone and linear heads. There
     # is no hub request and no random feature path in metric execution.
     model = _LPIPS(pretrained=False, pnet_rand=True, net="alex", resize=None)
     model.load_state_dict(
@@ -143,7 +142,7 @@ def measure_diversity(records, config, assets):
     require(bool(groups), "empty diversity panel")
     return {
         "metric": "LPIPS-AlexNet",
-        **pin,
+        **metric,
         "image_transform": "RGB; original resolution; pixel/127.5-1; no resize",
         "aggregation": "All seed pairs within an exact caption; caption mean within scene; equal scene mean.",
         "groups": groups,

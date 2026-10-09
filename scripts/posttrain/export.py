@@ -11,7 +11,7 @@ import torch
 from src.models.inko import Inko
 from src.posttrain.adapters import install_adapters, merge_student
 from src.posttrain.checkpoint import assert_exact, inspect, save_tensor_file
-from src.posttrain.records import atomic_json, file_hash
+from src.posttrain.records import atomic_json
 from src.posttrain.schema import decode, require
 from src.posttrain.training_config import TrainingConfig
 
@@ -47,38 +47,20 @@ def export(checkpoint, weights, output):
     staging = output.with_name(f".incomplete-{output.name}-{uuid.uuid4().hex}")
     staging.mkdir()
     try:
-        return _publish_export(
-            checkpoint, output, staging, weights, views, config, manifest, state, merged
-        )
+        return _publish_export(output, staging, weights, state, merged)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
 
 
-def _publish_export(
-    checkpoint, output, staging, weights, views, config, manifest, state, merged
-):
+def _publish_export(output, staging, weights, state, merged):
     atomic_json(staging / "transformer_config.json", state["architecture"])
     save_tensor_file(staging / "weights.pt", merged.state_dict())
     reloaded = Inko.from_single_file(str(staging / "weights.pt"))
     assert_exact(merged.state_dict(), reloaded.state_dict())
     record = {
-        "schema": 1,
         "weights": weights,
-        "ema": (
-            None
-            if weights == "live"
-            else {"name": weights, "decay": views[weights].decay}
-        ),
-        "tuning": config.student.mode,
         "step": state["step"],
-        "base": manifest["contract"]["config"]["initialization"],
-        "source_checkpoint": file_hash(checkpoint / "manifest.json"),
-        "contract_sha256": manifest["contract_sha256"],
-        "merged_sha256": file_hash(staging / "weights.pt"),
-        "architecture_sha256": file_hash(staging / "transformer_config.json"),
-        "student_targets": state["ownership"]["student"],
-        "reload_exact": True,
     }
     atomic_json(staging / "export.json", record)
     staging.rename(output)

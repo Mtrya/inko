@@ -40,7 +40,7 @@ def launch(
                 "training run contract changed",
             )
             # The manifest precedes model loading and the first publication.
-            # With no committed state, restart from the pinned initialization.
+            # With no committed state, restart from the declared initialization.
             published = any(
                 p.is_dir()
                 and not p.name.startswith(".")

@@ -9,22 +9,17 @@ where the data is mounted. Platform setup and credentials are in the local
 
 | Command | Purpose |
 |---|---|
-| `posttrain.prepare_prompts` | Rebuild the fixed small rollout/DrawBench manifests from the pinned reference prompt source. |
-| `posttrain.prepare_assets` | Download or verify one pinned scorer, produce model inventories and isolated snapshot views, and write local service assets. |
-| `posttrain.qualify` | Validate pinned qualification cases, launch one guarded allocation, execute missing paths and report coverage. |
-| `posttrain.export` | Materialize live/EMA student weights from a complete checkpoint, merge weight LoRA, and verify reload. |
-| `posttrain.protocol_fixture` | Run an independent deterministic image/rubric scorer for protocol qualification; its scalar has no quality meaning. |
-| `posttrain.budget` | Inspect a durable cumulative ledger or run its external allocation watchdog; require `--allowance implementation\|collapse` to bind the approved cap. |
+| `posttrain.prepare_prompts` | Rebuild the fixed rollout/development/monitor/confirmation suites from the pinned reference prompt source. |
+| `posttrain.prepare_assets` | Download or verify one scorer's source and weights, record checksum inventories, and write local service assets. |
+| `posttrain.prepare_metric` | Produce the LPIPS diversity metric asset on a machine with download access. |
+| `posttrain.export` | Materialize live or named-EMA student weights from a complete checkpoint, merge weight LoRA, and verify reload. |
+| `posttrain.run_campaign` | Drive one training run with interval evaluations: resume committed segments, export weight views, benchmark suites and assemble blind panels. |
+| `posttrain.readouts` | Join a completed blind ballot to benchmark scores; report comparable pairs and scorer/human disagreement. |
 
 The cold/joint trainer is `python -m src.posttrain.train`; the standalone evaluation
 harness is `python -m src.evaluation.benchmarks.run`.
 Its current commands and qualification limits are in
 [the posttraining recipe](../notes/posttrain_recipe.md#samplingscoring-commands).
-The qualification launcher returns its actual job name. Supply that name to
-`--execute-cases --allocation-job NAME` inside the guarded allocation; reporting
-joins the execution receipt to that allocated, released ledger entry. Execution
-also requires `--budget-ledger` pointing to a fresh snapshot of the externally
-watched ledger; it must show the named job as the sole active allocation.
 
 ## Pretraining (`scripts/pretrain/`)
 

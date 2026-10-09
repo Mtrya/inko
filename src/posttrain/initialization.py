@@ -6,7 +6,6 @@ from pathlib import Path
 import torch
 
 from .checkpoint import inspect
-from .records import file_hash
 from .rollout import tensor_digest
 from .schema import require
 
@@ -16,10 +15,6 @@ def boundary_manifest(config, assets):
     if not key:
         return None
     path = Path(assets["training_checkpoints"][key])
-    require(
-        file_hash(path / "manifest.json") == config.stages.initial_sha256,
-        "initial cold checkpoint manifest bytes differ",
-    )
     manifest = inspect(path)
     source = manifest["contract"]["config"]
     require(
@@ -31,10 +26,7 @@ def boundary_manifest(config, assets):
             continue
         current = asdict(getattr(config, role))
         require(
-            all(
-                current[name] == source[role][name]
-                for name in ("weights", "sha256", "architecture_sha256")
-            ),
+            all(current[name] == source[role][name] for name in ("asset", "weights")),
             "initial base/teacher identity differs",
         )
     if config.joint.dmd_coefficient > 0:
@@ -47,8 +39,6 @@ def boundary_manifest(config, assets):
         )
     require(manifest["step"] > 0, "joint entry requires a committed cold update")
     return {
-        "manifest_sha256": config.stages.initial_sha256,
-        "source_contract_sha256": manifest["contract_sha256"],
         "generator_steps": manifest["step"],
         "fake_steps": manifest["fake_steps"],
     }

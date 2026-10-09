@@ -4,10 +4,10 @@ Status: The bounded posttraining family is implemented with independent
 sampling/scoring, full-parameter and LoRA students, two fake-score strategies,
 three explicit DMD gradients, cold controls, NFT/joint objectives, learner DDP,
 recovery and student export. No final training recipe is selected.
-`configs/posttrain.toml` defines sampling/scoring; `configs/posttrain_dmd.toml`
-defines plain DMD; `configs/posttrain_cold.toml` enables the independent RT-DM,
-DynaDG and DynaRS controls. `configs/posttrain_joint.toml` adds NFT/joint training
-and explicit stage transitions with bounded target-run qualification.
+`configs/posttrain.toml` defines sampling/scoring. Complete training configs for
+the campaign's cold and joint cases live in
+`configs/posttrain/campaign_qualification/`; the coverage-era DMD, cold and joint
+TOMLs were retired after qualification.
 The [campaign execution guide](posttrain_campaign.md) describes initial fake
 fitting, named student EMA views, interval evaluation, diversity and blind
 readouts. These mechanisms do not select their experimental settings.
@@ -96,9 +96,7 @@ closing the texture-collapse mechanism investigation.
 | `src/posttrain/` | Trainer, objectives, sampling, model states, reward/score clients, and reward transforms |
 | `src/evaluation/benchmarks/` | Independently runnable benchmark execution and reporting |
 | `configs/posttrain.toml` | Complete sampling/scoring baseline |
-| `configs/posttrain_dmd.toml` | Complete plain-DMD training configuration |
-| `configs/experiments/posttrain/` | Complete coverage configurations; later retained comparisons |
-| `configs/posttrain/` | Qualification matrix, additional complete coverage configs and independent protocol fixture config |
+| `configs/posttrain/campaign_qualification/` | Complete campaign training, interval and sampling configs |
 | `configs/prompts/` | Rollout and evaluation prompt suites with explicit split identity |
 
 Sampling/scoring paths and initial prompt manifests are implemented. Validate
@@ -110,17 +108,17 @@ in local project configuration.
 
 | Area | Starting intent | Evidence or decision needed |
 |---|---|---|
-| Teacher | Preserved 480k EMA, SHA256 pinned in config, at 640p | Qualified starting control; final teacher transfer remains a later comparison |
+| Teacher | Preserved 480k EMA, at 640p | Qualified starting control; final teacher transfer remains a later comparison |
 | Student sampling | 8-step clean-prediction/renoise, shifted uniform grid, conditional CFG 1 | Generation quality and subsequent train/inference correspondence |
 | Distribution matching | Online fake-score learning with backward simulation | Parameterization, normalization, update ratio, trainable parameter scope |
 | Student tuning | Both full-parameter and LoRA training are in the initial implementation scope | Separate training/state/export qualification and later controlled quality/cost comparisons |
 | Cold start | Independent RT-DM, DynaDG, DynaRS switches implemented | Effects, schedule horizons, reward controls and transition timing remain unselected |
 | Joint objective | NFT with persistent DMD regularization | Loss reductions/balance, NFT old-policy update, and any additional regularization |
 | Optimization | Configured separately for trainable roles | Optimizers, learning rates, accumulation, clipping, precision, and EMA |
-| Rewards | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; source/weight pins and separate raw outputs | Training mixture and normalization; broader scorer validity remains unestablished |
+| Rewards | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; separate raw outputs | Training mixture and normalization; broader scorer validity remains unestablished |
 | Prompts | Prepared 512/32 rollout and 200/16 DrawBench manifests, plus the 48-entry visual panel | Semantic overlap review and later reward group size |
 | Execution | Ascend with resident learner/rollout and HPSv3/VQAScore worker groups from the first version | 12 learner replicas fit the qualified DMD paths; export evaluation uses 12/2/2. Systematic throughput tuning remains separate |
-| Scorer boundary | Independently runnable services behind a versioned shared client; configuration selects services and channels | Generic collection/report substitution implemented and mechanism-tested; future production VLM backend needs its own qualification |
+| Scorer boundary | Independently runnable services behind a shared client; configuration selects services and channels | Generic collection/report substitution implemented and mechanism-tested; future production VLM backend needs its own qualification |
 | Final selection | Real generations, benchmarks, diversity, and cost | Comparison protocol, repeat budget, and acceptable regressions |
 
 ## Work layers and qualification
@@ -145,7 +143,7 @@ Initial algorithm experiments use 640p with the selected 480k EMA checkpoint
 held fixed across variants. The initial scorer set is HPSv3 and VQAScore v3.1
 with Qwen3-VL-8B-Instruct, without a custom VLM-rubric scorer.
 Initial prompt-pool and benchmark choices are recorded in the
-[evaluation note](posttrain_evaluation.md); their manifests are in `configs/prompts/`.
+[evaluation note](posttrain_evaluation.md); their suites are in `configs/prompts/`.
 
 Inside layer 1, implement sampling/scoring, minimal distribution matching,
 complete cold start, then joint NFT+DMD. Add each mechanism with a measurable
@@ -178,11 +176,11 @@ python -m src.evaluation.benchmarks.run --config configs/posttrain.toml --valida
 ```
 
 Prepare each scorer with its complete `configs/scorers/<name>.toml` using
-`python -m scripts.posttrain.prepare_assets --help`. Preparation pins source and
-model revisions, checks upstream file digests, and writes local service assets.
-It does not install packages. `--assets` verifies existing files;
-`--assets` plus `--artifact-root` builds an isolated view containing only pinned
-model members. Supply native-runtime version files through `--runtime-files`.
+`python -m scripts.posttrain.prepare_assets --help`. Preparation clones the
+source repository and downloads the configured model file patterns, then writes
+local service assets and a checksum manifest. It does not install packages.
+`--assets` verifies existing files against that manifest; `--assets` plus
+`--artifact-root` builds an isolated view containing only prepared model members.
 
 Caller assets name `checkpoints` (a map from arm asset IDs to weight files),
 `text_encoder`, `vae`, `device_type`, `learner.python_paths`, and `services`.
@@ -191,8 +189,8 @@ version-file names to paths; their content hashes enter the run identity.
 Each service ID has `endpoints` and `launches`; an empty launch list connects to
 an independently managed endpoint. Each owned launch supplies `config`, `assets`,
 `device`, `bind`, and `python_paths`. Service assets contain `source`, `weights`,
-`weights_manifest`, `device_type`, and `runtime_files`; HPS also requires
-`backbone` and `backbone_manifest`. All locations are machine-local JSON data.
+`weights_manifest`, and `device_type`; HPS also requires `backbone` and
+`backbone_manifest`. All locations are machine-local JSON data.
 The initial placement is learners 0–11, HPS replicas 12–13 and VQA replicas 14–15.
 
 A service can run without a coordinator:
@@ -208,15 +206,14 @@ launches configure it automatically. Overlay `bin/` directories enter `PATH`.
 These explicit Python paths must include the image's native compiler modules
 as well as package overlays. In particular, Ascend inference needs CANN's `tbe`
 paths; importing Torch and loading weights alone does not exercise that compiler.
-The VQA source requires `ffmpeg` even for image scoring. Relevant package
-versions and native-runtime version-file hashes are pinned in service semantics
-and validated before loading; changing them changes the scorer fingerprint.
-Other installed packages remain execution provenance.
+The VQA source requires `ffmpeg` even for image scoring. The service verifies its
+prepared weights against the local checksum manifest before loading and reports
+the installed package versions as execution provenance.
 
 HPSv3's source expects its Transformers 4.45-era runtime; VQAScore v3.1 targets
 Transformers 5.x. Qualify separate role overlays without changing pretraining's
 runtime. The VQA adapter overrides device placement and local artifact loading,
-while retaining the pinned upstream scoring/preprocessing implementation.
+while retaining the upstream scoring/preprocessing implementation.
 The HPS adapter makes its FP32 reward-head input cast explicit across devices
 and retains raw `mu` and `log_sigma` outputs. Only `mu` enters its preference
 report. Both adapters have produced real 640p scores and passed service restart/cache reuse.
@@ -242,67 +239,10 @@ a new output directory. Endpoint relocation preserves score identity. Each arm w
 the existing `scripts/eval/blind_panel.py` workflow. Scores and reports retain
 both metric scales separately; no reward mixture is applied by this harness.
 
-For implementation qualification, `scripts.posttrain.qualify` consumes the complete,
-hash-pinned [coverage matrix](../configs/posttrain/qualification.json) and a separate
-local deployment JSON. The matrix identifies core source, evaluation config,
-case configs, stop boundaries, exports, required capabilities and named archived
-evidence. The deployment supplies the explicit job fields, service assets,
-output root, archive locations/hashes and recovery checkpoint locations/hashes.
-Machine paths stay outside the tracked configs.
-
-```bash
-python -m scripts.posttrain.qualify --matrix configs/posttrain/qualification.json \
-  --deployment /external/deployment.json --budget-ledger /external/budget.json \
-  --validate-only
-```
-
-Omit `--validate-only` to submit one job under the existing external watchdog.
-Inside that guarded allocation, use `--execute-cases --allocation-job NAME`
-and `--budget-ledger` with a fresh copy of the externally watched ledger.
-The start proof must show the named job as the sole active allocation; reporting
-requires its complete execution interval to lie within that same released job.
-Matching prior evidence is admitted without rerunning it, completed fresh receipts can be rechecked after
-an executor restart, and unfinished cases require explicit disposition. New
-cases export live/EMA views and evaluate each with the real declared channels.
-`--report --reviews /external/reviews.json --promote` requires actual execution,
-complete per-export evaluation, source/config/evidence identities, both native
-and independent review outputs, and a reconciled released budget. An assigned
-capability, empty review or missing run is an open gate.
-Reporting joins every actual score envelope and replay record, requires pinned
-prior benchmark evidence for reused exports, and binds execution/results to
-the named allocated, released ledger entry. Offline replay records must match
-their pinned originals before path/serialization normalization. An empty/unrelated ledger cannot
-pass. Accessible PNG/latent bytes are rehashed; offline review requires a
-SHA-pinned target byte-verification witness. It does not re-read remote files
-after their recorded verification. Archive locations/hashes remain local data.
-
-The independent substitution fixture can start with no trainer present:
-
-```bash
-python -m scripts.posttrain.protocol_fixture \
-  --config configs/posttrain/protocol_fixture.json --output /external/fixture
-```
-
-Its ready receipt supplies the external endpoint. Caller configuration alone
-selects the different service ID, lower-is-better channel, shared-file PNG
-references and structured rubric. The deterministic scalar verifies protocol/state flow; it
-is not a VLM scorer or a quality metric. HPSv3 and VQAScore remain the real
-per-export evaluation channels.
-Encoded `png_base64` transport has separate actual localhost mechanism coverage;
-it was not the transport used in the target cold/NFT substitution case.
-
-The shared watchdog reserves one16-NPU job, charges from provider allocation
-through confirmed release, and stops near the cumulative24-node-hour limit
-with shutdown margin. It imposes no independent per-job cap. Preparation,
-failures, retries and retained time count; provider/accounting uncertainty
-blocks subsequent launches. Qualification is not variant selection.
-
-Budget inspection and watchdog startup require an explicit
-`--allowance implementation` or `--allowance collapse`. The latter binds a
-separate 12-node-hour investigation ledger. Opening an existing ledger with a
-different allowance fails; unused implementation hours do not enlarge the
-investigation allowance. Provider release must be observed before removing
-job history.
+Implementation qualification is complete. Its capability matrix, execution
+receipts, review outputs and budget ledgers are archived under `notes/internal/`.
+Qualification established that the implementation executes its declared paths;
+it was not variant selection.
 
 ## Sampling/scoring qualification
 
@@ -353,27 +293,31 @@ scoring and diversity across seeds remain unqualified. Sampling/scoring qualific
 failed work, startup and retained allocation time; its two jobs were released.
 Later training qualification uses the same cumulative 24-node-hour allowance.
 
-## Plain-DMD commands and controls
+## Training commands and controls
 
-Validate a complete training recipe without model loading:
+The coverage-era training configs were retired after qualification; the commands
+in the qualification sections record how those cases ran. Complete current
+examples live in `configs/posttrain/campaign_qualification/` and validate
+without model loading:
 
 ```bash
-python -m src.posttrain.train --config configs/posttrain_dmd.toml --validate-only
+python -m src.posttrain.train --config configs/posttrain/campaign_qualification/cold_full.json --validate-only
 ```
 
 Training uses the same machine-local checkpoint/text/runtime assets as sampling.
-It starts resident learners and no scorer processes; plain DMD does not acquire
+Plain DMD starts resident learners and no scorer processes; it does not acquire
 rewards. Export evaluation calls the existing independent scoring services.
+Launch, resume and export use the same CLI:
 
 ```bash
-python -m src.posttrain.train --config configs/posttrain_dmd.toml \
-  --assets /external/posttrain-assets.json --output /external/dmd-run
-python -m src.posttrain.train --config configs/posttrain_dmd.toml \
-  --assets /external/posttrain-assets.json --output /external/dmd-run \
-  --resume /external/dmd-run/checkpoints/step-000002
+python -m src.posttrain.train --config <config> \
+  --assets /external/posttrain-assets.json --output /external/run
+python -m src.posttrain.train --config <config> \
+  --assets /external/posttrain-assets.json --output /external/run \
+  --resume /external/run/checkpoints/step-000002
 python -m scripts.posttrain.export \
-  --checkpoint /external/dmd-run/checkpoints/step-000004 \
-  --weights ema --output /external/dmd-export
+  --checkpoint /external/run/checkpoints/step-000004 \
+  --weights ema --output /external/export
 ```
 
 `--stop-after` permits an earlier committed boundary without changing the
@@ -382,19 +326,10 @@ runtime, prompts, artifacts and learner map. Export directories are immutable;
 use their actual weight/architecture hashes in benchmark arms. Both `live` and
 `ema` export views are supported, including LoRA merging.
 
-The three complete coverage configs exercise different required mechanisms:
-
-| Config | Student / fake | DMD / sampling / optimizer |
-|---|---|---|
-| `configs/posttrain_dmd.toml` | Full / teacher-base Q/V | Teacher-residual normalization; renoise; AdamW; selected-clean fake target |
-| `configs/experiments/posttrain/dmd_lora_full.toml` | Attention+MLP LoRA / full | Clean difference; Euler; two fake updates; terminal target; LR warmup/cosine |
-| `configs/experiments/posttrain/dmd_full_muon.toml` | Full / teacher-base Q/V | Score-KL time factor; renoise with CFG; Muon+AdamW |
-
-These configurations change several axes to cover execution paths cheaply.
-Their short runs cannot isolate treatment effects or rank variants. Student
-evaluation EMA is enabled to qualify export and recovery, not as a selected
-training choice. The shared Muon implementation lives in `src/optim/` and remains
-used by pretraining.
+The short qualification runs cannot isolate treatment effects or rank variants.
+Named student EMA shadows were enabled to qualify export and recovery, not as a
+selected training choice. The shared Muon implementation lives in `src/optim/`
+and remains used by pretraining.
 
 Execution declares deterministic kernel policy and intra-host RoCE explicitly.
 On the qualified Ascend topology, learner devices cross two interconnect planes;
@@ -479,9 +414,9 @@ qualification. The final recipe is selected only after these results exist.
 
 ## Cold-stage controls and commands
 
-`configs/posttrain_cold.toml` is a complete full-student RT-DM/DynaDG/DynaRS
-coverage input. It retains the same initial checkpoint,640p,8-step collection,
-24 global samples and12 learners. Validation and launch use the training CLI:
+`configs/posttrain_cold.toml` was the complete full-student RT-DM/DynaDG/DynaRS
+coverage input. It retained the same initial checkpoint,640p,8-step collection,
+24 global samples and12 learners. Validation and launch used the training CLI:
 
 ```bash
 python -m src.posttrain.train --config configs/posttrain_cold.toml --validate-only
@@ -510,7 +445,8 @@ checked after fake updates and before the student step.
 | `cold_plain_lora.toml` | Off / off / off | LoRA | Baseline mode coverage |
 | `cold_all_lora.toml` | On / on / on | LoRA | All-on mode coverage |
 
-Short filenames in this table resolve under `configs/experiments/posttrain/`.
+Short filenames in this table resolved under `configs/experiments/posttrain/`,
+retired after qualification.
 These cases deliberately combine execution branches; they do not isolate effects
 or identify a winner. Dynamic horizons use committed student steps; q fake updates
 do not advance them. Checkpoints retain their definitions/current points and the
@@ -552,10 +488,10 @@ NFT implementation and variant-selection experiments were unstarted at that gate
 
 ## NFT/joint configuration and recovery
 
-`configs/posttrain_joint.toml` is the complete full-student 8-cold + 8-joint
+`configs/posttrain_joint.toml` was the complete full-student 8-cold + 8-joint
 integration input; `configs/experiments/posttrain/joint_integrated_lora.toml`
-provides the LoRA integration with attention+MLP adapters, matching the pinned
-cold LoRA capacity used by the stage-two controls. They are implementation coverage inputs. No final
+provided the LoRA integration with attention+MLP adapters, matching the cold
+LoRA capacity used by the stage-two controls. They were implementation coverage inputs. No final
 algorithm, coefficient or optimization setting has been selected.
 
 ```bash
@@ -568,12 +504,12 @@ python -m src.posttrain.train --config configs/posttrain_joint.toml \
 ```
 
 The `joint_dmd_{full,lora}`, `joint_nft_{full,lora}` and
-`joint_both_{full,lora}` TOMLs in `configs/experiments/posttrain/` are complete
-stage-two controls. Each uses an explicitly pinned matching cold boundary;
+`joint_both_{full,lora}` TOMLs in `configs/experiments/posttrain/` were complete
+stage-two controls. Each used a matching cold boundary;
 machine-local `training_checkpoints` maps `cold_full`/`cold_lora` to those
-checkpoint directories. The pin is the manifest SHA; all manifest-listed files
-are checked. These inputs exercise separate mechanisms with different branch
-settings and are unsuitable for ranking algorithms.
+checkpoint directories, and initialization checks the boundary's recorded
+student capacity and fake identity. These inputs exercised separate mechanisms
+with different branch settings and are unsuitable for ranking algorithms.
 
 | Input | Covered branches |
 |---|---|
@@ -582,7 +518,7 @@ settings and are unsuitable for ranking algorithms.
 | NFT-only LoRA | Velocity MSE, round scaling, constant old EMA, deployed-grid times, frozen reference, two inner updates/time draws |
 | Joint full | Adaptive/group loss, ramped old EMA, continuous time, q=2 fake updates, two inner updates/time draws |
 | Joint LoRA | Adaptive/group loss, hard-copy old, grid times, q=2, two inner updates/time draws |
-| Both integrations | Cold RT-DM/DynaDG/DynaRS followed by joint NFT+DMD; explicit stage reset and separate evaluation EMA |
+| Both integrations | Cold RT-DM/DynaDG/DynaRS followed by joint NFT+DMD; explicit stage reset and student EMA shadows |
 
 `[stages]` declares generator-step lengths and optional cold initialization.
 `[joint]` selects independent nonnegative DMD/NFT/reference coefficients.
@@ -592,10 +528,10 @@ declares copy/constant/ramped refresh on committed joint rounds. Disabled roles
 are absent. The [contract](posttrain_contract.md#nft-joint-objectives-and-complete-round-transitions)
 defines the equations and clocks.
 
-Initialize and resume are separate operations. A pinned cold initialization
+Initialize and resume are separate operations. A cold initialization
 imports matching live student/active fake weights and resets optimizers, cursor
-and RNG. Exact resume requires the unchanged source/config/runtime/artifact
-contract and restores the last entire collection round. The cold boundary
+and RNG. Exact resume requires the unchanged training contract and restores the
+last entire collection round. The cold boundary
 identifies its pending transition; stopping inside an NFT inner round is invalid.
 Checkpoint names count run-local generator steps. Exported live/EMA students still use
 `scripts.posttrain.export` and the independent benchmark/scorer pipeline.
@@ -603,7 +539,7 @@ Checkpoint names count run-local generator steps. Exported live/EMA students sti
 ## NFT/joint qualification
 
 The six stage-two controls completed four generator updates each from matching
-pinned full/LoRA cold boundaries. Both integrations completed eight cold and
+full/LoRA cold boundaries. Both integrations completed eight cold and
 eight joint updates. Each used 24 global samples, 12 learners and 640×640 collection.
 The cases cover both NFT parameterizations, group/round scaling, copy/constant/
 ramped old refresh, optional frozen reference, q=2 and multiple inner updates/
@@ -646,14 +582,12 @@ selection and full-run preparation remain unstarted; no release recipe is select
 
 ## Family qualification and experiment handoff
 
-The [explicit matrix](../configs/posttrain/qualification.json) declares 75
-capabilities across 22 cases. Eight whole-run cases reuse exact-current core
-source from NFT/joint qualification; fourteen additional cases executed missing
-paths. Older cold/DMD whole trajectories have different orchestration versions
-and are not counted as current end-to-end evidence. Their unchanged operator
-mechanisms remain applicable. Matrix assignments alone cannot pass the gate;
-the report requires execution, evaluation, release accounting and both native
-and independent review receipts.
+The qualification matrix declared 75 capabilities across 22 cases; the matrix,
+receipts and reviews are archived under `notes/internal/`. Eight whole-run cases
+reused exact-current core source from NFT/joint qualification; fourteen additional
+cases executed missing paths. Older cold/DMD whole trajectories had different
+orchestration versions and were not counted as current end-to-end evidence;
+their unchanged operator mechanisms remain applicable.
 
 The new paths cover all cold toggle triples, independent full fake score,
 student/fake Muon, attention-only student LoRA, terminal targets, clean/score-KL
@@ -685,11 +619,11 @@ This is one viable placement, not whole-device HBM or optimized throughput.
 The runs use FP32 master parameters/state/reductions with BF16 forward autocast;
 CPU FP32 operator checks do not qualify target FP32 forward training.
 
-An independently launched deterministic service with a different ID, lower
-numeric channel and structured rubric runs through cold reward transforms,
+An independently launched deterministic service with a different ID and lower
+numeric channel runs through cold reward transforms,
 NFT group advantages and the benchmark using configuration changes alone.
-Its two exports additionally produce 64 images and 64 protocol envelopes with
-rubric diagnostic metadata. The fixture is outside the production backend
+Its two exports additionally produce 64 images and 64 score envelopes with
+diagnostic metadata. The fixture is outside the production backend
 factory; it verifies transport and state flow, not VLM inference or quality.
 A production rubric VLM remains a later scorer qualification.
 

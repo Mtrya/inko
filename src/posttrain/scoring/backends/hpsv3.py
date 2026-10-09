@@ -1,4 +1,4 @@
-"""Pinned HPSv3 with an explicit FP32 reward-head boundary."""
+"""HPSv3 with an explicit FP32 reward-head boundary."""
 
 import importlib
 import sys

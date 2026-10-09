@@ -7,7 +7,6 @@ import subprocess
 from pathlib import Path
 
 from src.evaluation.benchmarks.prompts import normalized_text
-from src.posttrain.records import atomic_json, file_hash
 
 
 def prepare(
@@ -55,7 +54,7 @@ def prepare(
             key=lambda text: hashlib.sha256(f"{namespace}:{text}".encode()).hexdigest(),
         )
 
-    def records(pool, keys, split, prefix, source_key):
+    def records(pool, keys, prefix):
         result = []
         for key in keys:
             digest = hashlib.sha256(key.encode()).hexdigest()
@@ -64,13 +63,9 @@ def prepare(
                     "id": f"{prefix}_{digest[:16]}",
                     "scene_id": f"{prefix}_{digest[:16]}",
                     "text": pool[key],
-                    "split": split,
                     "lang": "en",
-                    "domain": "general",
                     "aspect": "1:1",
                     "seed": int(digest[:15], 16),
-                    "source_revision": revision,
-                    "source_path": str(paths[source_key].relative_to(source)),
                 }
             )
         return result
@@ -79,16 +74,8 @@ def prepare(
         train
     ) or not 0 < eval_bringup <= len(dev):
         raise ValueError("invalid subset sizes")
-    rollout = records(
-        train,
-        ordered(train, "rollout")[:rollout_count],
-        "rollout",
-        "pickscore",
-        "rollout",
-    )
-    development = records(
-        dev, ordered(dev, "development"), "development", "drawbench", "development"
-    )
+    rollout = records(train, ordered(train, "rollout")[:rollout_count], "pickscore")
+    development = records(dev, ordered(dev, "development"), "drawbench")
     used = {normalized_text(r["text"]) for r in rollout}
     remaining = {k: v for k, v in train.items() if k not in used}
     if not 0 < confirmation_count <= len(remaining) or evaluation_seeds < 2:
@@ -99,8 +86,6 @@ def prepare(
         remaining,
         ordered(remaining, "confirmation")[:confirmation_count],
         "confirmation",
-        "confirmation",
-        "rollout",
     )
 
     def repeated(rows):
@@ -139,27 +124,9 @@ def prepare(
         "posttrain_monitor_diversity": repeated(monitor_records),
     }
     destination.mkdir(parents=True, exist_ok=True)
-    outputs = {}
     for name, rows in suites.items():
         path = destination / f"{name}.jsonl"
         path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
-        outputs[path.name] = {"count": len(rows), "sha256": file_hash(path)}
-    atomic_json(
-        destination / "posttrain_sources.json",
-        {
-            "repository": "https://github.com/NVlabs/DiffusionNFT",
-            "revision": revision,
-            "sources": {
-                str(p.relative_to(source)): file_hash(p) for p in paths.values()
-            },
-            "monitor_sha256": file_hash(monitor),
-            "outputs": outputs,
-            "selection": "NFKC/casefold/whitespace deduplication; exclude development and monitor exact-normalized texts; SHA256(namespace:text) ordering",
-            "overlap_scope": "Exact-normalized exclusion only; semantic paraphrase overlap is not certified.",
-            "reservation": "Confirmation texts are excluded from rollout, development and monitor; do not select recipes on this pool.",
-            "evaluation_seeds": evaluation_seeds,
-        },
-    )
 
 
 def validate_pools(pools):

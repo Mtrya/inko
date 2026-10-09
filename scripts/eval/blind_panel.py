@@ -206,8 +206,6 @@ def cmd_panel(args: argparse.Namespace) -> int:
         metadata = []
         if record.get("tags"):
             metadata.append(", ".join(str(tag) for tag in record["tags"]))
-        if record.get("domain"):
-            metadata.append(str(record["domain"]))
         if record.get("aspect"):
             metadata.append(f"aspect {record['aspect']}")
         if metadata:

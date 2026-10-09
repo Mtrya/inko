@@ -17,7 +17,7 @@ from src.posttrain.evaluation_config import (
     evaluation_due,
     load_interval_config,
 )
-from src.posttrain.records import atomic_json, file_hash
+from src.posttrain.records import atomic_json
 from src.posttrain.schema import require
 from src.posttrain.training_config import load_training_config
 
@@ -52,26 +52,14 @@ def evaluate_checkpoint(checkpoint, training, interval, assets, output):
         manifest["contract"]["config"] == json.loads(json.dumps(asdict(training))),
         "evaluation checkpoint training config differs",
     )
-    sampling_path = REPO / interval.sampling_config
-    require(
-        file_hash(sampling_path) == interval.sampling_sha256,
-        "interval sampling configuration bytes differ",
-    )
-    base = load_config(sampling_path)
+    base = load_config(REPO / interval.sampling_config)
     exports, arms = [], list(base.arms)
     mapped = dict(assets["checkpoints"])
     for view in interval.weights:
         destination = output / "exports" / view
         if destination.exists():
             record = json.loads((destination / "export.json").read_text())
-            require(
-                record["source_checkpoint"] == file_hash(checkpoint / "manifest.json")
-                and record["weights"] == view
-                and file_hash(destination / "weights.pt") == record["merged_sha256"]
-                and file_hash(destination / "transformer_config.json")
-                == record["architecture_sha256"],
-                "saved interval export differs",
-            )
+            require(record["weights"] == view, "saved interval export differs")
         else:
             record = export(checkpoint, view, destination)
         asset = f"student_{view}"
@@ -80,9 +68,7 @@ def evaluate_checkpoint(checkpoint, training, interval, assets, output):
         arms.append(
             Arm(
                 asset,
-                Checkpoint(
-                    asset, view, record["merged_sha256"], record["architecture_sha256"]
-                ),
+                Checkpoint(asset, view),
                 c.rule,
                 c.steps,
                 c.guidance,
@@ -115,7 +101,6 @@ def evaluate_checkpoint(checkpoint, training, interval, assets, output):
         )
         panel(target, output / f"{suite}-blind", interval.blind_seed)
     receipt = {
-        "checkpoint_sha256": file_hash(checkpoint / "manifest.json"),
         "step": manifest["step"],
         "exports": exports,
         "suites": interval.suites,
@@ -132,17 +117,9 @@ def execute(config_path, interval_path, assets_path, output):
     interval = load_interval_config(interval_path)
     assets = json.loads(Path(assets_path).read_text())
     stops = list(boundaries(training, interval))
-    sampling = REPO / interval.sampling_config
-    require(
-        file_hash(sampling) == interval.sampling_sha256, "sampling config bytes differ"
+    identity = json.loads(
+        json.dumps({"training": asdict(training), "interval": asdict(interval)})
     )
-    identity = {
-        "training_sha256": file_hash(config_path),
-        "interval": asdict(interval),
-        "assets_sha256": file_hash(assets_path),
-        "execution": "Train segment exits, checkpoint export/evaluation, exact-contract resume.",
-    }
-    identity = json.loads(json.dumps(identity))
     with (output / ".campaign.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         marker = output / "campaign.json"
@@ -209,7 +186,6 @@ def execute(config_path, interval_path, assets_path, output):
             output / "complete.json",
             {
                 "step": training.training.steps,
-                "checkpoint_sha256": file_hash(last / "manifest.json"),
             },
         )
 
@@ -227,10 +203,6 @@ if __name__ == "__main__":
             args.interval
         )
         stops = list(boundaries(c, interval))
-        require(
-            file_hash(REPO / interval.sampling_config) == interval.sampling_sha256,
-            "sampling config bytes differ",
-        )
         print(
             json.dumps(
                 {

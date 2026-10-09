@@ -50,12 +50,13 @@ python -m src.posttrain.train --config /external/training.json \
   --resume /external/run/checkpoints/fit-000016
 ```
 
-Exact resume requires unchanged source, config, runtime and input assets. A
-committed cold checkpoint can initialize a separate joint run through
-`stages.initial_checkpoint` and its manifest SHA. Initialization imports live
+A committed cold checkpoint can initialize a separate joint run through
+`stages.initial_checkpoint`. Initialization imports live
 student and active fake weights and resets optimizers, EMA, cursor and RNG.
 It is different from resume. The fake lineage uses actual optimizer updates,
 including initial fitting. Joint branches may choose a different fake ratio.
+
+Exact resume requires an unchanged training contract.
 
 Declare the long joint horizon before launching a composition arm. Stop at a
 complete collection round, evaluate it, and resume the same horizon if retained.
@@ -84,13 +85,13 @@ python -m scripts.posttrain.prepare_metric \
 ```
 
 Copy the complete metric asset to the execution machine. Set the benchmark's
-`evaluation.diversity.asset` and `sha256`, and map that asset in
-`assets.metrics`. Evaluation uses the pinned complete weights without downloads.
+`evaluation.diversity.asset`, and map that asset in
+`assets.metrics`. Evaluation uses the prepared complete weights without downloads.
 Pair batch size and CPU thread count are explicit settings. Raw reward reports
 include standard deviation, range and quantiles alongside scene-level paired
 comparisons. Reward scores remain descriptive measurements, not human judgments.
 
-An interval input names the sampling config and its SHA, generator-step cadence,
+An interval input names the sampling config, generator-step cadence,
 suite names, weight views, final-evaluation choice and blind shuffle seed. See
 `configs/posttrain/campaign_qualification/interval.json`. Every stop must be a
 complete collection round. The cold boundary always receives an evaluation.
@@ -105,14 +106,14 @@ python -m scripts.posttrain.run_campaign --config /external/training.json \
 
 Run the same command after interruption. The driver checks committed checkpoints,
 finishes their required evaluations and resumes training. Each segment releases
-all training processes before generation and scoring. Exports carry their actual
-view names and EMA decays. A failed evaluation blocks advancement. Existing blind
+all training processes before generation and scoring. Exports name their actual
+view and step. A failed evaluation blocks advancement. Existing blind
 ballots are preserved on restart. `complete.json` is published only after the
 required final work succeeds.
 
 If startup stops before the first checkpoint is published, the matching run
-manifest permits a restart from the pinned initialization. Uncommitted work has
-no recoverable state. Once a checkpoint is published, training requires explicit
+manifest permits a restart from the declared initialization. Uncommitted work
+has no recoverable state. Once a checkpoint is published, training requires explicit
 resume; the campaign driver supplies it. Changed contracts are rejected in both
 cases.
 
@@ -132,41 +133,11 @@ pairs and scorer-up/human-down counts without inventing missing judgments.
 
 ## Execution qualification
 
-The pinned plan in `configs/posttrain/campaign_qualification/plan.json` uses two
-representative full-model cases. The cold case checks initial-fitting recovery,
-Muon, two EMA exports and serialized interval evaluation. The full-fake joint
-case checks fresh fitting targets, joint entry and the largest resident-role
-memory footprint. It keeps all training updates and evaluates the cold boundary
-and joint endpoint.
-
-Both cases use `teacher_residual`. This plan does not exercise the other
-estimators, an NFT-only comparison, cross-run cold checkpoint branching, or
-student-LoRA with Muon. Those interfaces have separate mechanism or historical
-execution evidence. They are not additional coverage of this pinned plan.
-
-Memory qualification does not require launching every estimator or composition.
-Under the same resolution, microbatch, precision and retained graph size, full
-weights, an independent full fake model, old/reference models and two EMA shadows
-bound the lighter role combinations. Larger fake-update ratios repeat backward
-passes sequentially and do not retain their graphs. Separate mechanism checks
-cover behavior that this memory bound cannot establish, including adapter Muon,
-state restoration and readout admission. Include optimizer state and temporary
-buffers when comparing memory: AdamW keeps two moments, while Muon keeps one
-momentum buffer for its matrices. A new resource envelope requires a new check;
-a new scalar loss coefficient alone does not.
-
-```bash
-python -m scripts.posttrain.qualify_campaign \
-  --plan configs/posttrain/campaign_qualification/plan.json --validate-only
-python -m scripts.posttrain.qualify_campaign \
-  --plan configs/posttrain/campaign_qualification/plan.json \
-  --assets /external/assets.json --output /external/qualification
-```
-
-The plan pins config bytes; edits require deliberate new pins and an output
-directory with the new identity. The harness records each resolved cold source
-and config before execution. Any failure stops the plan. Qualifying these paths
-establishes execution under their recorded runtime and placement. It does not
-establish convergence, a winning setting or safety at arbitrary scales and
-horizons. New resource envelopes need their own bounded qualification with the
-intended scientific workload preserved.
+Representative execution qualification is complete and archived under
+`notes/internal/`. It covered initial-fitting recovery, fresh fitting targets,
+cold-to-joint transitions, Muon on full weights and Q/V adapters, the full fake
+model, two EMA exports, and interval generations with reward and diversity
+scores. Qualifying these paths establishes execution under their recorded
+runtime and placement. It does not establish convergence, a winning setting or
+safety at arbitrary scales and horizons. New resource envelopes need their own
+bounded qualification with the intended scientific workload preserved.

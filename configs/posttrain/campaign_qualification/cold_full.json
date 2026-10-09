@@ -1,15 +1,11 @@
 {
   "initialization": {
     "asset": "initial",
-    "weights": "ema",
-    "sha256": "1891290374655850c96d4158860e9e480dfa01ca3e554ccd9159ac9b28866bc9",
-    "architecture_sha256": "75372e0a153b637d500dee1e3314a056750c8a4d398017d2db6e4531737120c6"
+    "weights": "ema"
   },
   "teacher": {
     "asset": "initial",
-    "weights": "ema",
-    "sha256": "1891290374655850c96d4158860e9e480dfa01ca3e554ccd9159ac9b28866bc9",
-    "architecture_sha256": "75372e0a153b637d500dee1e3314a056750c8a4d398017d2db6e4531737120c6"
+    "weights": "ema"
   },
   "student": {
     "mode": "full",
@@ -142,54 +138,35 @@
   "scorers": [
     {
       "id": "hpsv3",
-      "fingerprint": "9d0d57cfe59b6830f2b0dbd002316e8bcf1e0ef068746c1792fab03bc3705c3b",
-      "input_schema": "image-text-v1",
-      "structured_fields": [],
       "outputs": [
         {
           "name": "mu",
-          "direction": "higher",
-          "bounds": [],
-          "meaning": "Predicted preference mean"
+          "direction": "higher"
         },
         {
           "name": "log_sigma",
-          "direction": "lower",
-          "bounds": [],
-          "meaning": "Diagnostic log standard deviation; not a reward"
+          "direction": "lower"
         }
       ],
       "attempts": 2,
       "timeout": 600.0,
       "concurrency": 2,
       "batch_size": 2,
-      "transport": "shared_file",
-      "seed_policy": "none",
-      "seed": 0
+      "transport": "shared_file"
     },
     {
       "id": "vqascore",
-      "fingerprint": "01bb42de3a579c03ec82832afd9ee0b8b92f9770c7fd7ed8743a0152f7012458",
-      "input_schema": "image-text-v1",
-      "structured_fields": [],
       "outputs": [
         {
           "name": "probability",
-          "direction": "higher",
-          "bounds": [
-            0.0,
-            1.0
-          ],
-          "meaning": "Probability of Yes for the configured image-text question"
+          "direction": "higher"
         }
       ],
       "attempts": 2,
       "timeout": 600.0,
       "concurrency": 2,
       "batch_size": 2,
-      "transport": "shared_file",
-      "seed_policy": "none",
-      "seed": 0
+      "transport": "shared_file"
     }
   ],
   "rewards": {
@@ -225,8 +202,7 @@
   "stages": {
     "cold_steps": 4,
     "joint_steps": 0,
-    "initial_checkpoint": "",
-    "initial_sha256": ""
+    "initial_checkpoint": ""
   },
   "joint": {
     "dmd_coefficient": 0.0,
