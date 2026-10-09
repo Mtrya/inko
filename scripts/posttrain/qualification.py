@@ -308,9 +308,9 @@ def execute_case(case, deployment, assets_path, output):
         exports.append({"path": str(path), **receipt})
     return {
         "case": case.id,
-        "execution": "new_process_boundary_recovery"
-        if resume is not None
-        else "executed",
+        "execution": (
+            "new_process_boundary_recovery" if resume is not None else "executed"
+        ),
         "config_sha256": case.config_sha256,
         "source_sha256": identity(contract["source"]),
         "capabilities": list(case.capabilities),
@@ -360,7 +360,7 @@ def evaluate(matrix, results, assets, output, base_config_path):
                     identifier,
                     Checkpoint(
                         identifier,
-                        "live",
+                        export["weights"],
                         export["merged_sha256"],
                         export["architecture_sha256"],
                     ),
@@ -374,7 +374,9 @@ def evaluate(matrix, results, assets, output, base_config_path):
     prompts = load_prompts(
         REPO / evaluation.evaluation.bringup_suite, evaluation.sampling.shapes
     )
-    report = run(evaluation, eval_assets, prompts, output / "evaluation")
+    report = run(
+        evaluation, eval_assets, prompts, output / "evaluation", suite="bringup"
+    )
     require(
         all(
             metric["complete"]

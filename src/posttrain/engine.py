@@ -73,13 +73,22 @@ def input_record(role, rollout, times, noise, **extra):
     }
 
 
-def fake_updates(config, roles, fake, rollouts, optimizer):
+def fake_updates(config, roles, fake, rollouts, optimizer, *, count=None, start=0):
     inputs, norms, totals = [], [], []
     total = config.collection.prompts_per_round * config.collection.draws_per_prompt
-    for update in range(config.fake.updates):
+    for update in range(
+        start, start + (config.fake.updates if count is None else count)
+    ):
+        targets = rollouts
+        if config.fake.target_refresh == "update":
+            from .rollout import fresh_rollouts
+
+            targets = fresh_rollouts(
+                config, roles.student_field, rollouts, "fake_target", optimizer.steps
+            )
         optimizer.zero_grad()
         loss_total = torch.zeros((), device=rollouts[0].terminal.device)
-        for index, rollout in enumerate(rollouts):
+        for index, rollout in enumerate(targets):
             target = getattr(rollout, config.fake.target)
             times, noise = score_inputs(config, rollout, "fake", update)
             z = forward_noise(target, times, noise)
@@ -93,7 +102,7 @@ def fake_updates(config, roles, fake, rollouts, optimizer):
                     target=tensor_digest(target),
                 )
             )
-            with accumulation(fake, index == len(rollouts) - 1):
+            with accumulation(fake, index == len(targets) - 1):
                 loss = global_loss(
                     fake_loss(fake(z, times, rollout.conditioning), target, noise),
                     total,
@@ -174,7 +183,7 @@ def finish_student(config, roles, optimizer, loss_total):
         if model is not None and any(p.grad is not None for p in model.parameters()):
             raise RuntimeError("student update leaked into a detached role")
     norm = optimizer.step(loss_total)
-    roles.update_ema(config.training.ema_decay)
+    roles.update_ema()
     optimizer.zero_grad()
     return norm
 
@@ -191,6 +200,12 @@ def update_round(
     reward_weights=None,
 ):
     validate_collection(rollouts, step)
+    if (
+        step == 0
+        and config.fake.initial_steps
+        and fake_optimizer.steps != config.fake.initial_steps
+    ):
+        raise ValueError("first student update requires completed initial fake fitting")
     if config.objective.mode == "rtdm":
         if reward_weights is None:
             raise ValueError(
@@ -198,7 +213,10 @@ def update_round(
             )
         admit_values(config, rollouts, reward_weights)
     student_optimizer.zero_grad()
-    evidence = fake_updates(config, roles, fake, rollouts, fake_optimizer)
+    first_fitted = step == 0 and config.fake.initial_steps > 0
+    evidence = fake_updates(
+        config, roles, fake, rollouts, fake_optimizer, count=0 if first_fitted else None
+    )
     total = config.collection.prompts_per_round * config.collection.draws_per_prompt
     point = cold_point(config, step)
     loss_total = torch.zeros((), device=rollouts[0].terminal.device)
@@ -344,9 +362,9 @@ def update_joint(
                         generator_step=step,
                         terminal=tensor_digest(rollout.terminal),
                         old_prediction=tensor_digest(old),
-                        reference_prediction=None
-                        if reference is None
-                        else tensor_digest(reference),
+                        reference_prediction=(
+                            None if reference is None else tensor_digest(reference)
+                        ),
                     )
                     evidence["inputs"].append(record)
                 weighted = j.nft_coefficient * nft

@@ -47,9 +47,11 @@ def rng_state(device):
         "python": random.getstate(),
         "numpy": np.random.get_state(),
         "torch": torch.get_rng_state(),
-        "accelerator": None
-        if device.type == "cpu"
-        else getattr(torch, device.type).get_rng_state(device).cpu(),
+        "accelerator": (
+            None
+            if device.type == "cpu"
+            else getattr(torch, device.type).get_rng_state(device).cpu()
+        ),
     }
 
 
@@ -79,7 +81,8 @@ def publish(root, step, contract, state, rank_state, rank, device):
     if rank == 0:
         save_tensor_file(staging / "state.pt", cpu_state(state))
     barrier()
-    destination = root / f"step-{step:06d}"
+    fitting = state.get("initial_fit_steps", 0) if step == 0 else 0
+    destination = root / (f"fit-{fitting:06d}" if fitting else f"step-{step:06d}")
     if rank == 0:
         files = {p.name: file_hash(p) for p in staging.iterdir()}
         require(
@@ -90,8 +93,10 @@ def publish(root, step, contract, state, rank_state, rank, device):
         atomic_json(
             staging / "manifest.json",
             {
-                "schema": 1,
+                "schema": 2,
                 "step": step,
+                "initial_fit_steps": state.get("initial_fit_steps", 0),
+                "fake_steps": state.get("fake_steps"),
                 "world_size": world_size(),
                 "contract": contract,
                 "contract_sha256": identity(contract),
@@ -117,7 +122,7 @@ def inspect(path, expected_contract=None):
     )
     record = json.loads((path / "manifest.json").read_text())
     require(
-        record["schema"] == 1
+        record["schema"] == 2
         and record["contract_sha256"] == identity(record["contract"]),
         "invalid checkpoint contract",
     )
@@ -141,6 +146,11 @@ def load(path, contract, rank):
         require(
             state["step"] == manifest["step"], "checkpoint manifest/state step differs"
         )
+    require(
+        state.get("initial_fit_steps", 0) == manifest["initial_fit_steps"]
+        and state.get("fake_steps") == manifest["fake_steps"],
+        "checkpoint manifest/state fake clocks differ",
+    )
     return (
         state,
         torch.load(

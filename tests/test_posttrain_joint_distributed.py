@@ -65,7 +65,7 @@ def worker(rank, path, destination, microbatch, coefficients):
             reference=reference,
             old_field=old,
             reference_field=reference,
-            update_ema=lambda _: None,
+            update_ema=lambda: None,
         )
         optimizer = GradientCapture(model)
         prime_buckets(learner, torch.zeros(1, 1), torch.tensor([0.5]), ())

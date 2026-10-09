@@ -9,7 +9,16 @@ from .schema import require
 
 
 def learner(
-    rank, config, assets, contract, output, resume, stop_after, rendezvous, attempt
+    rank,
+    config,
+    assets,
+    contract,
+    output,
+    resume,
+    stop_after,
+    rendezvous,
+    attempt,
+    stop_after_fit=None,
 ):
     import numpy as np
     import torch
@@ -21,9 +30,10 @@ def learner(
 
     from . import checkpoint
     from .distributed import initialize, prime_buckets, wrap
-    from .engine import update_joint, update_round
+    from .engine import fake_updates, update_joint, update_round
     from .initialization import load_boundary
     from .models import peak_memory, set_device, synchronize
+    from .probes import fake_regression_probe
     from .roles import Roles
     from .rollout import PromptCursor, collect, collect_nft, tensor_digest
     from .round_scoring import publish_collection, wait_for_rewards
@@ -62,11 +72,13 @@ def learner(
             Inko.from_single_file(
                 assets["checkpoints"][config.initialization.asset]
             ).to(device),
-            Inko.from_single_file(assets["checkpoints"][config.teacher.asset]).to(
-                device
-            )
-            if config.dmd_enabled(stage)
-            else None,
+            (
+                Inko.from_single_file(assets["checkpoints"][config.teacher.asset]).to(
+                    device
+                )
+                if config.dmd_enabled(stage)
+                else None
+            ),
             config,
             stage=stage,
         )
@@ -272,14 +284,72 @@ def learner(
                             device,
                             stage=clock.stage,
                             generator_step=clock.global_generator_steps,
-                            stream="collection"
-                            if clock.stage == "cold"
-                            else "dmd_collection",
+                            stream=(
+                                "collection"
+                                if clock.stage == "cold"
+                                else "dmd_collection"
+                            ),
                         )
                     )
             return result
 
-        while clock.step < stop_after:
+        fit_limit = (
+            config.fake.initial_steps if stop_after_fit is None else stop_after_fit
+        )
+        if stop_after_fit is not None:
+            require(
+                clock.step == 0 and clock.initial_fit_steps <= fit_limit,
+                "resume is past the requested fitting boundary",
+            )
+        if clock.initial_fit_steps < fit_limit:
+            # Replay the first cold collection after fitting. Its prompt cursor,
+            # student, keyed noise and cold schedules stay at their entry state.
+            entry_cursor = cursor.state_dict()
+            fit_batches = collect_round(False)
+            cursor.load_state_dict(entry_cursor)
+            while clock.initial_fit_steps < fit_limit:
+                start = time.monotonic()
+                evidence = fake_updates(
+                    config,
+                    roles,
+                    state.fake,
+                    fit_batches,
+                    state.fake_optimizer,
+                    count=1,
+                    start=clock.initial_fit_steps,
+                )
+                clock.fit(config)
+                synchronize(device)
+                evidence.update(
+                    initial_fit_steps=clock.initial_fit_steps,
+                    student_version=clock.global_generator_steps,
+                    fake_version=clock.fake_steps,
+                    seconds=time.monotonic() - start,
+                    peak_allocated_bytes=peak_memory(device),
+                    attempt=attempt,
+                )
+                atomic_json(
+                    output
+                    / "fitting"
+                    / f"{attempt}-fit-{clock.initial_fit_steps:06d}-rank-{rank:03d}.json",
+                    evidence,
+                )
+                if (
+                    clock.initial_fit_steps % config.fake.initial_checkpoint_every == 0
+                    or clock.initial_fit_steps == fit_limit
+                ):
+                    checkpoint.publish(
+                        output / "checkpoints",
+                        0,
+                        contract,
+                        state.state_dict(),
+                        {"cursor": cursor.state_dict()},
+                        rank,
+                        device,
+                    )
+            del fit_batches
+
+        while stop_after_fit is None and clock.step < stop_after:
             if clock.next_action(config) == "transition":
                 require(frozen_base == frozen(), "frozen cold role changed")
                 before = clock.state_dict()
@@ -372,6 +442,19 @@ def learner(
                         old_version,
                     )
                 clock.update(config)
+                if (
+                    state.fake is not None
+                    and config.fake_probe.every
+                    and clock.global_generator_steps % config.fake_probe.every == 0
+                ):
+                    probe_rng = checkpoint.rng_state(device)
+                    evidence["fake_probe"] = fake_regression_probe(
+                        config,
+                        roles,
+                        dmd,
+                        clock.global_generator_steps,
+                    )
+                    checkpoint.restore_rng(probe_rng, device)
                 synchronize(device)
                 evidence.update(
                     step=clock.step,
@@ -434,6 +517,7 @@ def learner(
             output / "completion" / f"{attempt}-rank-{rank:03d}.json",
             {
                 **clock.state_dict(),
+                "rank": rank,
                 "frozen_unchanged": True,
                 "student_version": clock.global_generator_steps,
                 "fake_version": clock.fake_steps,

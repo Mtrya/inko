@@ -20,10 +20,17 @@ cpu_threads = 4
 suite = "configs/prompts/posttrain_drawbench.jsonl"
 bringup_suite = "configs/prompts/posttrain_drawbench_bringup.jsonl"
 monitor_suite = "configs/prompts/monitor.jsonl"
+confirmation_suite = "configs/prompts/posttrain_confirmation.jsonl"
 channels = ["hpsv3.mu", "vqascore.probability"]
 bootstrap_seed = 1729
 bootstrap_repeats = 2000
 confidence = 0.95
+[evaluation.diversity]
+enabled = false
+asset = ""
+sha256 = ""
+pair_batch_size = 1
+cpu_threads = 4
 
 [[arms]]
 name = "teacher_euler50"

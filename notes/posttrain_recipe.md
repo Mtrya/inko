@@ -8,6 +8,9 @@ recovery and student export. No final training recipe is selected.
 defines plain DMD; `configs/posttrain_cold.toml` enables the independent RT-DM,
 DynaDG and DynaRS controls. `configs/posttrain_joint.toml` adds NFT/joint training
 and explicit stage transitions with bounded target-run qualification.
+The [campaign execution guide](posttrain_campaign.md) describes initial fake
+fitting, named student EMA views, interval evaluation, diversity and blind
+readouts. These mechanisms do not select their experimental settings.
 
 See the [mathematical contract](posttrain_contract.md),
 [evaluation protocol](posttrain_evaluation.md), and
@@ -54,10 +57,12 @@ gradient**, using the existing `fake.updates` control. Each generator update
 already holds the student fixed, performs those fake optimizer steps with fresh
 renoise draws, and then uses the fitted score views. The tested value 128 is a
 causal intervention, not a selected ratio, an accuracy guarantee or a recommended
-production default. The initial-only schedule was a diagnostic driver, not an
-implemented warmup option. The coverage configs retain their original settings
-and are not release recipes. No new trainer algorithm or compatibility path is
-needed to express the tested recurring-fitting correction.
+production default. The original initial-only schedule used a diagnostic driver.
+The trainer now exposes `fake.initial_steps` for fitting before the first student
+update and `fake.updates` for subsequent updates. The coverage configs retain
+their original recurring ratios and are not release recipes. The
+[campaign execution guide](posttrain_campaign.md) defines the counters and
+recovery behavior.
 
 The investigation found no separate mathematical or implementation defect that
 explains the original failure. Weight-drift, score-precision, native/merged export

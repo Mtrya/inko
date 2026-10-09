@@ -422,15 +422,31 @@ clean-prediction renoise prefixes are detached. Recompute only that selected
 student prediction with gradients after the fake updates. Fake learning uses
 either the detached selected clean prediction or terminal latent `y_target`,
 fresh independent time/noise, and `mean_elements((v_fake-(y_target-ε))²)`.
-Each round performs `q` fake steps, then one student step, then evaluation EMA.
+Normally each DMD update performs `q = fake.updates` fake steps, then one student
+step, then all configured student EMA updates. When `fake.initial_steps = N > 0`,
+the cold entry instead performs exactly N fake steps before the first student
+step. It does not add q more steps before that first student step. Later cold
+steps and every joint DMD step use q. Initial fitting holds the student, EMA,
+generator clock and prompt cursor fixed. Its own counter advances with the
+actual fake optimizer counter and is recoverable through `fit-NNNNNN`
+checkpoints. It does not acquire rewards.
+
+`fake.target_refresh = "round"` retains the collected targets while fitting;
+time and noise are fresh for each fake update. `"update"` explicitly generates
+fresh targets from the same held student and prompt group for every fake update.
+It uses an independent keyed stream and does not advance the prompt cursor.
 
 `q` is a fitting/exposure control, not a correctness constant. Matching teacher
 initialization does not establish an accurate score for the few-step student's
 output distribution. The [texture-collapse investigation](posttrain_recipe.md#fake-score-fitting-and-texture-collapse-disposition)
 demonstrates a causal initial fitting deficit and its correction through more
-fake updates. No automatic warmup or adaptive stopping rule is implemented;
+fake updates. The initial fitting count is explicit; no adaptive stopping rule is implemented;
 neither a low fake loss nor a small generator surrogate certifies score accuracy
 or generation quality.
+The optional `fake_probe` regenerates samples from the current student and
+reports fake regression MSE and its score-time-weighted form. It changes no
+optimizer, EMA, cursor or training RNG state. It measures regression risk on
+fresh samples, not error against an oracle student score.
 All random streams identify round, sample and role; noise is generated from
 keyed CPU seeds so packing does not change draws.
 
@@ -463,10 +479,25 @@ first real forward uses the steady reduction layout. Setup gradients are cleared
 and RNG restored without optimizer, cursor or clock updates. Numerical
 repeatability remains a measured property separate from exact state restoration.
 
-Exports merge only student weight LoRA, optionally substitute evaluation EMA,
+`training.ema` declares named student shadows with independent decays and an
+explicit storage device (`learner` or `cpu`). Each successful student optimizer
+step advances every shadow. Initial fake fitting never advances them. Stage
+transition resets all shadows to the live joint-entry student. No fake-score
+shadow exists. Save/resume preserves every named shadow and rejects a changed
+inventory. Checkpoint schema 2 records the initial-fitting and actual fake-step
+counters; earlier checkpoint schemas require their original source.
+
+Exports merge only student weight LoRA, optionally substitute a named student EMA,
 and verify an exact reload of the materialized FP32 weights. Fake Q/V adapters
 never enter an inference export. The export manifest pins initialization,
-architecture, tuning, resolved parameter names and source checkpoint identity.
+architecture, tuning, resolved parameter names, selected view/decay and source
+checkpoint identity. Export directories publish atomically.
+
+Interval evaluation runs between committed training segments. All learner and
+owned scorer processes exit before export and benchmark workers start. The next
+segment resumes the unchanged training contract. Evaluation errors block further
+training until the same checkpoint evaluation succeeds. This avoids concurrent
+training/evaluation model allocations without changing the scientific workload.
 
 ## Reward and rollout records
 

@@ -20,6 +20,12 @@ rank = 32
 multiplier = 1.0
 updates = 2
 target = "selected_prediction"
+initial_steps = 0
+initial_checkpoint_every = 16
+target_refresh = "round"
+[fake_probe]
+every = 0
+draws = 1
 [objective]
 mode = "rtdm"
 estimator = "teacher_residual"
@@ -54,8 +60,7 @@ deterministic_algorithms = true
 seed = 1729
 steps = 6
 checkpoint_every = 2
-ema_enabled = true
-ema_decay = 0.9
+ema = [{ name = "ema", decay = 0.9, device = "learner" }]
 [student_optimizer]
 kind = "adamw"
 lr = 1e-5

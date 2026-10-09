@@ -36,15 +36,17 @@ def joint_config(spec, mode="full", dmd=1, nft=1, reference=0.1):
         scorers=(spec,) if nft else (),
         rewards=Rewards(
             (
-                RewardChannel(
-                    spec.id + "." + spec.outputs[0].name,
-                    spec.outputs[0].direction,
-                    1,
-                    "none",
-                ),
-            )
-            if nft
-            else (),
+                (
+                    RewardChannel(
+                        spec.id + "." + spec.outputs[0].name,
+                        spec.outputs[0].direction,
+                        1,
+                        "none",
+                    ),
+                )
+                if nft
+                else ()
+            ),
             1e-4,
             "mean_one_exp",
             1,
@@ -146,6 +148,9 @@ def run_inner(state, rows, inner):
 def test_old_reference_independence_refresh_and_separate_ema(sampling_config, mode):
     torch.manual_seed(6)
     c = joint_config(sampling_config.scorers[0], mode)
+    c = replace(
+        c, training=replace(c.training, ema=(replace(c.training.ema[0], decay=0.75),))
+    )
     state = new_state(c, small_model())
     roles = state.roles
     old0, ref0 = (
@@ -167,9 +172,11 @@ def test_old_reference_independence_refresh_and_separate_ema(sampling_config, mo
             assert p is old is ref
     assert_exact(old0, roles.old.state_dict())
     assert_exact(ref0, roles.reference.state_dict())
-    roles.update_ema(0.75)
+    roles.update_ema()
     for name in trainable:
-        torch.testing.assert_close(roles.ema[name], old0[name] + 0.5, rtol=0, atol=1e-6)
+        torch.testing.assert_close(
+            roles.ema["ema"][name], old0[name] + 0.5, rtol=0, atol=1e-6
+        )
     roles.refresh_old(0.25)
     for name in trainable:
         torch.testing.assert_close(
@@ -347,7 +354,7 @@ def test_stage_transition_retains_weights_resets_optimizers_and_ema(
     assert not state.student_optimizer.optimizers[0].state
     for n, p in state.roles.student.named_parameters():
         if p.requires_grad:
-            torch.testing.assert_close(state.roles.ema[n], p, rtol=0, atol=0)
+            torch.testing.assert_close(state.roles.ema["ema"][n], p, rtol=0, atol=0)
     assert (
         state.clock.stage_generator_steps == 0 and state.clock.old_policy_version == 0
     )
@@ -398,10 +405,11 @@ def test_config_only_http_scorer_substitution_through_grouped_nft(
             def score(self, inputs, channel=metric):
                 return [
                     {
-                        channel: float(Image.open(i.image_path).getpixel((0, 0))[0])
-                        / 50
-                        if i.prompt == "first"
-                        else 2
+                        channel: (
+                            float(Image.open(i.image_path).getpixel((0, 0))[0]) / 50
+                            if i.prompt == "first"
+                            else 2
+                        )
                     }
                     for i in inputs
                 ]

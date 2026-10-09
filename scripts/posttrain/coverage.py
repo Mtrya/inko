@@ -143,15 +143,21 @@ def configured_capabilities(config, steps):
         f"optimizer.student.{c.student_optimizer.kind}",
         f"lr.student.{c.student_optimizer.schedule}",
         f"sampling.{c.collection.rule}",
-        "sampling.shape_shift"
-        if c.collection.shift == "shape"
-        else "sampling.no_shift",
-        "sampling.selected_uniform"
-        if len(set(c.collection.selected_pmf)) == 1
-        else "sampling.selected_nonuniform",
-        "execution.checkpointing"
-        if c.execution.activation_checkpointing
-        else "execution.no_checkpointing",
+        (
+            "sampling.shape_shift"
+            if c.collection.shift == "shape"
+            else "sampling.no_shift"
+        ),
+        (
+            "sampling.selected_uniform"
+            if len(set(c.collection.selected_pmf)) == 1
+            else "sampling.selected_nonuniform"
+        ),
+        (
+            "execution.checkpointing"
+            if c.execution.activation_checkpointing
+            else "execution.no_checkpointing"
+        ),
     }
     cold = min(steps, c.stages.cold_steps)
     joint = max(0, steps - c.stages.cold_steps)
@@ -285,12 +291,11 @@ def validate_matrix(payload, *, repo=REPO):
         require(
             bool(case.exports)
             and len(set(case.exports)) == len(case.exports)
-            and set(case.exports) <= {"live", "ema"}
-            and ("ema" not in case.exports or config.training.ema_enabled),
+            and set(case.exports) <= {"live", *(v.name for v in config.training.ema)},
             "invalid qualified export views",
         )
         allowed = configured_capabilities(config, case.steps) | {
-            f"export.{w}" for w in case.exports
+            f"export.{'live' if w == 'live' else 'ema'}" for w in case.exports
         }
         if case.execution == "resume":
             allowed.add(f"recovery.boundary.{config.student.mode}")
@@ -338,7 +343,9 @@ class Evidence:
                 file_hash(spec["path"]) == spec["sha256"],
                 "evidence archive hash differs",
             )
-            self.opened[key] = self.stack.enter_context(tarfile.open(spec["path"]))  # noqa: SIM115 - ExitStack owns the cached archives
+            self.opened[key] = self.stack.enter_context(
+                tarfile.open(spec["path"])  # noqa: SIM115 - ExitStack owns cached archives
+            )
         return self.opened[key]
 
     def read(self, key, member):

@@ -211,9 +211,11 @@ def score_inputs(config, rollout, stream, update):
     o = config.objective
     times = time_draws(
         seeds,
-        cold_point(config, rollout.student_version)
-        if rollout.stage == "cold"
-        else {"distribution": "uniform_physical"},
+        (
+            cold_point(config, rollout.student_version)
+            if rollout.stage == "cold"
+            else {"distribution": "uniform_physical"}
+        ),
         o.time_min,
         o.time_max,
     ).to(rollout.terminal.device)
@@ -224,6 +226,29 @@ def score_inputs(config, rollout, stream, update):
         device=rollout.terminal.device,
     )
     return times, noise
+
+
+@torch.no_grad()
+def fresh_rollouts(config, field, rollouts, stream, draw, *, generator_step=None):
+    """Independent noise at the same prompts; never consumes the prompt cursor."""
+    return [
+        collect(
+            field,
+            config,
+            [{"id": key} for key in row.prompt_ids],
+            row.sample_ids,
+            row.collection_round,
+            row.conditioning,
+            row.unconditional,
+            row.terminal.device,
+            stage=row.stage,
+            generator_step=(
+                row.student_version if generator_step is None else generator_step
+            ),
+            stream=f"{stream}/{draw}",
+        )
+        for row in rollouts
+    ]
 
 
 @torch.no_grad()

@@ -82,15 +82,14 @@ class Roles:
         self.reset_ema()
 
     def reset_ema(self):
-        self.ema = (
-            {
-                name: p.detach().clone()
+        self.ema = {
+            view.name: {
+                name: p.detach().to("cpu" if view.device == "cpu" else p.device).clone()
                 for name, p in self.student.named_parameters()
                 if p.requires_grad
             }
-            if self.config.training.ema_enabled
-            else None
-        )
+            for view in self.config.training.ema
+        }
 
     def frozen_policy(self):
         # Frozen base parameters/buffers are shared only for LoRA. All trainable
@@ -138,9 +137,9 @@ class Roles:
             "student": self.student.state_dict(),
             "fake": None if self.fake is None else self.fake.state_dict(),
             "old": None if self.old is None else self.old.state_dict(),
-            "reference": None
-            if self.reference is None
-            else self.reference.state_dict(),
+            "reference": (
+                None if self.reference is None else self.reference.state_dict()
+            ),
             "ema": self.ema,
         }
 
@@ -164,13 +163,13 @@ class Roles:
                             "frozen old/reference base differs from student"
                         )
             model.load_state_dict(saved[name])
-        if (self.ema is None) != (saved["ema"] is None):
-            raise ValueError("evaluation EMA presence differs")
-        if self.ema is not None:
-            if self.ema.keys() != saved["ema"].keys():
+        if self.ema.keys() != saved["ema"].keys():
+            raise ValueError("evaluation EMA names differ")
+        for view, parameters in self.ema.items():
+            if parameters.keys() != saved["ema"][view].keys():
                 raise ValueError("EMA parameter names differ")
-            for name, value in self.ema.items():
-                value.copy_(saved["ema"][name].to(value.device))
+            for name, value in parameters.items():
+                value.copy_(saved["ema"][view][name].to(value.device))
 
     def real_view(self, scale=0):
         if self.teacher is None:
@@ -180,15 +179,16 @@ class Roles:
         return score_view(self.teacher, scale) if self.shared_fake else nullcontext()
 
     @torch.no_grad()
-    def update_ema(self, decay):
-        if self.ema is not None:
-            actual = {
-                n: p for n, p in self.student.named_parameters() if p.requires_grad
-            }
-            if actual.keys() != self.ema.keys():
+    def update_ema(self):
+        actual = {n: p for n, p in self.student.named_parameters() if p.requires_grad}
+        for view in self.config.training.ema:
+            parameters = self.ema[view.name]
+            if actual.keys() != parameters.keys():
                 raise ValueError("EMA parameter names changed")
-            for name, value in self.ema.items():
-                value.mul_(decay).add_(actual[name], alpha=1 - decay)
+            for name, value in parameters.items():
+                value.mul_(view.decay).add_(
+                    actual[name].to(value.device), alpha=1 - view.decay
+                )
 
     def ownership(self):
         return {

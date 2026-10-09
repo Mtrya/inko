@@ -16,7 +16,15 @@ from .training_config import load_training_config
 
 
 def launch(
-    config, assets, contract, output, resume, stop_after, config_path, assets_path
+    config,
+    assets,
+    contract,
+    output,
+    resume,
+    stop_after,
+    config_path,
+    assets_path,
+    stop_after_fit=None,
 ):
     from .round_scoring import score_ready_round
     from .scoring.lifecycle import Services, isolated_environment
@@ -31,7 +39,18 @@ def launch(
                 json.loads(path.read_text()) == contract,
                 "training run contract changed",
             )
-            require(resume is not None, "existing run requires explicit --resume")
+            # The manifest precedes model loading and the first publication.
+            # With no committed state, restart from the pinned initialization.
+            published = any(
+                p.is_dir()
+                and not p.name.startswith(".")
+                and (p / "manifest.json").exists()
+                for p in (output / "checkpoints").glob("*")
+            )
+            require(
+                resume is not None or not published,
+                "existing committed run requires explicit --resume",
+            )
         else:
             atomic_json(path, contract)
         attempt = uuid.uuid4().hex
@@ -94,11 +113,13 @@ def launch(
                     rendezvous,
                     "--attempt",
                     attempt,
-                    "--stop-after",
-                    str(stop_after),
                 ]
                 if resume:
                     argv += ["--resume", str(resume)]
+                if stop_after_fit is not None:
+                    argv += ["--stop-after-fit", str(stop_after_fit)]
+                else:
+                    argv += ["--stop-after", str(stop_after)]
                 processes.append(
                     subprocess.Popen(
                         argv, env=environment, stdout=log, stderr=subprocess.STDOUT
@@ -137,6 +158,11 @@ def launch(
                                 f"{attempt}-round-*-rank-{rank:03d}.json"
                             )
                         )
+                        progress += list(
+                            (output / "fitting").glob(
+                                f"{attempt}-fit-*-rank-{rank:03d}.json"
+                            )
+                        )
                         latest = max(
                             [
                                 ready.stat().st_mtime,
@@ -167,9 +193,17 @@ def launch(
                 log.close()
             services.close()
     return {
-        "completed_step": stop_after,
+        "completed_step": stop_after if stop_after_fit is None else 0,
         "attempt": attempt,
-        "checkpoint": str(output / "checkpoints" / f"step-{stop_after:06d}"),
+        "checkpoint": str(
+            output
+            / "checkpoints"
+            / (
+                f"step-{stop_after:06d}"
+                if stop_after_fit is None
+                else f"fit-{stop_after_fit:06d}"
+            )
+        ),
     }
 
 
@@ -180,6 +214,11 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--stop-after", type=int)
+    parser.add_argument(
+        "--stop-after-fit",
+        type=int,
+        help="Commit this many initial fake updates, then stop before any student update",
+    )
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--learner-rank", type=int)
     parser.add_argument("--rendezvous")
@@ -211,6 +250,12 @@ def main():
     output = args.output.resolve()
     stop = args.stop_after if args.stop_after is not None else config.training.steps
     require(0 < stop <= config.training.steps, "invalid stop boundary")
+    if args.stop_after_fit is not None:
+        require(args.stop_after is None, "choose a fitting or student stop boundary")
+        require(
+            0 < args.stop_after_fit <= config.fake.initial_steps,
+            "invalid initial fitting stop boundary",
+        )
     from .stages import rounds_before
 
     rounds_before(config, stop)
@@ -228,6 +273,7 @@ def main():
             stop,
             args.rendezvous,
             args.attempt,
+            args.stop_after_fit,
         )
     else:
         contract = training_contract(config, assets, prompts)
@@ -242,6 +288,7 @@ def main():
                     stop,
                     args.config.resolve(),
                     args.assets.resolve(),
+                    args.stop_after_fit,
                 )
             )
         )

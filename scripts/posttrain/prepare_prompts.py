@@ -17,6 +17,8 @@ def prepare(
     rollout_count: int,
     rollout_bringup: int,
     eval_bringup: int,
+    confirmation_count: int,
+    evaluation_seeds: int,
 ):
     revision = subprocess.check_output(
         ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
@@ -53,7 +55,7 @@ def prepare(
             key=lambda text: hashlib.sha256(f"{namespace}:{text}".encode()).hexdigest(),
         )
 
-    def records(pool, keys, split, prefix):
+    def records(pool, keys, split, prefix, source_key):
         result = []
         for key in keys:
             digest = hashlib.sha256(key.encode()).hexdigest()
@@ -68,11 +70,7 @@ def prepare(
                     "aspect": "1:1",
                     "seed": int(digest[:15], 16),
                     "source_revision": revision,
-                    "source_path": str(
-                        paths[
-                            "rollout" if split == "rollout" else "development"
-                        ].relative_to(source)
-                    ),
+                    "source_path": str(paths[source_key].relative_to(source)),
                 }
             )
         return result
@@ -82,14 +80,63 @@ def prepare(
     ) or not 0 < eval_bringup <= len(dev):
         raise ValueError("invalid subset sizes")
     rollout = records(
-        train, ordered(train, "rollout")[:rollout_count], "rollout", "pickscore"
+        train,
+        ordered(train, "rollout")[:rollout_count],
+        "rollout",
+        "pickscore",
+        "rollout",
     )
-    development = records(dev, ordered(dev, "development"), "development", "drawbench")
+    development = records(
+        dev, ordered(dev, "development"), "development", "drawbench", "development"
+    )
+    used = {normalized_text(r["text"]) for r in rollout}
+    remaining = {k: v for k, v in train.items() if k not in used}
+    if not 0 < confirmation_count <= len(remaining) or evaluation_seeds < 2:
+        raise ValueError(
+            "confirmation count must fit the disjoint pool; evaluation needs two seeds"
+        )
+    confirmation = records(
+        remaining,
+        ordered(remaining, "confirmation")[:confirmation_count],
+        "confirmation",
+        "confirmation",
+        "rollout",
+    )
+
+    def repeated(rows):
+        return [
+            {
+                **r,
+                "id": f"{r['id']}_seed{draw}",
+                "seed": int(
+                    hashlib.sha256(
+                        f"eval-noise:{r['scene_id']}:{draw}".encode()
+                    ).hexdigest()[:15],
+                    16,
+                ),
+            }
+            for r in rows
+            for draw in range(evaluation_seeds)
+        ]
+
+    validate_pools(
+        {
+            "rollout": rollout,
+            "development": development,
+            "monitor": monitor_records,
+            "confirmation": confirmation,
+        }
+    )
     suites = {
         "posttrain_rollout": rollout,
         "posttrain_rollout_bringup": rollout[:rollout_bringup],
         "posttrain_drawbench": development,
         "posttrain_drawbench_bringup": development[:eval_bringup],
+        "posttrain_confirmation": confirmation,
+        "posttrain_drawbench_diversity": repeated(development),
+        "posttrain_drawbench_bringup_diversity": repeated(development[:eval_bringup]),
+        "posttrain_confirmation_diversity": repeated(confirmation),
+        "posttrain_monitor_diversity": repeated(monitor_records),
     }
     destination.mkdir(parents=True, exist_ok=True)
     outputs = {}
@@ -109,8 +156,20 @@ def prepare(
             "outputs": outputs,
             "selection": "NFKC/casefold/whitespace deduplication; exclude development and monitor exact-normalized texts; SHA256(namespace:text) ordering",
             "overlap_scope": "Exact-normalized exclusion only; semantic paraphrase overlap is not certified.",
+            "reservation": "Confirmation texts are excluded from rollout, development and monitor; do not select recipes on this pool.",
+            "evaluation_seeds": evaluation_seeds,
         },
     )
+
+
+def validate_pools(pools):
+    inventories = {
+        name: {normalized_text(r["text"]) for r in rows} for name, rows in pools.items()
+    }
+    for index, (name, texts) in enumerate(inventories.items()):
+        for other in list(inventories)[index + 1 :]:
+            if texts & inventories[other]:
+                raise ValueError(f"prompt pools overlap: {name}, {other}")
 
 
 if __name__ == "__main__":
@@ -123,6 +182,8 @@ if __name__ == "__main__":
     parser.add_argument("--rollout-count", type=int, default=512)
     parser.add_argument("--rollout-bringup", type=int, default=32)
     parser.add_argument("--eval-bringup", type=int, default=16)
+    parser.add_argument("--confirmation-count", type=int, default=200)
+    parser.add_argument("--evaluation-seeds", type=int, default=2)
     args = parser.parse_args()
     prepare(
         args.source,
@@ -131,4 +192,6 @@ if __name__ == "__main__":
         args.rollout_count,
         args.rollout_bringup,
         args.eval_bringup,
+        args.confirmation_count,
+        args.evaluation_seeds,
     )

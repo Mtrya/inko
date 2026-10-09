@@ -19,6 +19,7 @@ from src.posttrain.scoring.lifecycle import isolated_environment
 from src.posttrain.workers import ResidentWorkers, run_pipeline
 from src.utils import prompt_contract
 
+from .diversity import validate_panel
 from .prompts import load_prompts
 from .report import build_report
 
@@ -67,19 +68,26 @@ def parse_score(row):
     )
 
 
-def run(config, assets, prompts, output, *, visual_only=False):
+def run(config, assets, prompts, output, *, visual_only=False, suite="development"):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     with (output / ".writer.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
-            return _run(config, assets, prompts, output, visual_only=visual_only)
+            return _run(
+                config, assets, prompts, output, visual_only=visual_only, suite=suite
+            )
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _run(config, assets, prompts, output, *, visual_only):
+def _run(config, assets, prompts, output, *, visual_only, suite):
+    validate_panel(config, prompts)
     artifacts = verify_assets(config, assets)
+    if config.evaluation.diversity.enabled:
+        from .diversity import metric_identity
+
+        artifacts["diversity"] = metric_identity(config.evaluation.diversity, assets)
     conditioning = identity(
         {
             "encoder": artifacts["text_encoder"],
@@ -113,6 +121,7 @@ def _run(config, assets, prompts, output, *, visual_only):
         "policies": policies,
         "conditioning_identity": conditioning,
         "visual_only": visual_only,
+        "suite": suite,
         "code": {
             str(p.relative_to(REPO)): file_hash(p)
             for p in sorted((REPO / "src").rglob("*.py"))
@@ -248,8 +257,17 @@ def _run(config, assets, prompts, output, *, visual_only):
     report = (
         {"scope": "Visual panel only; no automatic language/length scoring claim."}
         if visual_only
-        else build_report(list(records.values()), list(results.values()), config)
+        else build_report(
+            list(records.values()), list(results.values()), config, suite=suite
+        )
     )
+    report["suite"] = suite
+    if config.evaluation.diversity.enabled:
+        from .diversity import measure_diversity
+
+        report["diversity"] = measure_diversity(
+            list(records.values()), config.evaluation.diversity, assets
+        )
     report["generated_samples"] = len(records)
     atomic_json(output / "report.json", report)
     return report
@@ -261,7 +279,9 @@ def main():
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
-        "--suite", choices=["development", "bringup", "monitor"], default="bringup"
+        "--suite",
+        choices=["development", "bringup", "monitor", "confirmation"],
+        default="bringup",
     )
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
@@ -270,10 +290,12 @@ def main():
         "development": "suite",
         "bringup": "bringup_suite",
         "monitor": "monitor_suite",
+        "confirmation": "confirmation_suite",
     }[args.suite]
     prompts = load_prompts(
         REPO / getattr(config.evaluation, key), config.sampling.shapes
     )
+    validate_panel(config, prompts)
     if args.validate_only:
         print(
             json.dumps(
@@ -295,6 +317,7 @@ def main():
         prompts,
         args.output,
         visual_only=args.suite == "monitor",
+        suite=args.suite,
     )
 
 

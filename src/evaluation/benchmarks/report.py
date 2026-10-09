@@ -26,7 +26,7 @@ def paired_interval(rows, repeats, confidence, seed):
     return [means[int(tail * (repeats - 1))], means[int((1 - tail) * (repeats - 1))]]
 
 
-def build_report(records, scores, config):
+def build_report(records, scores, config, *, suite="development"):
     samples = {r["sample_id"]: r for r in records}
     arms = [a.name for a in config.arms]
     indexed = {}
@@ -36,7 +36,8 @@ def build_report(records, scores, config):
             raise ValueError("duplicate or unexpected score in report")
         indexed[key] = score
     report = {
-        "scope": "Development prompt evaluation; scorer metrics are not independent reward-model validation.",
+        "suite": suite,
+        "scope": f"{suite} prompt evaluation; scorer metrics are not independent reward-model validation.",
         "arms": {},
         "paired": {},
         "uncertainty": "Paired cluster bootstrap by scene; conditional on these fixed noise seeds.",
@@ -57,15 +58,22 @@ def build_report(records, scores, config):
                         result["values"][metric],
                     )
             by_arm[arm] = good
+            values = sorted(v for _, v in good.values())
             report["arms"].setdefault(arm, {})[channel] = {
                 "metric": metric,
                 "expected": len(selected),
                 "scored": len(good),
                 "failed_or_missing": failures,
-                "mean_on_successes": statistics.mean(v for _, v in good.values())
-                if good
-                else None,
+                "mean_on_successes": (
+                    statistics.mean(v for _, v in good.values()) if good else None
+                ),
                 "complete": len(good) == len(selected),
+                "population_stddev": statistics.pstdev(values) if values else None,
+                "minimum": values[0] if values else None,
+                "maximum": values[-1] if values else None,
+                "quantiles": {
+                    str(p): quantile(values, p) for p in (0.05, 0.25, 0.5, 0.75, 0.95)
+                },
             }
         reference = arms[0]
         for arm in arms[1:]:
@@ -89,8 +97,20 @@ def build_report(records, scores, config):
                     settings.bootstrap_seed,
                 ),
                 "coverage_complete": len(rows) == expected,
-                "selection_status": "descriptive_only; inspect blinded images"
-                if len(rows) == expected
-                else "incomplete; no win claim",
+                "selection_status": (
+                    "descriptive_only; inspect blinded images"
+                    if len(rows) == expected
+                    else "incomplete; no win claim"
+                ),
             }
     return report
+
+
+def quantile(values, probability):
+    """Linear interpolation between the sorted empirical values."""
+    if not values:
+        return None
+    position = probability * (len(values) - 1)
+    lower = int(position)
+    upper = min(lower + 1, len(values) - 1)
+    return values[lower] + (values[upper] - values[lower]) * (position - lower)

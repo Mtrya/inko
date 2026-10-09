@@ -43,7 +43,15 @@ class TrainingState:
             self.roles.student, c.student_optimizer, horizon
         )
         self.fake_optimizer = (
-            RoleOptimizer(self.roles.fake, c.fake_optimizer, horizon * c.fake.updates)
+            RoleOptimizer(
+                self.roles.fake,
+                c.fake_optimizer,
+                (
+                    c.fake.initial_steps + (horizon - 1) * c.fake.updates
+                    if self.clock.stage == "cold" and c.fake.initial_steps > 0
+                    else horizon * c.fake.updates
+                ),
+            )
             if self.roles.fake is not None
             else None
         )
@@ -81,31 +89,43 @@ class TrainingState:
             "student optimizer/stage clock differs",
         )
         if self.fake_optimizer is not None:
+            fitting = clock.stage == "cold" and c.fake.initial_steps > 0
             require(
                 self.fake_optimizer.steps
-                == clock.stage_generator_steps * c.fake.updates,
+                == (
+                    clock.initial_fit_steps
+                    + max(0, clock.stage_generator_steps - 1) * c.fake.updates
+                    if fitting
+                    else clock.stage_generator_steps * c.fake.updates
+                ),
                 "fake optimizer/stage clock differs",
             )
         return {
             **self.roles.state_dict(),
             **clock.state_dict(),
             "student_optimizer": self.student_optimizer.state_dict(),
-            "fake_optimizer": None
-            if self.fake_optimizer is None
-            else self.fake_optimizer.state_dict(),
+            "fake_optimizer": (
+                None
+                if self.fake_optimizer is None
+                else self.fake_optimizer.state_dict()
+            ),
             "initial_generator_steps": self.initial_generator_steps,
             "initial_fake_steps": self.initial_fake_steps,
             "last_reward": self.last_reward,
             "next_action": clock.next_action(c),
-            "cold_schedule": cold_point(c, clock.stage_generator_steps)
-            if clock.stage == "cold"
-            else None,
-            "old_schedule": {
-                "clock": "committed_joint_rounds",
-                "next_decay": refresh_decay(c.old_policy, clock.joint_rounds),
-            }
-            if self.roles.old is not None
-            else None,
+            "cold_schedule": (
+                cold_point(c, clock.stage_generator_steps)
+                if clock.stage == "cold"
+                else None
+            ),
+            "old_schedule": (
+                {
+                    "clock": "committed_joint_rounds",
+                    "next_decay": refresh_decay(c.old_policy, clock.joint_rounds),
+                }
+                if self.roles.old is not None
+                else None
+            ),
             "architecture": self.roles.student.get_config(),
             "ownership": self.roles.ownership(),
         }

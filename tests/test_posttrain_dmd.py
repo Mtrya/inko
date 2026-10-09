@@ -40,6 +40,7 @@ from src.posttrain.training_config import (
     DynaDG,
     DynaRS,
     Fake,
+    FakeProbe,
     Joint,
     Objective,
     OldPolicy,
@@ -47,6 +48,7 @@ from src.posttrain.training_config import (
     Rewards,
     Stages,
     Student,
+    StudentEMA,
     Training,
     TrainingConfig,
     TrainingExecution,
@@ -124,7 +126,8 @@ def config(mode="full", strategy="teacher_qv"):
         initialization=checkpoint,
         teacher=checkpoint,
         student=Student(mode, 2, 2, "attention_mlp"),
-        fake=Fake(strategy, 2, 1, 2, "selected_prediction"),
+        fake=Fake(strategy, 2, 1, 2, "selected_prediction", 0, 1, "round"),
+        fake_probe=FakeProbe(0, 1),
         objective=Objective("dmd", "teacher_residual", 1e-8, 0.02, 0.98, 1),
         collection=Collection(
             prompts="fixture.jsonl",
@@ -153,7 +156,7 @@ def config(mode="full", strategy="teacher_qv"):
             intra_host_roce=False,
             deterministic_algorithms=True,
         ),
-        training=Training(7, 3, 1, True, 0.9),
+        training=Training(7, 3, 1, (StudentEMA("ema", 0.9, "learner"),)),
         scorers=(),
         rewards=Rewards((), 1e-4, "mean_one_exp", 1),
         dyna_dg=DynaDG(False, 3, 1),
@@ -442,6 +445,6 @@ def test_export_actual_student(tmp_path, mode, view):
     if view == "ema":
         with torch.no_grad():
             for n, p in roles.student.named_parameters():
-                if n in roles.ema:
-                    p.copy_(roles.ema[n])
+                if n in roles.ema["ema"]:
+                    p.copy_(roles.ema["ema"][n])
     assert_exact(merge_student(roles.student).state_dict(), model.state_dict())

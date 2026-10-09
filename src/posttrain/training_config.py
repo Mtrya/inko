@@ -1,12 +1,13 @@
 """Complete cold/joint training configuration, separate from benchmark arms."""
 
+import json
 import math
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Checkpoint, Scorer
-from .schema import decode, digest, require
+from .schema import decode, digest, name, require
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,15 @@ class Fake:
     multiplier: float
     updates: int
     target: str
+    initial_steps: int
+    initial_checkpoint_every: int
+    target_refresh: str
+
+
+@dataclass(frozen=True)
+class FakeProbe:
+    every: int
+    draws: int
 
 
 @dataclass(frozen=True)
@@ -70,7 +80,8 @@ class Optimizer:
     def __post_init__(self):
         require(self.kind in {"adamw", "muon_adamw"}, "unsupported optimizer")
         require(
-            min(self.lr, self.muon_lr, self.epsilon, self.max_grad_norm) > 0,
+            min(self.lr, self.epsilon, self.max_grad_norm) > 0
+            and (self.muon_lr > 0 if self.kind == "muon_adamw" else self.muon_lr >= 0),
             "optimizer rates/epsilon/clip must be positive",
         )
         require(
@@ -109,12 +120,24 @@ class TrainingExecution:
 
 
 @dataclass(frozen=True)
+class StudentEMA:
+    name: str
+    decay: float
+    device: str
+
+    def __post_init__(self):
+        name(self.name)
+        require(self.name != "live", "live is reserved for the current student")
+        require(0 <= self.decay < 1, "invalid evaluation EMA decay")
+        require(self.device in {"learner", "cpu"}, "invalid EMA storage device")
+
+
+@dataclass(frozen=True)
 class Training:
     seed: int
     steps: int
     checkpoint_every: int
-    ema_enabled: bool
-    ema_decay: float
+    ema: tuple[StudentEMA, ...]
 
 
 @dataclass(frozen=True)
@@ -192,6 +215,7 @@ class TrainingConfig:
     teacher: Checkpoint
     student: Student
     fake: Fake
+    fake_probe: FakeProbe
     objective: Objective
     collection: Collection
     student_optimizer: Optimizer
@@ -252,16 +276,15 @@ class TrainingConfig:
             and f.rank > 0
             and f.multiplier > 0
             and f.updates > 0
-            and f.target in {"selected_prediction", "terminal"},
+            and f.target in {"selected_prediction", "terminal"}
+            and f.initial_steps >= 0
+            and f.initial_checkpoint_every > 0
+            and f.target_refresh in {"round", "update"},
             "invalid fake role",
         )
         require(
-            s.mode == "full" or self.student_optimizer.kind == "adamw",
-            "student adapters require AdamW",
-        )
-        require(
-            f.strategy == "full" or self.fake_optimizer.kind == "adamw",
-            "fake adapters require AdamW",
+            self.fake_probe.every >= 0 and self.fake_probe.draws > 0,
+            "invalid fresh-sample fake probe cadence/draws",
         )
         require(
             o.mode in {"dmd", "rtdm"}
@@ -321,10 +344,20 @@ class TrainingConfig:
             0 <= t.seed < 2**63
             and t.steps > 0
             and t.checkpoint_every > 0
-            and 0 <= t.ema_decay < 1,
+            and len({ema.name for ema in t.ema}) == len(t.ema),
             "invalid training length/seed/EMA",
         )
         stages, joint, nft, old = self.stages, self.joint, self.nft, self.old_policy
+        require(
+            stages.cold_steps > 0 or f.initial_steps == 0,
+            "initial fake fitting belongs to a cold-stage run",
+        )
+        require(
+            not self.fake_probe.every
+            or stages.cold_steps > 0
+            or joint.dmd_coefficient > 0,
+            "fake probe requires an active DMD stage",
+        )
         require(
             min(stages.cold_steps, stages.joint_steps) >= 0
             and stages.cold_steps + stages.joint_steps == t.steps,
@@ -350,9 +383,11 @@ class TrainingConfig:
             "invalid joint coefficients",
         )
         require(
-            (joint.dmd_coefficient + joint.nft_coefficient > 0)
-            if stages.joint_steps
-            else not any(coefficients),
+            (
+                (joint.dmd_coefficient + joint.nft_coefficient > 0)
+                if stages.joint_steps
+                else not any(coefficients)
+            ),
             "joint stage requires a main objective; absent stage has zero coefficients",
         )
         require(
@@ -470,5 +505,7 @@ class TrainingConfig:
 
 
 def load_training_config(path):
+    if Path(path).suffix == ".json":
+        return decode(TrainingConfig, json.loads(Path(path).read_text()))
     with Path(path).open("rb") as stream:
         return decode(TrainingConfig, tomllib.load(stream))

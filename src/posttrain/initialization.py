@@ -50,7 +50,7 @@ def boundary_manifest(config, assets):
         "manifest_sha256": config.stages.initial_sha256,
         "source_contract_sha256": manifest["contract_sha256"],
         "generator_steps": manifest["step"],
-        "fake_steps": manifest["step"] * source["fake"]["updates"],
+        "fake_steps": manifest["fake_steps"],
     }
 
 

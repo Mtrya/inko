@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "name": "cold_full",
+      "purpose": "Qualify 128 initial fake updates, fitting resume, Muon full/QV, all cold toggles, CFG teacher, both EMA views, fresh regression and interval evaluation.",
+      "config": "configs/posttrain/campaign_qualification/cold_full.json",
+      "config_sha256": "ad1233e9bfccbd8c5d84e1f677ca2c74315800a0460ef6d799b1be165084c8ed",
+      "interval": "configs/posttrain/campaign_qualification/interval.json",
+      "interval_sha256": "79e13dfe323fa021106e42da33746b2e08f1efbe1382a4312365b4702e87abb8",
+      "fit_stop": 16,
+      "initial_from": "",
+      "initial_step": 0
+    },
+    {
+      "name": "full_fake_joint",
+      "purpose": "Qualify the largest resident-role memory footprint, fresh fitting targets, and joint entry with two EMA views; infer the lighter cases within this fixed workload.",
+      "config": "configs/posttrain/campaign_qualification/full_fake_joint.json",
+      "config_sha256": "ad8caa72e75483554b1d7d51eaf71a891ced22349483d18fb08f83b26e860671",
+      "interval": "configs/posttrain/campaign_qualification/memory_interval.json",
+      "interval_sha256": "3860e636998c82a7f8f6ccd9b90f0429a2f6d85fe1726b76e7a8d5f02f27963f",
+      "fit_stop": 0,
+      "initial_from": "",
+      "initial_step": 0
+    }
+  ]
+}

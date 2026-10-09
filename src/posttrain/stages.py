@@ -47,6 +47,7 @@ class Clock:
     stage_generator_steps: int = 0
     global_generator_steps: int = 0
     fake_steps: int = 0
+    initial_fit_steps: int = 0
     committed_rounds: int = 0
     joint_rounds: int = 0
     old_policy_version: int | None = None
@@ -61,12 +62,18 @@ class Clock:
             stage,
             global_generator_steps=generator_steps,
             fake_steps=fake_steps,
-            old_policy_version=0
-            if stage == "joint" and config.joint.nft_coefficient > 0
-            else None,
+            old_policy_version=(
+                0 if stage == "joint" and config.joint.nft_coefficient > 0 else None
+            ),
         )
 
     def next_action(self, config):
+        if (
+            self.stage == "cold"
+            and self.step == 0
+            and self.initial_fit_steps < config.fake.initial_steps
+        ):
+            return "fit"
         if self.step == config.training.steps:
             return "done"
         if (
@@ -75,6 +82,16 @@ class Clock:
         ):
             return "transition"
         return "collect"
+
+    def fit(self, config):
+        require(
+            self.stage == "cold"
+            and self.step == 0
+            and self.initial_fit_steps < config.fake.initial_steps,
+            "initial fitting requires the unchanged entry student",
+        )
+        self.initial_fit_steps += 1
+        self.fake_steps += 1
 
     def transition(self, config):
         require(
@@ -94,7 +111,10 @@ class Clock:
         self.global_generator_steps += 1
         dmd = config.dmd_enabled(self.stage)
         nft = self.stage == "joint" and config.joint.nft_coefficient > 0
-        self.fake_steps += config.fake.updates if dmd else 0
+        first_fitted = (
+            self.stage == "cold" and self.step == 1 and config.fake.initial_steps > 0
+        )
+        self.fake_steps += config.fake.updates if dmd and not first_fitted else 0
         self.samples_used += (
             config.collection.prompts_per_round
             * config.collection.draws_per_prompt
@@ -132,6 +152,7 @@ class Clock:
                 self.stage_generator_steps,
                 self.global_generator_steps,
                 self.fake_steps,
+                self.initial_fit_steps,
                 self.committed_rounds,
                 self.joint_rounds,
                 self.samples_used,
@@ -159,6 +180,14 @@ class Clock:
             cold_done, joint_done = cold, self.stage_generator_steps
         nft = config.joint.nft_coefficient > 0
         dmd = config.joint.dmd_coefficient > 0
+        require(
+            0 <= self.initial_fit_steps <= config.fake.initial_steps
+            and (self.step == 0 or self.initial_fit_steps == config.fake.initial_steps),
+            "initial fitting is incomplete or exceeds its plan",
+        )
+        cold_fake = (
+            max(0, cold_done - int(config.fake.initial_steps > 0)) * config.fake.updates
+        )
         joint_rounds = joint_done // config.joint_updates
         require(
             self.committed_rounds == rounds_before(config, self.step)
@@ -166,7 +195,9 @@ class Clock:
             and self.global_generator_steps == initial_generator_steps + self.step
             and self.fake_steps
             == initial_fake_steps
-            + (cold_done + int(dmd) * joint_done) * config.fake.updates,
+            + self.initial_fit_steps
+            + cold_fake
+            + int(dmd) * joint_done * config.fake.updates,
             "committed generator/fake/round clocks differ",
         )
         total = config.collection.prompts_per_round * config.collection.draws_per_prompt

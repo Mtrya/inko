@@ -22,8 +22,30 @@
     "posttrain_drawbench_bringup.jsonl": {
       "count": 16,
       "sha256": "2ab710c967fdbec1a73ba48e4ea305c2a8ae5d84562aa86f3d7641c6d441cb45"
+    },
+    "posttrain_confirmation.jsonl": {
+      "count": 200,
+      "sha256": "c4a70f0065ad2bb4420e5d7fc0096d0ed0ed3bc5d8b76990fd2fe1b376b82259"
+    },
+    "posttrain_drawbench_diversity.jsonl": {
+      "count": 400,
+      "sha256": "f67e76769c34137d124fda613355806d0f4690f3fba7230f25c0d0be09b2590b"
+    },
+    "posttrain_drawbench_bringup_diversity.jsonl": {
+      "count": 32,
+      "sha256": "880fe83d7a4bae1528e6187e57b6446b453a5bc01121e8356a493d43e66b7dd7"
+    },
+    "posttrain_confirmation_diversity.jsonl": {
+      "count": 400,
+      "sha256": "2e9b598e3aae0f31a5354e8a61eb0f9ac67435ed2da6477216e820654549bf6f"
+    },
+    "posttrain_monitor_diversity.jsonl": {
+      "count": 96,
+      "sha256": "9b3172c4afd4d8e1e0d262ba757932b93b3eb532134459bd3427d7067e5e4000"
     }
   },
   "selection": "NFKC/casefold/whitespace deduplication; exclude development and monitor exact-normalized texts; SHA256(namespace:text) ordering",
-  "overlap_scope": "Exact-normalized exclusion only; semantic paraphrase overlap is not certified."
+  "overlap_scope": "Exact-normalized exclusion only; semantic paraphrase overlap is not certified.",
+  "reservation": "Confirmation texts are excluded from rollout, development and monitor; do not select recipes on this pool.",
+  "evaluation_seeds": 2
 }
