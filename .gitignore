@@ -17,7 +17,7 @@ settings*json
 !AGENTS.md
 !notes/*.md
 !SKILL.md
-!/.agents/rule-examples.md
+!/.agents/notes/examples.md
 /notes/archive/*.md
 # Working experiment ledgers and progress logs are local, in any file format.
 /notes/internal/
