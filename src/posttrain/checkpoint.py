@@ -63,7 +63,7 @@ def restore_rng(state, device):
         getattr(torch, device.type).set_rng_state(state["accelerator"], device)
 
 
-def publish(root, step, contract, state, rank_state, rank, device):
+def publish(root, step, contract, state, rank_state, rank, device, tracking=None):
     """Only manifest-bearing directories are recovery points; staging is never reused."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -89,6 +89,8 @@ def publish(root, step, contract, state, rank_state, rank, device):
             == {"state.pt", *(f"rank-{r:03d}.pt" for r in range(world_size()))},
             "checkpoint inventory incomplete",
         )
+        if tracking is not None:
+            atomic_json(staging / "tracking.json", tracking)
         atomic_json(
             staging / "manifest.json",
             {

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 
 from .records import atomic_json
@@ -25,10 +26,12 @@ def launch(
     config_path,
     assets_path,
     stop_after_fit=None,
+    track=False,
 ):
     from .round_scoring import score_ready_round
     from .scoring.lifecycle import Services, isolated_environment
     from .stages import round_position, rounds_before
+    from .tracking import Tracker, TrainingMetrics
 
     output.mkdir(parents=True, exist_ok=True)
     with (output / ".writer.lock").open("a") as lock:
@@ -76,6 +79,7 @@ def launch(
             config.execution.startup_timeout,
         )
         next_score_round = 0
+        saved = None
         if resume:
             from .checkpoint import inspect
 
@@ -90,6 +94,20 @@ def launch(
             else contract["boundary"]["generator_steps"]
         )
         try:
+            tracked = (
+                track
+                or (output / "tracking.json").exists()
+                or (resume is not None and (resume / "tracking.json").exists())
+            )
+            tracker = None
+            telemetry = None
+            if tracked:
+                tracker = Tracker(
+                    output, config_path.stem, resume=resume, config=asdict(config)
+                ).__enter__()
+                telemetry = TrainingMetrics(
+                    tracker, config, output, attempt, saved, stop_after_fit
+                )
             services.__enter__()
             atomic_json(
                 output / "service_startup" / f"{attempt}.json", services.startup
@@ -127,6 +145,8 @@ def launch(
                 )
             started = time.time()
             while any(p.poll() is None for p in processes):
+                if telemetry is not None:
+                    telemetry.poll()
                 services.check()
                 while next_score_round < last_round:
                     stage, _, _ = round_position(config, next_score_round)
@@ -179,7 +199,20 @@ def launch(
                 )
                 time.sleep(1)
             require(all(p.returncode == 0 for p in processes), "learner failed")
+            if telemetry is not None:
+                telemetry.poll()
+                require(
+                    telemetry.fit
+                    == (
+                        stop_after_fit
+                        if stop_after_fit is not None
+                        else config.fake.initial_steps
+                    )
+                    and (stop_after_fit is not None or telemetry.step == stop_after),
+                    "completed training lacks SwanLab update records",
+                )
         finally:
+            error = sys.exc_info()
             for process in processes:
                 if process.poll() is None:
                     process.terminate()
@@ -192,6 +225,8 @@ def launch(
             for log in logs:
                 log.close()
             services.close()
+            if tracker is not None:
+                tracker.__exit__(*error)
     return {
         "completed_step": stop_after if stop_after_fit is None else 0,
         "attempt": attempt,
@@ -220,6 +255,11 @@ def main():
         help="Commit this many initial fake updates, then stop before any student update",
     )
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument(
+        "--track",
+        action="store_true",
+        help="Log this arm online to inko-posttrain; recovery keeps its identity",
+    )
     parser.add_argument("--learner-rank", type=int)
     parser.add_argument("--rendezvous")
     parser.add_argument("--attempt")
@@ -289,6 +329,7 @@ def main():
                     args.config.resolve(),
                     args.assets.resolve(),
                     args.stop_after_fit,
+                    args.track,
                 )
             )
         )

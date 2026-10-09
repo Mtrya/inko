@@ -1,5 +1,6 @@
 """Resident learner process; publish only complete cold/joint collection rounds."""
 
+import json
 import os
 import random
 import time
@@ -39,6 +40,7 @@ def learner(
     from .round_scoring import publish_collection, wait_for_rewards
     from .session import TrainingState
     from .stages import Clock, rounds_before
+    from .tracking import optimizer_rates
 
     device = set_device(
         assets["device_type"],
@@ -58,6 +60,10 @@ def learner(
         config.execution.collective_timeout,
     )
     try:
+        tracking_path = output / "tracking.json"
+        tracking = (
+            json.loads(tracking_path.read_text()) if tracking_path.exists() else None
+        )
         saved = rank_saved = None
         boundary = contract["boundary"]
         initial_generator_steps = 0 if boundary is None else boundary["generator_steps"]
@@ -202,6 +208,7 @@ def learner(
                 {"cursor": cursor.state_dict()},
                 rank,
                 device,
+                tracking,
             )
         require(clock.step <= stop_after, "resume is past requested committed boundary")
         rounds_before(config, stop_after)
@@ -327,6 +334,7 @@ def learner(
                     seconds=time.monotonic() - start,
                     peak_allocated_bytes=peak_memory(device),
                     attempt=attempt,
+                    learning_rates={"fake": optimizer_rates(state.fake_optimizer)},
                 )
                 atomic_json(
                     output
@@ -346,6 +354,7 @@ def learner(
                         {"cursor": cursor.state_dict()},
                         rank,
                         device,
+                        tracking,
                     )
             del fit_batches
 
@@ -469,6 +478,10 @@ def learner(
                     seconds=time.monotonic() - start,
                     peak_allocated_bytes=peak_memory(device),
                     attempt=attempt,
+                    learning_rates={
+                        "student": optimizer_rates(state.student_optimizer),
+                        "fake": optimizer_rates(state.fake_optimizer),
+                    },
                 )
                 atomic_json(
                     output
@@ -511,6 +524,7 @@ def learner(
                     {"cursor": cursor.state_dict()},
                     rank,
                     device,
+                    tracking,
                 )
         require(frozen_base == frozen(), "frozen training role changed")
         atomic_json(

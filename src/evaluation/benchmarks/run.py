@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
@@ -275,6 +276,11 @@ def main():
         default="bringup",
     )
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument(
+        "--track",
+        action="store_true",
+        help="Log this generation experiment online to inko-posttrain",
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     key = {
@@ -302,14 +308,28 @@ def main():
         return
     if args.assets is None or args.output is None:
         parser.error("--assets and --output are required")
-    run(
-        config,
-        json.loads(args.assets.read_text()),
-        prompts,
-        args.output,
-        visual_only=args.suite == "monitor",
-        suite=args.suite,
+    from src.posttrain.tracking import Tracker
+
+    context = (
+        Tracker(args.output, args.config.stem, config=asdict(config))
+        if args.track or (args.output / "tracking.json").exists()
+        else nullcontext()
     )
+    with context as tracker:
+        report = run(
+            config,
+            json.loads(args.assets.read_text()),
+            prompts,
+            args.output,
+            visual_only=args.suite == "monitor",
+            suite=args.suite,
+        )
+        if tracker is not None:
+            from scripts.posttrain.readouts import panel
+
+            blind = args.output / "blind"
+            panel(args.output, blind, config.evaluation.bootstrap_seed)
+            tracker.evaluation(report, sorted(blind.glob("*.png")), 0)
 
 
 if __name__ == "__main__":

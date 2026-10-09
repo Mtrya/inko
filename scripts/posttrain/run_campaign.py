@@ -5,6 +5,7 @@ import fcntl
 import json
 import subprocess
 import sys
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -45,7 +46,22 @@ def committed_checkpoints(root):
     return sorted(found)
 
 
-def evaluate_checkpoint(checkpoint, training, interval, assets, output):
+def evaluate_checkpoint(checkpoint, training, interval, assets, output, *, track=False):
+    from src.posttrain.tracking import Tracker
+
+    checkpoint = Path(checkpoint)
+    context = (
+        Tracker(checkpoint.parent.parent, None, resume=checkpoint)
+        if track or (checkpoint / "tracking.json").exists()
+        else nullcontext()
+    )
+    with context as tracker:
+        return _evaluate_checkpoint(
+            checkpoint, training, interval, assets, output, tracker
+        )
+
+
+def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker):
     checkpoint, output = Path(checkpoint), Path(output)
     manifest = inspect(checkpoint)
     require(
@@ -100,6 +116,12 @@ def evaluate_checkpoint(checkpoint, training, interval, assets, output):
             "incomplete interval scoring; checkpoint evaluation failed",
         )
         panel(target, output / f"{suite}-blind", interval.blind_seed)
+        if tracker is not None:
+            tracker.evaluation(
+                report,
+                sorted((output / f"{suite}-blind").glob("*.png")),
+                training.fake.initial_steps + manifest["step"],
+            )
     receipt = {
         "step": manifest["step"],
         "exports": exports,
@@ -110,7 +132,7 @@ def evaluate_checkpoint(checkpoint, training, interval, assets, output):
     return receipt
 
 
-def execute(config_path, interval_path, assets_path, output):
+def execute(config_path, interval_path, assets_path, output, *, track=False):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     training = load_training_config(config_path)
@@ -149,7 +171,12 @@ def execute(config_path, interval_path, assets_path, output):
         for step, _, path in checkpoints:
             if evaluation_due(training, interval, step):
                 evaluate_checkpoint(
-                    path, training, interval, assets, output / "evaluation" / path.name
+                    path,
+                    training,
+                    interval,
+                    assets,
+                    output / "evaluation" / path.name,
+                    track=track,
                 )
         last = checkpoints[-1][2] if checkpoints else None
         completed = checkpoints[-1][0] if checkpoints else 0
@@ -171,6 +198,8 @@ def execute(config_path, interval_path, assets_path, output):
             ]
             if last is not None:
                 argv += ["--resume", str(last)]
+            if track:
+                argv += ["--track"]
             with (output / f"segment-{stop:06d}.log").open("a") as log:
                 subprocess.run(argv, check=True, stdout=log, stderr=subprocess.STDOUT)
             last = training_root / "checkpoints" / f"step-{stop:06d}"
@@ -180,7 +209,12 @@ def execute(config_path, interval_path, assets_path, output):
             )
             if evaluation_due(training, interval, stop):
                 evaluate_checkpoint(
-                    last, training, interval, assets, output / "evaluation" / last.name
+                    last,
+                    training,
+                    interval,
+                    assets,
+                    output / "evaluation" / last.name,
+                    track=track,
                 )
         atomic_json(
             output / "complete.json",
@@ -197,10 +231,16 @@ if __name__ == "__main__":
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument(
+        "--track",
+        action="store_true",
+        help="Keep training and interval readouts in one online SwanLab experiment",
+    )
     args = parser.parse_args()
     if args.validate_only:
-        c, interval = load_training_config(args.config), load_interval_config(
-            args.interval
+        c, interval = (
+            load_training_config(args.config),
+            load_interval_config(args.interval),
         )
         stops = list(boundaries(c, interval))
         print(
@@ -215,4 +255,4 @@ if __name__ == "__main__":
     else:
         if args.assets is None or args.output is None:
             parser.error("--assets and --output are required")
-        execute(args.config, args.interval, args.assets, args.output)
+        execute(args.config, args.interval, args.assets, args.output, track=args.track)
