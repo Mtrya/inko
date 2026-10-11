@@ -67,6 +67,7 @@ conform to this schema. Planner estimates require device validation.
 |---|---|
 | `eval.blind_panel panel` | Assemble blinded comparisons from directories of `<prompt_id>.png` images. |
 | `eval.blind_panel tally` | Count wins and ties from a completed ballot. |
+| `eval.cfg_steps_sweep` | Generate the prompt suite across a CFG x ODE-steps grid from one checkpoint, one arm directory per cell. |
 
 ## Caption production (`scripts/caption/`)
 
