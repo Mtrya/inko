@@ -311,7 +311,9 @@ def main():
     from src.posttrain.tracking import Tracker
 
     context = (
-        Tracker(args.output, args.config.stem, config=asdict(config))
+        Tracker(
+            args.output, args.config.stem, config=asdict(config), phase="evaluation"
+        )
         if args.track or (args.output / "tracking.json").exists()
         else nullcontext()
     )
@@ -329,7 +331,7 @@ def main():
 
             blind = args.output / "blind"
             panel(args.output, blind, config.evaluation.bootstrap_seed)
-            tracker.evaluation(report, sorted(blind.glob("*.png")), 0)
+            tracker.evaluation(report, args.output, config, 0)
 
 
 if __name__ == "__main__":

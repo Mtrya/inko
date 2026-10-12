@@ -25,12 +25,15 @@ def sdk(monkeypatch):
         def __init__(self):
             self.calls, self.logs, self.finishes = [], [], []
             self.run = None
+            self.config, self.definitions = {}, {}
+            self.step = 0
 
         def Settings(self, **kwargs):
             return kwargs
 
         def init(self, **kwargs):
             self.calls.append(kwargs)
+            self.config.update(kwargs.get("config") or {})
             self.run = SimpleNamespace(
                 id=kwargs.get("id", "generated-run"), mode="online"
             )
@@ -39,11 +42,16 @@ def sdk(monkeypatch):
         def get_run(self):
             return self.run
 
-        def log(self, metrics, step):
+        def define_metric(self, key, **kwargs):
+            self.definitions.setdefault(key, {}).update(kwargs)
+
+        def log(self, metrics, step=None):
+            step = self.step + 1 if step is None else step
+            self.step = max(self.step, step)
             self.logs.append((step, metrics))
 
-        def Image(self, path):
-            return ("image", path)
+        def Image(self, path, **kwargs):
+            return ("image", path, kwargs)
 
         def finish(self, **kwargs):
             self.finishes.append(kwargs)
@@ -174,30 +182,57 @@ def test_failure_marks_run_crashed(tmp_path, sdk):
 def record(loss=2):
     return {
         "step": 1,
-        "seconds": 3.0,
-        "peak_allocated_bytes": 100,
+        "update_seconds": 0.3,
         "student_loss": loss,
         "student_grad_norm": 0.5,
-        "term_losses": {"nft": 1.0, "reference": 0.25},
-        "learning_rates": {"student": {"muon/0": 0.01}},
-        "reward": {
-            "statistics": {"hpsv3.mu": {"mean": 3.0, "std": 2.0}},
-            "advantages": [1.0, -1.0],
-            "probabilities": [1.0, 0.0],
-        },
+        "reference_enabled": True,
+        "term_losses": {"nft": loss, "reference": 0.25},
+        "learning_rates": {"muon": 0.01},
     }
 
 
-def test_rank_scaled_losses_average_and_reward_statistics_join():
+def publish_round(output, attempt, number, rank=0, *, skipped=False, skips=0):
+    from src.posttrain.round_scoring import reward_path
+
+    atomic_json(
+        output / "rounds" / f"{attempt}-round-{number:06d}-rank-{rank:03d}.json",
+        {
+            "skipped_zero_guidance": skipped,
+            "active_group_fraction": 0.0 if skipped else 0.75,
+            "clock": {"samples_scored": 4 * (number + 1), "skipped_rounds": skips},
+            "timings": {
+                "collection": 3.0,
+                "scoring_wait": 5.0,
+                "guidance": 0.2,
+                "round": 10.0,
+            },
+            "peak_allocated_bytes": 1024**3,
+        },
+    )
+    ids = [f"{number}:{slot}:{draw}" for slot in (0, 1) for draw in (0, 1)]
+    atomic_json(
+        reward_path(output, attempt, number),
+        {
+            "reward": {
+                "sample_ids": ids,
+                "combined": [0, 1, 0, 0],
+                "raw": {"unfamiliar.fit": [1, 3, 2, 2]},
+                "groups": {"a": {"sample_ids": ids[:2]}, "b": {"sample_ids": ids[2:]}},
+            }
+        },
+    )
+
+
+def test_rank_scaled_objective_losses_average_and_disabled_reference_is_omitted():
     metrics = update_metrics([record(2), record(6)])
-    assert metrics["train/student_loss"] == 4
-    assert metrics["train/student_grad_norm"] == 0.5
-    assert metrics["train/nft_loss"] == 1
-    assert metrics["train/reference_loss"] == 0.25
-    assert metrics["lr/student/muon/0"] == 0.01
-    assert metrics["reward/hpsv3.mu/mean"] == 3
-    assert metrics["reward/advantages_mean"] == 0
-    assert metrics["reward/probabilities_std"] == 0.5
+    assert metrics == {
+        "train/grad_norm": 0.5,
+        "train/nft_loss": 4,
+        "train/reference_loss": 0.25,
+        "train/lr/muon": 0.01,
+    }
+    disabled = dict(record(), reference_enabled=False)
+    assert "train/reference_loss" not in update_metrics([disabled])
 
 
 def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
@@ -221,14 +256,24 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
                 )
         delivery.poll()
         assert sdk.logs == []  # An unfinished round is not committed progress.
-        atomic_json(
-            tmp_path / "rounds" / "attempt-round-000000-rank-000.json",
-            {"skipped_zero_guidance": False},
-        )
+        publish_round(tmp_path, "attempt", 0)
         delivery.poll()
         delivery.poll()
-    assert [step for step, _ in sdk.logs] == [1, 2]
-    assert all(metrics["train/student_loss"] == 2 for _, metrics in sdk.logs)
+    updates = [
+        (step, values) for step, values in sdk.logs if "train/nft_loss" in values
+    ]
+    assert [step for step, _ in updates] == [1, 2]
+    assert all(metrics["train/nft_loss"] == 2 for _, metrics in updates)
+    collections = [
+        (step, values)
+        for step, values in sdk.logs
+        if "train/reward/unfamiliar.fit/mean" in values
+    ]
+    assert len(collections) == 1
+    assert collections[0][0] == 1
+    assert collections[0][1]["train/reward/unfamiliar.fit/mean"] == 2
+    assert collections[0][1]["train/nft_constant_group_fraction"] == 0.5
+    assert sdk.definitions["train/reward/*"]["x_axis"] == "runtime/collection_round"
 
 
 def test_resume_delivers_only_new_attempt_records(tmp_path, sdk, training_config):
@@ -248,12 +293,9 @@ def test_resume_delivers_only_new_attempt_records(tmp_path, sdk, training_config
                 / f"{attempt}-round-000000-inner-000-rank-000.json",
                 record(),
             )
-            atomic_json(
-                tmp_path / "rounds" / f"{attempt}-round-000000-rank-000.json",
-                {"skipped_zero_guidance": False},
-            )
+            publish_round(tmp_path, attempt, 0)
         delivery.poll()
-    assert [step for step, _ in sdk.logs] == [1]
+    assert [step for step, values in sdk.logs if "train/nft_loss" in values] == [1]
 
 
 def test_art_tracking_resumes_collection_count_and_passes_skipped_rounds(
@@ -268,18 +310,16 @@ def test_art_tracking_resumes_collection_count_and_passes_skipped_rounds(
         delivery = TrainingMetrics(
             tracker, config, tmp_path, "new", saved={"step": 2, "committed_rounds": 3}
         )
-        atomic_json(
-            tmp_path / "rounds/new-round-000003-rank-000.json",
-            {"skipped_zero_guidance": True},
-        )
+        publish_round(tmp_path, "new", 3, skipped=True, skips=3)
         delivery.poll()
         assert delivery.round == 3 and sdk.logs == []
-        atomic_json(
-            tmp_path / "rounds/new-round-000003-rank-001.json",
-            {"skipped_zero_guidance": True},
-        )
+        publish_round(tmp_path, "new", 3, rank=1, skipped=True, skips=3)
         delivery.poll()
-        assert delivery.round == 4 and delivery.step == 2 and sdk.logs == []
+        assert delivery.round == 4 and delivery.step == 2
+        assert sdk.logs[0][0] == 4
+        assert sdk.logs[0][1]["train/art_active_group_fraction"] == 0
+        assert sdk.logs[1][1]["runtime/skipped_collections"] == 3
+        assert sdk.logs[1][1]["runtime/training_images_scored"] == 16
         for rank in (0, 1):
             for inner in (0, 1):
                 atomic_json(
@@ -288,32 +328,41 @@ def test_art_tracking_resumes_collection_count_and_passes_skipped_rounds(
                     / f"new-round-000004-inner-{inner:03d}-rank-{rank:03d}.json",
                     dict(record(), step=3 + inner),
                 )
-            atomic_json(
-                tmp_path / "rounds" / f"new-round-000004-rank-{rank:03d}.json",
-                {"skipped_zero_guidance": False},
-            )
+            publish_round(tmp_path, "new", 4, rank=rank, skips=3)
         delivery.poll()
         delivery.poll()
-    assert [step for step, _ in sdk.logs] == [3, 4]
+    assert [step for step, values in sdk.logs if "train/nft_loss" in values] == [3, 4]
+    assert [
+        values["runtime/collection_round"]
+        for _, values in sdk.logs
+        if "runtime/collection_round" in values
+    ] == [4, 5]
 
 
 def test_actual_optimizer_rates_are_read_after_schedule_step(training_config):
     from src.posttrain.optim import RoleOptimizer
 
-    model = torch.nn.Linear(2, 1)
+    model = torch.nn.ModuleDict(
+        {
+            "ordinary": torch.nn.Linear(2, 1),
+            "c_mlp": torch.nn.Sequential(torch.nn.Linear(2, 1)),
+        }
+    )
     optimizer = RoleOptimizer(
         model,
         replace(training_config.student_optimizer, lr=0.1, warmup_steps=2),
         3,
     )
-    loss = model(torch.ones(1, 2)).square().sum()
+    loss = sum(layer(torch.ones(1, 2)).square().sum() for layer in model.values())
     loss.backward()
     optimizer.step(loss)
-    assert optimizer_rates(optimizer) == {"adamw/0": 0.05}
-    assert optimizer_rates(None) == {}
+    assert len(optimizer.optimizers[0].param_groups) == 2
+    assert optimizer_rates(optimizer) == {"adamw": 0.05}
 
 
-def test_interval_scores_named_views_and_panels_share_training_run(tmp_path, sdk):
+def test_interval_scores_gains_and_diversity_share_training_run(
+    tmp_path, sdk, sampling_config
+):
     with Tracker(tmp_path, "run"):
         pass
     checkpoint = tmp_path / "checkpoint"
@@ -325,29 +374,51 @@ def test_interval_scores_named_views_and_panels_share_training_run(tmp_path, sdk
                 "suite": "development",
                 "arms": {
                     "student_ema_slow": {
-                        "score.value": {
+                        "unfamiliar.fit": {
                             "mean_on_successes": 2.5,
                             "population_stddev": 0.3,
                             "scored": 12,
+                            "expected": 12,
+                            "complete": True,
+                        }
+                    }
+                },
+                "paired": {
+                    "student_ema_slow": {
+                        "unfamiliar.fit": {
+                            "coverage_complete": True,
+                            "mean_delta": 0.5,
+                            "interval": [0.2, 0.8],
                         }
                     }
                 },
                 "diversity": {"arms": {"student_ema_slow": {"mean_by_scene": 0.4}}},
             },
-            [tmp_path / "panel.png"],
+            tmp_path,
+            sampling_config,
             17,
         )
     assert sdk.calls[-1]["id"] == "generated-run"
-    step, metrics = sdk.logs[0]
-    assert step == 17
-    assert (
-        metrics["evaluation/development/student_ema_slow/score.value/mean_on_successes"]
-        == 2.5
+    step, metrics = next(
+        (step, metrics)
+        for step, metrics in sdk.logs
+        if "evaluation/development/student_ema_slow/unfamiliar.fit/mean" in metrics
     )
-    assert metrics["evaluation/development/student_ema_slow/lpips"] == 0.4
-    assert metrics["evaluation/development/panels"] == [
-        ("image", str(tmp_path / "panel.png"))
-    ]
+    assert step == 17
+    assert metrics["evaluation/development/student_ema_slow/unfamiliar.fit/mean"] == 2.5
+    assert metrics["monitor/lpips/development/student_ema_slow"] == 0.4
+    assert (
+        metrics["evaluation/development/student_ema_slow/unfamiliar.fit/delta"] == 0.5
+    )
+    assert (
+        metrics["evaluation/development/student_ema_slow/unfamiliar.fit/delta_lower"]
+        == 0.2
+    )
+    assert (
+        metrics["evaluation/development/student_ema_slow/unfamiliar.fit/delta_upper"]
+        == 0.8
+    )
+    assert all(not key.endswith("/panels") for key in metrics)
 
 
 def test_coordinator_delivers_final_update_before_finish(
@@ -374,10 +445,7 @@ def test_coordinator_delivers_final_update_before_finish(
                 output / "updates" / f"{attempt}-round-000000-inner-000-rank-000.json",
                 record(),
             )
-            atomic_json(
-                output / "rounds" / f"{attempt}-round-000000-rank-000.json",
-                {"skipped_zero_guidance": False},
-            )
+            publish_round(output, attempt, 0)
 
         def poll(self):
             return 0
@@ -414,7 +482,7 @@ def test_coordinator_delivers_final_update_before_finish(
         )
     finally:
         endpoint.close()
-    assert len(sdk.logs) == 1 and sdk.logs[0][0] == 1
+    assert [step for step, values in sdk.logs if "train/nft_loss" in values] == [1]
     assert sdk.finishes == [{"state": "success"}]
 
 
@@ -463,6 +531,7 @@ def test_generation_only_cli_logs_panels_and_diversity(
 
     def generate(*args, **kwargs):
         assert sdk.get_run().id == "generated-run"
+        monitor_records(output, ("reference", "candidate"))
         return {
             "suite": "monitor",
             "diversity": {"arms": {"guidance": {"mean_by_scene": 0.6}}},
@@ -492,7 +561,270 @@ def test_generation_only_cli_logs_panels_and_diversity(
     )
     benchmark.main()
     assert sdk.calls[0]["name"] == "guidance"
-    assert sdk.logs[0][1]["evaluation/monitor/guidance/lpips"] == 0.6
-    assert sdk.logs[0][1]["evaluation/monitor/panels"] == [
-        ("image", str(output / "blind" / "p.png"))
+    assert sdk.logs[0][1]["monitor/lpips/monitor/guidance"] == 0.6
+    media = sdk.logs[0][1]["monitor/images/scene"]
+    assert len(media) == 2
+    assert media[0][0] == "image"
+    assert "zh / short" in media[0][2]["caption"]
+    assert "seed=11" in media[0][2]["caption"]
+    assert sdk.config["evaluation"]["sampling"]["text_exit_layer"] == 2
+
+
+def monitor_records(root, arms):
+    from PIL import Image
+
+    for arm_index, arm in enumerate(arms):
+        for variant_index, (lang, variant) in enumerate(
+            (
+                ("zh", "short"),
+                ("en", "short"),
+                ("zh", "long"),
+                ("en", "long"),
+            )
+        ):
+            for seed in (11, 29):
+                key = f"{arm}-{lang}-{variant}-{seed}"
+                path = root / "images" / f"{key}.png"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                color = (80 + 40 * variant_index, 20 + 120 * arm_index, 30)
+                Image.new("RGB", (32, 48), color).save(path)
+                atomic_json(
+                    root / "records" / f"{key}.json",
+                    {
+                        "arm": arm,
+                        "image_path": str(path),
+                        "prompt": {
+                            "id": f"{lang}-{variant}-{seed}",
+                            "scene_id": "scene",
+                            "lang": lang,
+                            "variant": variant,
+                            "seed": seed,
+                            "text": f"完整提示 {lang} {variant}",
+                        },
+                    },
+                )
+
+
+def test_monitor_grids_preserve_arm_order_variant_order_and_seeds(
+    tmp_path, sampling_config
+):
+    import numpy as np
+    from PIL import Image
+
+    from src.evaluation.benchmarks.monitor import scene_grids
+
+    monitor_records(tmp_path, ("reference", "candidate"))
+    grids = scene_grids(tmp_path, tuple(reversed(sampling_config.arms)), 17)
+    assert set(grids) == {"scene"}
+    assert len(grids["scene"]) == 2
+    for (path, caption), seed in zip(grids["scene"], (11, 29), strict=True):
+        assert "Step 17" in caption and f"seed={seed}" in caption
+        assert "完整提示 zh long" in caption
+        with Image.open(path) as image:
+            pixels = np.asarray(image).astype(float)
+        centers = {}
+        for arm_index, arm in enumerate(("reference", "candidate")):
+            for row in range(4):
+                color = np.array((80 + 40 * row, 20 + 120 * arm_index, 30))
+                y, x = np.where(np.abs(pixels - color).max(axis=2) < 5)
+                assert len(x) > 100
+                centers[arm, row] = (x.mean(), y.mean())
+        for row in range(4):
+            assert centers["candidate", row][0] < centers["reference", row][0]
+        assert [centers["reference", row][1] for row in range(4)] == sorted(
+            centers["reference", row][1] for row in range(4)
+        )
+
+
+def test_art_fractions_use_global_item_counts():
+    first = dict(record(), art_items=4, art_kept=1, art_masked=1)
+    second = dict(record(), art_items=12, art_kept=6, art_masked=3)
+    metrics = update_metrics([first, second])
+    assert metrics["train/art_inactive_fraction"] == 5 / 16
+    assert metrics["train/art_rejected_fraction"] == 4 / 16
+
+
+def test_execution_time_excludes_resume_downtime_and_evaluation_is_separate(
+    tmp_path, sdk, monkeypatch
+):
+    from src.posttrain import tracking
+
+    now = [0.0]
+    monkeypatch.setattr(tracking.time, "monotonic", lambda: now[0])
+    with Tracker(tmp_path, "run") as tracker:
+        now[0] = 2
+        tracker.runtime({})
+        now[0] = 5
+    now[0] = 100
+    with Tracker(tmp_path, None, phase="evaluation") as tracker:
+        now[0] = 107
+        tracker.runtime({})
+        assert tracker.state["execution_seconds"] == 12
+        assert tracker.state["evaluation_seconds"] == 7
+        now[0] = 110
+    state = json.loads((tmp_path / "telemetry.json").read_text())
+    assert state["execution_seconds"] == 15
+    assert state["evaluation_seconds"] == 10
+
+
+def test_lower_is_better_gain_and_interval_are_oriented_and_baseline_is_logged_once(
+    tmp_path,
+    sdk,
+    sampling_config,
+):
+    from src.posttrain.scoring.contracts import Channel
+
+    config = replace(
+        sampling_config,
+        scorers=(
+            replace(sampling_config.scorers[0], outputs=(Channel("fit", "lower"),)),
+        ),
+    )
+    report = {
+        "suite": "development",
+        "diversity": {
+            "arms": {
+                "reference": {"mean_by_scene": 0.5},
+                "candidate": {"mean_by_scene": 0.4},
+            }
+        },
+        "arms": {
+            arm: {
+                "unfamiliar.fit": {
+                    "complete": True,
+                    "scored": 2,
+                    "expected": 2,
+                    "mean_on_successes": value,
+                }
+            }
+            for arm, value in (("reference", 5), ("candidate", 3))
+        },
+        "paired": {
+            "candidate": {
+                "unfamiliar.fit": {
+                    "coverage_complete": True,
+                    "mean_delta": -2,
+                    "interval": [-3, -1],
+                }
+            }
+        },
+    }
+    with Tracker(tmp_path, "run", phase="evaluation") as tracker:
+        tracker.evaluation(report, tmp_path, config, 2)
+    with Tracker(tmp_path, None, phase="evaluation") as tracker:
+        tracker.evaluation(report, tmp_path, config, 4)
+    evaluations = [
+        metrics
+        for _, metrics in sdk.logs
+        if "evaluation/development/candidate/unfamiliar.fit/mean" in metrics
     ]
+    assert evaluations[0]["evaluation/development/reference/unfamiliar.fit/mean"] == 5
+    assert "evaluation/development/reference/unfamiliar.fit/mean" not in evaluations[1]
+    assert evaluations[0]["monitor/lpips/development/reference"] == 0.5
+    assert "monitor/lpips/development/reference" not in evaluations[1]
+    assert evaluations[1]["monitor/lpips/development/candidate"] == 0.4
+    assert evaluations[1]["evaluation/development/candidate/unfamiliar.fit/delta"] == 2
+    assert (
+        evaluations[1]["evaluation/development/candidate/unfamiliar.fit/delta_lower"]
+        == 1
+    )
+    assert (
+        evaluations[1]["evaluation/development/candidate/unfamiliar.fit/delta_upper"]
+        == 3
+    )
+
+
+def test_failed_scoring_publishes_retries_and_failures_before_round_aborts(
+    tmp_path, sdk, training_config
+):
+    from PIL import Image
+
+    from src.posttrain.records import file_hash
+    from src.posttrain.round_scoring import acquire_round
+
+    path = tmp_path / "image.png"
+    Image.new("RGB", (8, 8)).save(path)
+
+    class FailedClient:
+        def acquire(self, requests):
+            return [
+                {
+                    "scorer": "unfamiliar",
+                    "sample_id": r.sample_id,
+                    "status": "failed",
+                    "attempts": 2,
+                    "values": {},
+                }
+                for r in requests
+            ]
+
+    records = [
+        {
+            "sample_id": f"0:{slot}:{draw}",
+            "prompt": {"id": str(slot), "text": "caption"},
+            "image_path": str(path),
+            "image_sha256": file_hash(path),
+        }
+        for slot in (0, 1)
+        for draw in (0, 1)
+    ]
+    with pytest.raises(ValueError, match="required score failed"), Tracker(
+        tmp_path, "run"
+    ) as tracker:
+        acquire_round(
+            training_config,
+            {"unfamiliar": FailedClient()},
+            records,
+            on_scored=tracker.scoring,
+        )
+    values = [
+        metrics
+        for _, metrics in sdk.logs
+        if "runtime/scoring/unfamiliar/failed_requests" in metrics
+    ]
+    assert values[-1]["runtime/scoring/unfamiliar/failed_requests"] == 4
+    assert values[-1]["runtime/scoring/unfamiliar/retry_attempts"] == 4
+    assert not any("train/nft_loss" in metrics for _, metrics in sdk.logs)
+    assert sdk.finishes == [{"state": "crashed"}]
+
+
+def test_scoring_logs_counter_changes_including_next_collection_reset(tmp_path, sdk):
+    with Tracker(tmp_path, "run") as tracker:
+        for retries in (0, 0, 1, 1, 0):
+            tracker.scoring(
+                {"unfamiliar": {"retry_attempts": retries, "failed_requests": 0}}
+            )
+    assert [
+        values["runtime/scoring/unfamiliar/retry_attempts"]
+        for _, values in sdk.logs
+        if "runtime/scoring/unfamiliar/retry_attempts" in values
+    ] == [0, 1, 0]
+
+
+def test_checkpoint_carries_measured_time_to_a_new_output_directory(
+    tmp_path, sdk, monkeypatch
+):
+    from src.posttrain import tracking
+
+    now = [0.0]
+    monkeypatch.setattr(tracking.time, "monotonic", lambda: now[0])
+    root = tmp_path / "source"
+    with Tracker(root, "run") as tracker:
+        now[0] = 5
+        tracker.runtime({})
+        checkpoint = publish(
+            root / "checkpoints",
+            1,
+            {},
+            {"step": 1, "committed_rounds": 1},
+            {},
+            0,
+            torch.device("cpu"),
+            json.loads((root / "tracking.json").read_text()),
+        )
+    now[0] = 100
+    with Tracker(tmp_path / "restored", None, resume=checkpoint) as tracker:
+        assert tracker.state["execution_seconds"] == 5
+        now[0] = 103
+        tracker.runtime({})
+        assert tracker.state["execution_seconds"] == 8

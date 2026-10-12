@@ -93,7 +93,8 @@ round mechanics differ as follows:
   recorded as skipped. Collection IDs and seeds advance, while optimizer, LR
   and student EMA state stay fixed. An enabled reference penalty still trains.
 - Update records add `window`, `art_items`, `art_kept` and `art_masked`, and
-  tracking publishes `train/art_masked_fraction` next to the loss terms.
+  tracking publishes inactive and trust-region-rejected fractions over all
+  trajectory items in each update. Their remainder is the accepted fraction.
 
 `execution.microbatch` counts items per student forward under both objectives,
 so under ART it chunks the trajectory sites of one draw rather than a draw
@@ -174,9 +175,33 @@ ballot that chooses a third arm cannot order another arm against the reference.
 ## Cost and scope
 
 Every arm declares its question, its decision and its budget before launch.
-SwanLab update records carry the loss, its reference and objective terms,
-gradient norm, learning rates, and reward statistics per committed update, plus
-the ART masked fraction when that objective is active; the interval evaluation
-carries the benchmark and diversity panels. Read the full reward curve and the
-internal metrics before declaring any result: an endpoint score alone cannot
-select a variant, and HPS can rise on visibly degraded outputs.
+SwanLab uses four groups:
+
+| Group | Readouts |
+|---|---|
+| `monitor` | One labeled grid per scene, with language/length variants as rows and declared arms as columns; separate images for each seed draw. Within-prompt LPIPS is labeled by suite and arm. |
+| `evaluation` | Complete benchmark means and paired deltas with confidence bounds. Deltas are oriented so positive means improvement. Each suite's fixed baseline is logged once. Full blind panels and per-prompt statistics stay in the evaluation artifacts. |
+| `train` | Objective loss, weighted reference contribution when enabled, pre-clipping gradient norm, and one applied LR per optimizer component. ART updates also report inactive and rejected item fractions. Collection readouts carry raw channel mean/std and NFT constant-reward or ART active-guidance group fractions. |
+| `runtime` | Collection, scoring-wait, guidance (ART), round and update durations; scored-image and skipped-collection counts; scoring retries/failures; maximum learner process peak in GiB. |
+
+Update metrics and evaluation images use optimizer step. Collection reward and
+group diagnostics use a hidden collection-number axis and are sent even when
+ART skips the collection. Runtime metrics use cumulative measured execution
+seconds, with evaluation time accumulated separately. Manual restart downtime
+is excluded. Scoring counts are snapshots for the current collection, measured
+per request; a retry attempt is an attempt beyond the first.
+Stage durations take the maximum over learners. Collection time includes
+conditioning, decoding and image publication. Round time ends at collection
+commit; cumulative execution time also includes startup and checkpoint writing.
+
+`telemetry.json` preserves measured time and the baseline logging set between
+training segments and evaluations. Tracked checkpoints copy the latest
+snapshot for recovery into another output directory. The evaluation sampling
+settings, scorer declarations and selected weight views are recorded in the
+SwanLab configuration; image captions retain full prompts and seeds. Monitor
+previews limit each image's longest side to 512 pixels; full generated images
+remain in the benchmark artifacts.
+
+Read the full reward curve and the internal metrics before declaring any
+result: an endpoint score alone cannot select a variant, and HPS can rise on
+visibly degraded outputs.

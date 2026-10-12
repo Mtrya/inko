@@ -280,15 +280,21 @@ def learner(
             records = publish_collection(
                 config, batches, prompt_map, vae, stats, output, attempt, r, rank
             )
+            synchronize(device)
+            collected = time.monotonic()
             values, state.last_reward = wait_for_rewards(
                 config, output, attempt, r, rank, records
             )
+            rewarded = time.monotonic()
             guidance = None
             if art:
                 guidance = round_guidance(config, batches, values, reduce=all_reduce)
             skipped = art and state.skip_inactive_art_round(guidance)
+            synchronize(device)
+            guided = time.monotonic()
             old_version = clock.old_policy_version
             for inner in range(0 if skipped else config.updates_per_round):
+                update_start = time.monotonic()
                 if art:
                     evidence = update_art(
                         config,
@@ -318,13 +324,10 @@ def learner(
                     collection_round=r,
                     inner_update=inner,
                     cursor=cursor.state_dict(),
-                    reward=state.last_reward,
-                    seconds=time.monotonic() - start,
-                    peak_allocated_bytes=peak_memory(device),
+                    update_seconds=time.monotonic() - update_start,
+                    reference_enabled=bool(config.reference_coefficient),
                     attempt=attempt,
-                    learning_rates={
-                        "student": optimizer_rates(state.student_optimizer),
-                    },
+                    learning_rates=optimizer_rates(state.student_optimizer),
                 )
                 atomic_json(
                     output
@@ -334,14 +337,11 @@ def learner(
                 )
                 if rank == 0:
                     print(
-                        {
-                            k: v
-                            for k, v in evidence.items()
-                            if k not in {"inputs", "reward"}
-                        },
+                        {k: v for k, v in evidence.items() if k != "inputs"},
                         flush=True,
                     )
             decay = None if skipped else state.commit_round()
+            synchronize(device)
             atomic_json(
                 output / "rounds" / f"{attempt}-round-{r:06d}-rank-{rank:03d}.json",
                 {
@@ -350,6 +350,16 @@ def learner(
                     "cursor": cursor.state_dict(),
                     "complete": True,
                     "skipped_zero_guidance": skipped,
+                    "active_group_fraction": (
+                        float(guidance.active.float().mean()) if art else None
+                    ),
+                    "peak_allocated_bytes": peak_memory(device),
+                    "timings": {
+                        "collection": collected - start,
+                        "scoring_wait": rewarded - collected,
+                        "guidance": guided - rewarded,
+                        "round": time.monotonic() - start,
+                    },
                 },
             )
             del batches

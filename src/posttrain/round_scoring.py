@@ -2,7 +2,7 @@
 
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .records import atomic_json, file_hash, identity
@@ -88,7 +88,7 @@ def publish_collection(
     return records
 
 
-def acquire_round(config, clients, records):
+def acquire_round(config, clients, records, *, on_scored=None):
     """Complete each required request before admitting any optimizer update."""
     from .rewards import combine_round, group_advantages
 
@@ -103,13 +103,23 @@ def acquire_round(config, clients, records):
         for start in range(0, len(requests), spec.batch_size):
             jobs.append((client, requests[start : start + spec.batch_size]))
     scores = []
+    counts = {}
     start = time.monotonic()
     with ThreadPoolExecutor(
         max_workers=sum(s.concurrency for s in config.scorers)
     ) as pool:
         futures = [pool.submit(client.acquire, batch) for client, batch in jobs]
-        for future in futures:
-            scores.extend(future.result())
+        for future in as_completed(futures):
+            batch = future.result()
+            scores.extend(batch)
+            for row in batch:
+                values = counts.setdefault(
+                    row["scorer"], {"retry_attempts": 0, "failed_requests": 0}
+                )
+                values["retry_attempts"] += max(0, row["attempts"] - 1)
+                values["failed_requests"] += row["status"] != "ok"
+            if on_scored is not None:
+                on_scored(counts)
     ids = sorted(r["sample_id"] for r in records)
     combined = combine_round(ids, scores, config)
     # ART guidance regresses on the combined reward itself; the NFT optimality
@@ -132,7 +142,7 @@ def acquire_round(config, clients, records):
     }
 
 
-def score_ready_round(config, services, output, attempt, step):
+def score_ready_round(config, services, output, attempt, step, *, on_scored=None):
     policy_version = step
     paths = [
         collection_path(output, attempt, step, rank)
@@ -171,7 +181,7 @@ def score_ready_round(config, services, output, attempt, step):
         ),
         "collection policy changed",
     )
-    result = acquire_round(config, services.clients, rows)
+    result = acquire_round(config, services.clients, rows, on_scored=on_scored)
     atomic_json(
         destination,
         {

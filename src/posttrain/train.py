@@ -138,7 +138,12 @@ def launch(
                     telemetry.poll()
                 services.check()
                 while score_ready_round(
-                    config, services, output, attempt, next_score_round
+                    config,
+                    services,
+                    output,
+                    attempt,
+                    next_score_round,
+                    on_scored=None if tracker is None else tracker.scoring,
                 ):
                     next_score_round += 1
                 for rank, process in enumerate(processes):
@@ -153,6 +158,11 @@ def launch(
                     else:
                         progress = list(
                             (output / "updates").glob(
+                                f"{attempt}-round-*-rank-{rank:03d}.json"
+                            )
+                        )
+                        progress.extend(
+                            (output / "rounds").glob(
                                 f"{attempt}-round-*-rank-{rank:03d}.json"
                             )
                         )

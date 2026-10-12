@@ -50,7 +50,7 @@ def evaluate_checkpoint(checkpoint, training, interval, assets, output, *, track
 
     checkpoint = Path(checkpoint)
     context = (
-        Tracker(checkpoint.parent.parent, None, resume=checkpoint)
+        Tracker(checkpoint.parent.parent, None, resume=checkpoint, phase="evaluation")
         if track or (checkpoint / "tracking.json").exists()
         else nullcontext()
     )
@@ -117,7 +117,8 @@ def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker
         if tracker is not None:
             tracker.evaluation(
                 report,
-                sorted((output / f"{suite}-blind").glob("*.png")),
+                target,
+                config,
                 manifest["step"],
             )
     receipt = {

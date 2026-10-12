@@ -285,6 +285,9 @@ def test_round_barrier_joins_the_published_reward_packet(tmp_path, training_conf
 def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
     tmp_path, monkeypatch, art_config, resume
 ):
+    import os
+    import time
+
     from src.posttrain import round_scoring, train
     from src.posttrain.records import atomic_json
     from src.posttrain.round_scoring import collection_path, reward_path
@@ -321,7 +324,10 @@ def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
             self.attempt = argv[argv.index("--attempt") + 1]
             self.calls = 0
             self.second_collection = False
-            atomic_json(output / "ready" / f"{self.attempt}-rank-000.json", {})
+            ready = output / "ready" / f"{self.attempt}-rank-000.json"
+            atomic_json(ready, {})
+            old = time.time() - 2 * art_config.execution.round_timeout
+            os.utime(ready, (old, old))
             self.publish(first_round)
 
         def publish(self, r):
@@ -357,6 +363,13 @@ def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
                 reward_path(output, self.attempt, first_round).exists()
                 and not self.second_collection
             ):
+                # A committed skip is progress even when startup and updates are old.
+                atomic_json(
+                    output
+                    / "rounds"
+                    / f"{self.attempt}-round-{first_round:06d}-rank-000.json",
+                    {"skipped_zero_guidance": True},
+                )
                 self.publish(first_round + 1)
                 self.second_collection = True
             return self.returncode
@@ -366,7 +379,7 @@ def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
 
     scored = []
 
-    def acquire(config, clients, rows):
+    def acquire(config, clients, rows, *, on_scored=None):
         scored.append(rows)
         return {"reward": {}, "scores": [], "acquisition_seconds": 0.0}
 

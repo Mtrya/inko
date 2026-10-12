@@ -90,6 +90,11 @@ def publish(root, step, contract, state, rank_state, rank, device, tracking=None
         )
         if tracking is not None:
             atomic_json(staging / "tracking.json", tracking)
+            telemetry = root.parent / "telemetry.json"
+            if telemetry.exists():
+                atomic_json(
+                    staging / "telemetry.json", json.loads(telemetry.read_text())
+                )
         atomic_json(
             staging / "manifest.json",
             {
