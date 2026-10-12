@@ -1,6 +1,6 @@
 # Posttraining evaluation protocol
 
-Status: the protocol is being applied to a single-stage DiffusionNFT run on the
+Status: the protocol is being applied to single-stage DiffusionNFT and DiffusionART runs on the
 600k pretrain EMA at 896p. The sampling/scoring harness, the prompt suites and
 the two scorer services were exercised at 640p with the 480k EMA; the current
 envelope is heavier and its own bounded qualification is still required. See
@@ -30,11 +30,11 @@ corpus. The initial inputs are:
 |---|---|---|
 | Initialization | 600k pretrain EMA, at 896p | 896p generation, memory and round time need their own qualification |
 | Rollout prompts | Fixed 512-prompt subset of DiffusionNFT's `pickscore/train.txt`; 32 of these for bring-up | Manifest prepared; semantic overlap review can refine later comparisons |
-| Scored development benchmark | 200 unique DrawBench prompts, one fixed seed each; fixed 16-prompt subset for bring-up | Coverage was exercised at 640p; rerun at 896p before comparing variants |
+| Scored development benchmark | 100 fixed DrawBench scenes × 4 seeds; 16 scenes × 4 seeds for bring-up; all 200 scenes with one seed for final-selection breadth | Single-seed coverage was exercised at 640p; qualify the multi-seed suite at 896p before comparing variants |
 | Visual monitoring | All 48 entries of [monitor.jsonl](../configs/prompts/monitor.jsonl), with existing seeds and aspects | Bilingual and multi-seed scoring remain unqualified |
 | Reward/score clients | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; no custom VLM-rubric scorer | Prepared assets verified; real Ascend bringup and service restart completed |
 | Initial report | Separate raw results, paired differences, scene-clustered bootstrap, failures, and cost telemetry | Raw/paired reports complete for the earlier envelope |
-| Diversity check | Multiple fixed seeds on a small declared subset when comparing trained variants | Select the subset and draw count before the comparison |
+| Diversity check | All-pairs LPIPS-AlexNet on the scored multi-seed development and bring-up manifests | Qualify metric execution at 896p; monitor and single-seed reads remain visual-only or score-only |
 
 The inspected [DiffusionNFT prompt source](https://github.com/NVlabs/DiffusionNFT/tree/cbb14f84b8312b620390dfcbe2fab69c1383b104/dataset)
 contains 25,432 unique `pickscore/train.txt` prompts. Its DrawBench test file has

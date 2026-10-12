@@ -230,6 +230,10 @@ one refresh happens per committed round, so the version equals the
 committed-round count, and the ART arm keeps it at zero. Named student EMA
 shadows advance on each successful student step and are independent of the old
 policy. The LR schedule runs on the student's successful-step clock.
+The training horizon, checkpoint cadence and interval evaluation count
+committed collections, including skips. A cosine LR schedule uses the nominal
+maximum update count (`rounds * updates_per_round`); skipped rounds do not
+advance that schedule or the student EMA.
 
 Complete-round checkpoints retain every role in use (student, the NFT old
 policy, optional reference, EMA shadows), the student optimizer and its clock,

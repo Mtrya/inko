@@ -41,7 +41,7 @@ def committed_checkpoints(root):
             and not path.name.startswith(".")
             and (path / "manifest.json").exists()
         ):
-            found.append((inspect(path)["step"], path))
+            found.append((inspect(path)["committed_rounds"], path))
     return sorted(found)
 
 
@@ -123,6 +123,7 @@ def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker
             )
     receipt = {
         "step": manifest["step"],
+        "committed_rounds": manifest["committed_rounds"],
         "exports": exports,
         "suites": interval.suites,
         "scope": "Completed generation/scoring paths; human ballots remain separate evidence.",
@@ -165,8 +166,8 @@ def execute(config_path, interval_path, assets_path, output, *, track=False):
             )
         # Reconcile evaluations from already committed checkpoints before
         # resuming training. An interrupted evaluation never becomes a skip.
-        for step, path in checkpoints:
-            if evaluation_due(training, interval, step):
+        for round_number, path in checkpoints:
+            if evaluation_due(training, interval, round_number):
                 evaluate_checkpoint(
                     path,
                     training,
@@ -199,9 +200,9 @@ def execute(config_path, interval_path, assets_path, output, *, track=False):
                 argv += ["--track"]
             with (output / f"segment-{stop:06d}.log").open("a") as log:
                 subprocess.run(argv, check=True, stdout=log, stderr=subprocess.STDOUT)
-            last = training_root / "checkpoints" / f"step-{stop:06d}"
+            last = training_root / "checkpoints" / f"round-{stop:06d}"
             require(
-                inspect(last)["step"] == stop,
+                inspect(last)["committed_rounds"] == stop,
                 "training segment lacks its committed endpoint",
             )
             if evaluation_due(training, interval, stop):
@@ -216,7 +217,8 @@ def execute(config_path, interval_path, assets_path, output, *, track=False):
         atomic_json(
             output / "complete.json",
             {
-                "step": training.training.steps,
+                "committed_rounds": training.training.rounds,
+                "step": inspect(last)["step"],
             },
         )
 

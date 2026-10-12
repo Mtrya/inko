@@ -29,7 +29,7 @@ def learner(
     from src.utils.encode_text import encode_text
 
     from . import checkpoint
-    from .clock import Clock, rounds_before
+    from .clock import Clock
     from .distributed import all_reduce, initialize, prime_buckets, wrap
     from .engine import update_art, update_round
     from .guidance import round_guidance
@@ -179,8 +179,10 @@ def learner(
                 device,
                 tracking,
             )
-        require(clock.step <= stop_after, "resume is past requested committed boundary")
-        rounds_before(config, stop_after)
+        require(
+            clock.committed_rounds <= stop_after,
+            "resume is past requested committed round",
+        )
         prompt_map = {p["id"]: p for p in contract["prompts"]}
 
         def frozen():
@@ -263,7 +265,7 @@ def learner(
                     )
             return result
 
-        while clock.step < stop_after:
+        while clock.committed_rounds < stop_after:
             start = time.monotonic()
             r = clock.committed_rounds
             if rank == 0:
@@ -363,10 +365,10 @@ def learner(
                 },
             )
             del batches
-            if not skipped and (
-                clock.step % config.training.checkpoint_every == 0
+            if (
+                clock.committed_rounds % config.training.checkpoint_every == 0
                 or clock.next_action(config) == "done"
-                or clock.step == stop_after
+                or clock.committed_rounds == stop_after
             ):
                 checkpoint.publish(
                     output / "checkpoints",

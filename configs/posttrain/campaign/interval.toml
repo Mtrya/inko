@@ -1,0 +1,6 @@
+sampling_config = "configs/posttrain/campaign/sampling.toml"
+every = 50
+suites = ["development", "monitor"]
+weights = ["slow"]
+include_final = true
+blind_seed = 7

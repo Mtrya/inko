@@ -192,6 +192,7 @@ class Tracker:
                     "channels": config.evaluation.channels,
                     "scorers": [asdict(scorer) for scorer in config.scorers],
                     "confidence": config.evaluation.confidence,
+                    "diversity": asdict(config.evaluation.diversity),
                 }
             )
         )

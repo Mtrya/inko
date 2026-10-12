@@ -76,9 +76,10 @@ def run(config, assets, prompts, output, *, visual_only=False, suite="developmen
 
 
 def _run(config, assets, prompts, output, *, visual_only, suite):
-    validate_panel(config, prompts)
+    validate_panel(config, prompts, suite)
+    with_diversity = suite in config.evaluation.diversity.suites
     artifacts = verify_assets(config, assets)
-    if config.evaluation.diversity.enabled:
+    if with_diversity:
         from .diversity import metric_identity
 
         artifacts["diversity"] = metric_identity(config.evaluation.diversity, assets)
@@ -254,7 +255,7 @@ def _run(config, assets, prompts, output, *, visual_only, suite):
         )
     )
     report["suite"] = suite
-    if config.evaluation.diversity.enabled:
+    if with_diversity:
         from .diversity import measure_diversity
 
         report["diversity"] = measure_diversity(
@@ -292,7 +293,7 @@ def main():
     prompts = load_prompts(
         REPO / getattr(config.evaluation, key), config.sampling.shapes
     )
-    validate_panel(config, prompts)
+    validate_panel(config, prompts, args.suite)
     if args.validate_only:
         print(
             json.dumps(

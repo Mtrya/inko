@@ -241,7 +241,7 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
     config = replace(
         training_config,
         nft=replace(training_config.nft, updates_per_round=2),
-        training=replace(training_config.training, steps=2, checkpoint_every=2),
+        training=replace(training_config.training, rounds=1, checkpoint_every=1),
         collection=replace(training_config.collection, prompts_per_round=2),
     )
     with Tracker(tmp_path, "nft") as tracker:
@@ -279,7 +279,7 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
 def test_resume_delivers_only_new_attempt_records(tmp_path, sdk, training_config):
     config = replace(
         training_config,
-        training=replace(training_config.training, steps=1),
+        training=replace(training_config.training, rounds=1),
         collection=replace(training_config.collection, prompts_per_round=2),
     )
     with Tracker(tmp_path, "nft") as tracker:
@@ -304,7 +304,7 @@ def test_art_tracking_resumes_collection_count_and_passes_skipped_rounds(
     config = replace(
         art_config,
         execution=replace(art_config.execution, learner_devices=(0, 1)),
-        training=replace(art_config.training, steps=6),
+        training=replace(art_config.training, rounds=6),
     )
     with Tracker(tmp_path, "art") as tracker:
         delivery = TrainingMetrics(
@@ -430,7 +430,7 @@ def test_coordinator_delivers_final_update_before_finish(
 
     config = replace(
         training_config,
-        training=replace(training_config.training, steps=1),
+        training=replace(training_config.training, rounds=1),
         collection=replace(training_config.collection, prompts_per_round=2),
     )
     output = tmp_path / "training"
@@ -492,7 +492,7 @@ def test_interval_runner_opens_checkpoint_tracker_before_evaluation(
     from scripts.posttrain import run_campaign
 
     root = tmp_path / "training"
-    checkpoint = root / "checkpoints" / "step-000001"
+    checkpoint = root / "checkpoints" / "round-000001"
     checkpoint.mkdir(parents=True)
     atomic_json(
         checkpoint / "tracking.json",

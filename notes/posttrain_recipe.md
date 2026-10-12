@@ -56,8 +56,8 @@ The shared endpoint does not make these the same schedule.
 | NFT inner updates | 1 per collection round | Initial reuse setting; more updates change the drift from the collected policy. |
 | NFT old-policy refresh | 0 toward 0.5 over 1000 committed rounds | Initial schedule; task-specific stability and reward improvement decide its retention and ramp. |
 | Muon learning rate | `muon_lr = 1e-3`, AdamW `lr = 1e-5` | Bounded sweep around the pretrain-comparable rate, read as reward-curve stability plus internal metrics. |
-| Trainable scope | LoRA r=32 | One comparison against full tuning at the settled configuration. LoRA also makes the reference anchor free. |
-| Run length | 1000 student updates | Long-horizon confirmation; checkpoint selection uses the development suite, the monitor panel and blind review. |
+| Trainable scope | LoRA r=32 | One comparison against full tuning at the settled configuration. LoRA shares the frozen reference base; the anchor still requires reference forwards. |
+| Run length | 1000 collected rounds, including skipped ART collections | Long-horizon confirmation; checkpoint selection uses the development suite, the monitor panel and blind review. |
 | Group size, time draws, EMA decays | 8 draws per prompt, 1 time draw, two named shadows | Not yet studied; each is a config value with a mechanism test, not a fitted recipe value. |
 
 Reward-hacking evidence is handled scorer-side or data-side first; the anchor
@@ -95,9 +95,9 @@ python -m src.posttrain.train --config configs/posttrain.toml \
   --assets /external/posttrain-assets.json --output /external/run
 python -m src.posttrain.train --config configs/posttrain.toml \
   --assets /external/posttrain-assets.json --output /external/run \
-  --resume /external/run/checkpoints/step-000100
+  --resume /external/run/checkpoints/round-000100
 python -m scripts.posttrain.export \
-  --checkpoint /external/run/checkpoints/step-000100 \
+  --checkpoint /external/run/checkpoints/round-000100 \
   --weights live --output /external/export
 ```
 

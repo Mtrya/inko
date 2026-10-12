@@ -52,8 +52,8 @@ def grouped_pairs(records):
         yield arm, key, rows, list(combinations(rows, 2))
 
 
-def validate_panel(config, prompts):
-    if not config.evaluation.diversity.enabled:
+def validate_panel(config, prompts, suite):
+    if suite not in config.evaluation.diversity.suites:
         return
     require(
         all(min(config.sampling.shapes[p["aspect"]]) >= 32 for p in prompts),

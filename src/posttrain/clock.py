@@ -6,16 +6,6 @@ from .schedules import refresh_decay
 from .schema import require
 
 
-def rounds_before(config, step):
-    """Successful training rounds at an update boundary; skips are not counted."""
-    updates = config.updates_per_round
-    require(
-        0 <= step <= config.training.steps, "generator step outside the training plan"
-    )
-    require(step % updates == 0, "cannot stop inside a collection round")
-    return step // updates
-
-
 @dataclass
 class Clock:
     step: int = 0
@@ -27,11 +17,14 @@ class Clock:
     old_refresh_decay: float | None = None
 
     def next_action(self, config):
-        return "done" if self.step == config.training.steps else "collect"
+        return "done" if self.committed_rounds == config.training.rounds else "collect"
 
     def update(self, config):
         require(
-            self.next_action(config) == "collect",
+            self.next_action(config) == "collect"
+            and self.step
+            < (self.committed_rounds - self.skipped_rounds + 1)
+            * config.updates_per_round,
             "no student update beyond the training horizon",
         )
         self.step += 1
@@ -56,8 +49,9 @@ class Clock:
 
     def check_round(self, config):
         require(
-            rounds_before(config, self.step)
-            == self.committed_rounds - self.skipped_rounds + 1,
+            self.step
+            == (self.committed_rounds - self.skipped_rounds + 1)
+            * config.updates_per_round,
             "commit requires exactly one complete uncommitted collection round",
         )
 
@@ -89,8 +83,9 @@ class Clock:
         total = config.collection.prompts_per_round * config.collection.draws_per_prompt
         refreshes = self.committed_rounds if config.objective == "nft" else 0
         require(
-            self.committed_rounds - self.skipped_rounds
-            == rounds_before(config, self.step)
+            self.committed_rounds <= config.training.rounds
+            and self.step
+            == (self.committed_rounds - self.skipped_rounds) * config.updates_per_round
             and (config.objective == "art" or self.skipped_rounds == 0)
             and self.samples_used == total * self.step
             and self.samples_scored == total * self.committed_rounds

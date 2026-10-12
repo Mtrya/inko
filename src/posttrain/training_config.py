@@ -137,7 +137,7 @@ class StudentEMA:
 @dataclass(frozen=True)
 class Training:
     seed: int
-    steps: int
+    rounds: int
     checkpoint_every: int
     ema: tuple[StudentEMA, ...]
 
@@ -248,18 +248,13 @@ class TrainingConfig:
         )
         require(
             0 <= t.seed < 2**63
-            and t.steps > 0
+            and t.rounds > 0
             and t.checkpoint_every > 0
             and len({ema.name for ema in t.ema}) == len(t.ema),
             "invalid training length/seed/EMA",
         )
         require(
-            t.steps % self.updates_per_round == 0
-            and t.checkpoint_every % self.updates_per_round == 0,
-            "training length/checkpoint interval must contain complete rounds",
-        )
-        require(
-            self.student_optimizer.warmup_steps <= t.steps,
+            self.student_optimizer.warmup_steps <= t.rounds * self.updates_per_round,
             "student warmup exceeds the training horizon",
         )
         if self.objective == "art":

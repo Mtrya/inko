@@ -24,14 +24,14 @@ override. `configs/posttrain.toml` is the reference run.
 | `old_policy` | NFT refresh strategy (`copy`, `constant`, `linear_ramp`), decay values, and the horizon counted in committed rounds. Required under `objective = "nft"` and rejected under `objective = "art"`. |
 | `student_optimizer` | `adamw` or `muon_adamw` with learning rates, betas, weight decay, clip limit and LR schedule. |
 | `execution` | Learner devices, microbatch, timeouts, precision, activation checkpointing, RoCE and deterministic-kernel policy. |
-| `training` | Seed, total student updates, checkpoint interval, and named EMA shadows with decay and storage device. |
+| `training` | Seed, total collected rounds, checkpoint interval in rounds, and named EMA shadows with decay and storage device. |
 | `scorers`, `rewards` | Declared score services with acquisition limits, and the reward channels with direction, weight and standardization. |
 
 A round is `prompts_per_round * draws_per_prompt` samples that must divide
-evenly across learner devices and microbatches. `training.steps` and
-`training.checkpoint_every` must contain whole rounds of the objective's
-updates: `nft.updates_per_round` for NFT, two for ART. An ART run additionally
-requires `collection.guidance = 1` (it trains against the rollout's own cached
+evenly across learner devices and microbatches. `training.rounds` and
+`training.checkpoint_every` count collections, including skipped ART rounds.
+Successful rounds perform `nft.updates_per_round` updates for NFT, two for ART.
+An ART run additionally requires `collection.guidance = 1` (it trains against the rollout's own cached
 prediction, so the rollout cannot use CFG) and a round that divides evenly into
 the two windows across learners
 (`prompts_per_round * draws_per_prompt % (2 * learners) == 0`). Validate before
@@ -52,13 +52,13 @@ python -m src.posttrain.train --config configs/posttrain.toml \
   --stop-after 100
 python -m src.posttrain.train --config configs/posttrain.toml \
   --assets /external/posttrain-assets.json --output /external/run \
-  --resume /external/run/checkpoints/step-000100 --stop-after 200
+  --resume /external/run/checkpoints/round-000100 --stop-after 200
 ```
 
 The coordinator writes the run manifest, starts the declared scorer services,
 and spawns one resident learner per configured device. `--stop-after` ends the
-run at a committed boundary without changing the configured horizon, so a long
-horizon can be reached in segments. `--track` logs to the `inko-posttrain`
+run after the requested number of collected rounds without changing the
+configured horizon, so a long horizon can be reached in segments. `--track` logs to the `inko-posttrain`
 SwanLab project; a recovered run keeps its experiment identity.
 
 `--resume` requires a byte-identical training contract (config plus prompt
@@ -67,8 +67,10 @@ prompt cursor, per-rank RNG and last reward. Work inside an uncommitted round is
 discarded and recollected. A run with committed checkpoints refuses to start
 without `--resume`; a run that stopped before its first publication restarts
 from the declared initialization. Checkpoints are named
-`step-<run-local-student-update>`; `--stop-after` and the horizon always publish
-one, and a completed run's exports come from those directories.
+`round-<committed-collection-count>`. Checkpoint manifests retain the separate
+optimizer step. Skipped collections can publish checkpoints at the same
+optimizer step without overwriting earlier recovery points. `--stop-after`
+and the horizon always publish a checkpoint.
 
 ## ART arm
 
@@ -122,8 +124,8 @@ checkpoint views the driver exports and adds as arms:
 }
 ```
 
-`weights` names `live` or a `training.ema` shadow. `every` is a student-update
-interval and must fall on complete rounds. The driver validates the interval
+`weights` names `live` or a `training.ema` shadow. `every` counts collected
+rounds, including skipped ART rounds. The driver validates the interval
 together with the training config:
 
 ```bash
@@ -148,13 +150,18 @@ itself runs standalone with `python -m src.evaluation.benchmarks.run --config
 <sampling config>`; `--suite monitor` is visual-only and skips automatic
 reporting.
 
-Suites and their prompt files come from `configs/prompts/`:
-`development` is the 200-prompt DrawBench suite, `bringup` its 16-prompt subset,
+Suites and their prompt files come from `configs/prompts/`. Sampling configs
+select each suite's manifest. The recurring development manifest has 100
+DrawBench scenes with four seeds each; the single-seed 200-prompt manifest
+provides breadth. `bringup` uses 16 scenes with four seeds each,
 `monitor` the 48-entry visual panel, and `confirmation` the held-out final
 suite. `scripts.posttrain.prepare_prompts` rebuilds them from the pinned
 reference prompt source and keeps rollout, development and monitor texts
 disjoint under Unicode, case and whitespace normalization. That check is exact
-text overlap, not semantic paraphrase detection.
+text overlap, not semantic paraphrase detection. `evaluation.diversity.suites`
+lists the suites that compute LPIPS. Every exact caption in those suites must
+have at least two seeds. Omit single-seed monitor, breadth and confirmation
+reads from this list.
 
 ## Blind readouts
 

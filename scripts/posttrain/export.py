@@ -60,6 +60,7 @@ def _publish_export(output, staging, weights, state, merged):
     record = {
         "weights": weights,
         "step": state["step"],
+        "committed_rounds": state["committed_rounds"],
     }
     atomic_json(staging / "export.json", record)
     staging.rename(output)
@@ -83,7 +84,15 @@ def main():
             or args.weights in {v.name for v in config.training.ema},
             "unknown student weight view",
         )
-        print(json.dumps({"valid": True, "step": record["step"]}))
+        print(
+            json.dumps(
+                {
+                    "valid": True,
+                    "step": record["step"],
+                    "committed_rounds": record["committed_rounds"],
+                }
+            )
+        )
         return
     if args.output is None:
         parser.error("--output required")

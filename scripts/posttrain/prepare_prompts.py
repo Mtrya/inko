@@ -18,6 +18,7 @@ def prepare(
     eval_bringup: int,
     confirmation_count: int,
     evaluation_seeds: int,
+    development_scenes: int,
 ):
     revision = subprocess.check_output(
         ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
@@ -72,7 +73,7 @@ def prepare(
 
     if not 0 < rollout_bringup <= rollout_count <= len(
         train
-    ) or not 0 < eval_bringup <= len(dev):
+    ) or not 0 < eval_bringup <= development_scenes <= len(dev):
         raise ValueError("invalid subset sizes")
     rollout = records(train, ordered(train, "rollout")[:rollout_count], "pickscore")
     development = records(dev, ordered(dev, "development"), "drawbench")
@@ -118,7 +119,7 @@ def prepare(
         "posttrain_drawbench": development,
         "posttrain_drawbench_bringup": development[:eval_bringup],
         "posttrain_confirmation": confirmation,
-        "posttrain_drawbench_diversity": repeated(development),
+        "posttrain_drawbench_diversity": repeated(development[:development_scenes]),
         "posttrain_drawbench_bringup_diversity": repeated(development[:eval_bringup]),
         "posttrain_confirmation_diversity": repeated(confirmation),
         "posttrain_monitor_diversity": repeated(monitor_records),
@@ -150,7 +151,8 @@ if __name__ == "__main__":
     parser.add_argument("--rollout-bringup", type=int, default=32)
     parser.add_argument("--eval-bringup", type=int, default=16)
     parser.add_argument("--confirmation-count", type=int, default=200)
-    parser.add_argument("--evaluation-seeds", type=int, default=2)
+    parser.add_argument("--evaluation-seeds", type=int, default=4)
+    parser.add_argument("--development-scenes", type=int, default=100)
     args = parser.parse_args()
     prepare(
         args.source,
@@ -161,4 +163,5 @@ if __name__ == "__main__":
         args.eval_bringup,
         args.confirmation_count,
         args.evaluation_seeds,
+        args.development_scenes,
     )

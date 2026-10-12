@@ -27,7 +27,6 @@ def launch(
     assets_path,
     track=False,
 ):
-    from .clock import rounds_before
     from .round_scoring import score_ready_round
     from .scoring.lifecycle import Services, isolated_environment
     from .tracking import Tracker, TrainingMetrics
@@ -84,9 +83,12 @@ def launch(
 
             saved = inspect(resume)
             require(saved["contract"] == contract, "resume contract changed")
-            require(saved["step"] <= stop_after, "resume is past requested boundary")
+            require(
+                saved["committed_rounds"] <= stop_after,
+                "resume is past requested round",
+            )
             next_score_round = saved["committed_rounds"]
-        rounds_before(config, stop_after)
+        require(0 < stop_after <= config.training.rounds, "invalid stop round")
         try:
             tracked = (
                 track
@@ -185,8 +187,8 @@ def launch(
             if telemetry is not None:
                 telemetry.poll()
                 require(
-                    telemetry.step == stop_after,
-                    "completed training lacks SwanLab update records",
+                    telemetry.round == stop_after,
+                    "completed training lacks SwanLab collection records",
                 )
         finally:
             error = sys.exc_info()
@@ -205,9 +207,9 @@ def launch(
             if tracker is not None:
                 tracker.__exit__(*error)
     return {
-        "completed_step": stop_after,
+        "completed_rounds": stop_after,
         "attempt": attempt,
-        "checkpoint": str(output / "checkpoints" / f"step-{stop_after:06d}"),
+        "checkpoint": str(output / "checkpoints" / f"round-{stop_after:06d}"),
     }
 
 
@@ -217,7 +219,9 @@ def main():
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--stop-after", type=int)
+    parser.add_argument(
+        "--stop-after", type=int, help="Stop after this many collected rounds"
+    )
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument(
         "--track",
@@ -252,11 +256,8 @@ def main():
         parser.error("--assets and --output are required")
     assets = json.loads(args.assets.read_text())
     output = args.output.resolve()
-    stop = args.stop_after if args.stop_after is not None else config.training.steps
-    require(0 < stop <= config.training.steps, "invalid stop boundary")
-    from .clock import rounds_before
-
-    rounds_before(config, stop)
+    stop = args.stop_after if args.stop_after is not None else config.training.rounds
+    require(0 < stop <= config.training.rounds, "invalid stop round")
     if args.learner_rank is not None:
         contract = json.loads((output / "manifest.json").read_text())
         from .learner import learner

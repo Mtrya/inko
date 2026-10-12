@@ -67,10 +67,11 @@ def publish(root, step, contract, state, rank_state, rank, device, tracking=None
     """Only manifest-bearing directories are recovery points; staging is never reused."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
+    round_number = state["committed_rounds"]
     token = [uuid.uuid4().hex if rank == 0 else None]
     if dist.is_initialized():
         dist.broadcast_object_list(token, src=0, device=device)
-    staging = root / f".incomplete-{step:06d}-{token[0]}"
+    staging = root / f".incomplete-{round_number:06d}-{token[0]}"
     if rank == 0:
         staging.mkdir()
     barrier()
@@ -81,7 +82,7 @@ def publish(root, step, contract, state, rank_state, rank, device, tracking=None
     if rank == 0:
         save_tensor_file(staging / "state.pt", cpu_state(state))
     barrier()
-    destination = root / f"step-{step:06d}"
+    destination = root / f"round-{round_number:06d}"
     if rank == 0:
         require(
             {p.name for p in staging.iterdir()}

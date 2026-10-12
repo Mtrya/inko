@@ -43,7 +43,7 @@ class Execution:
 
 @dataclass(frozen=True)
 class Diversity:
-    enabled: bool
+    suites: tuple[str, ...]
     asset: str
     pair_batch_size: int
     cpu_threads: int
@@ -53,7 +53,13 @@ class Diversity:
             min(self.pair_batch_size, self.cpu_threads) > 0,
             "invalid LPIPS batch/thread count",
         )
-        if self.enabled:
+        require(
+            len(set(self.suites)) == len(self.suites)
+            and set(self.suites)
+            <= {"development", "bringup", "monitor", "confirmation"},
+            "invalid diversity suites",
+        )
+        if self.suites:
             name(self.asset)
         else:
             require(not self.asset, "disabled diversity must not claim metric assets")

@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from src.posttrain.checkpoint import assert_exact
-from src.posttrain.clock import Clock, rounds_before
+from src.posttrain.clock import Clock
 from src.posttrain.engine import update_round
 from src.posttrain.objectives.nft import losses, reference_losses
 from src.posttrain.optim import RoleOptimizer
@@ -287,7 +287,9 @@ def test_round_update_keeps_detached_roles_and_reports_terms(
     roles = new_roles(config, base)
     rollouts = round_rollouts(config, roles, base)
     optimizer = RoleOptimizer(
-        roles.student, config.student_optimizer, config.training.steps
+        roles.student,
+        config.student_optimizer,
+        config.training.rounds * config.updates_per_round,
     )
     old, reference = (
         copy.deepcopy(roles.old.state_dict()),
@@ -329,7 +331,9 @@ def test_round_update_rejects_incomplete_rewards_and_stale_policy(
     roles = new_roles(config, base)
     rollouts = round_rollouts(config, roles, base)
     optimizer = RoleOptimizer(
-        roles.student, config.student_optimizer, config.training.steps
+        roles.student,
+        config.student_optimizer,
+        config.training.rounds * config.updates_per_round,
     )
     complete = probabilities(rollouts)
     incomplete = dict(list(complete.items())[1:])
@@ -430,11 +434,8 @@ def test_clock_requires_complete_rounds_and_records_its_schedule(training_config
     config = replace(
         training_config,
         nft=replace(training_config.nft, updates_per_round=2),
-        training=replace(training_config.training, steps=4, checkpoint_every=2),
+        training=replace(training_config.training, rounds=2, checkpoint_every=1),
     )
-    assert rounds_before(config, 4) == 2
-    with pytest.raises(ValueError, match="inside a collection round"):
-        rounds_before(config, 1)
     clock = Clock()
     with pytest.raises(ValueError, match="complete uncommitted collection round"):
         clock.commit_round(config, 0.0)
@@ -462,11 +463,10 @@ def test_config_rejects_incomplete_rounds_and_degenerate_groups(training_config)
             training_config,
             collection=replace(training_config.collection, draws_per_prompt=1),
         )
-    with pytest.raises(ValueError, match="complete rounds"):
+    with pytest.raises(ValueError, match="length/seed/EMA"):
         replace(
             training_config,
-            training=replace(training_config.training, steps=4),
-            nft=replace(training_config.nft, updates_per_round=3),
+            training=replace(training_config.training, rounds=0),
         )
     with pytest.raises(ValueError, match="sum to one"):
         replace(

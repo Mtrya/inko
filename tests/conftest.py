@@ -57,7 +57,7 @@ def sampling_config():
             0,
             100,
             0.95,
-            Diversity(False, "", 1, 1),
+            Diversity((), "", 1, 1),
         ),
         (arm, replace(arm, name="candidate", guidance=2.0)),
         (scorer,),
@@ -165,5 +165,5 @@ def art_config(training_config):
         nft=None,
         art=ART(reference_coefficient=1e-4),
         old_policy=None,
-        training=replace(training_config.training, steps=4, checkpoint_every=2),
+        training=replace(training_config.training, rounds=2, checkpoint_every=1),
     )

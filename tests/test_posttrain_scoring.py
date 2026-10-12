@@ -388,16 +388,16 @@ def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
     monkeypatch.setattr(train.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(round_scoring, "acquire_round", acquire)
     result = train.launch(
-        art_config,
+        replace(art_config, training=replace(art_config.training, rounds=4)),
         {"learner": {"python_paths": []}, "device_type": "cpu"},
         {},
         output,
         checkpoint,
-        generator_step + 2,
+        first_round + 2,
         tmp_path / "config.toml",
         tmp_path / "assets.json",
     )
-    assert result["completed_step"] == generator_step + 2
+    assert result["completed_rounds"] == first_round + 2
     assert [[r["sample_id"] for r in rows] for rows in scored] == [
         [f"{r}:{slot}:{draw}" for slot in (0, 1) for draw in (0, 1)]
         for r in (first_round, first_round + 1)

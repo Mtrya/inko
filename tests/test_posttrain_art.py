@@ -571,8 +571,8 @@ def test_art_config_rejects_the_other_objective_sections(art_config, training_co
             art_config,
             collection=replace(art_config.collection, draws_per_prompt=1),
         )
-    with pytest.raises(ValueError, match="complete rounds"):
-        replace(art_config, training=replace(art_config.training, steps=3))
+    with pytest.raises(ValueError, match="length/seed/EMA"):
+        replace(art_config, training=replace(art_config.training, rounds=0))
     with pytest.raises(ValueError, match="reference coefficient"):
         replace(art_config, art=ART(reference_coefficient=float("nan")))
     with pytest.raises(ValueError, match="unknown training objective"):

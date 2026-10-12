@@ -61,7 +61,7 @@ deterministic_algorithms = true
 
 [training]
 seed = 1729
-steps = 1000
+rounds = 1000
 checkpoint_every = 50
 
 [[training.ema]]

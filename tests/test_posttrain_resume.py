@@ -86,7 +86,7 @@ def test_checkpoint_publication_is_all_or_nothing(tmp_path, monkeypatch):
             0,
             torch.device("cpu"),
         )
-    assert not (tmp_path / "step-000001").exists()
+    assert not (tmp_path / "round-000001").exists()
 
 
 def test_manifest_in_staging_is_not_a_published_checkpoint(tmp_path):
@@ -192,7 +192,7 @@ def test_art_skip_preserves_momentum_ema_and_update_schedule_across_resume(
         student_optimizer=replace(
             art_config.student_optimizer, kind=optimizer, schedule="cosine"
         ),
-        training=replace(art_config.training, steps=6),
+        training=replace(art_config.training, rounds=4),
     )
     base = small_model()
     state = TrainingState(config, new_roles(config, base), None, Clock())
