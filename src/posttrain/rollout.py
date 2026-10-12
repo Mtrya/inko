@@ -213,16 +213,33 @@ def collect_art(
     )
 
 
-def art_window(config, rollout, window):
-    """Sample positions of one ART update window; the round's draws split in halves."""
-    total = config.collection.prompts_per_round * config.collection.draws_per_prompt
+def art_window(config, rollouts, window):
+    """One seeded, equal half of this learner's shuffled trajectory samples."""
     if window not in (0, 1):
         raise ValueError("ART trains two windows per collection round")
-    return [
-        index
-        for index, draw in enumerate(rollout.draw_indices)
-        if (draw < total // 2) == (window == 0)
-    ]
+    samples = sorted(
+        [
+            (rollout, index)
+            for rollout in rollouts
+            for index in range(len(rollout.sample_ids))
+        ],
+        key=lambda item: item[0].draw_indices[item[1]],
+    )
+    if not samples or len(samples) % 2:
+        raise ValueError("ART windows require an even number of local samples")
+    first, index = samples[0]
+    generator = torch.Generator().manual_seed(
+        stream_seed(
+            config.training.seed,
+            first.collection_round,
+            first.sample_ids[index],
+            "art_windows",
+            generator_step=first.generator_step,
+        )
+    )
+    order = torch.randperm(len(samples), generator=generator).tolist()
+    half = len(samples) // 2
+    return [samples[i] for i in order[window * half : (window + 1) * half]]
 
 
 def nft_inputs(config, rollout, generator_step, draw):

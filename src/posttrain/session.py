@@ -34,6 +34,16 @@ class TrainingState:
         self.clock.commit_round(self.config, decay)
         return decay
 
+    def skip_inactive_art_round(self, guidance):
+        """Consume a globally inactive collection without an optimizer/EMA step.
+
+        An enabled reference penalty remains an independent training objective.
+        """
+        if self.config.reference_coefficient or bool(guidance.active.any()):
+            return False
+        self.clock.skip_round(self.config)
+        return True
+
     def state_dict(self):
         clock, c = self.clock, self.config
         clock.validate(c)

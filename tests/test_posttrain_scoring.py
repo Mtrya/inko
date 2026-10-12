@@ -281,6 +281,116 @@ def test_round_barrier_joins_the_published_reward_packet(tmp_path, training_conf
         wait_for_rewards(training_config, output, attempt, step, 0, local)
 
 
+@pytest.mark.parametrize("resume", [False, True])
+def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
+    tmp_path, monkeypatch, art_config, resume
+):
+    from src.posttrain import round_scoring, train
+    from src.posttrain.records import atomic_json
+    from src.posttrain.round_scoring import collection_path, reward_path
+    from src.posttrain.scoring import lifecycle
+
+    output = tmp_path / "training"
+    first_round, generator_step = (2, 2) if resume else (0, 0)
+    checkpoint = None
+    if resume:
+        checkpoint = tmp_path / "checkpoint"
+        atomic_json(
+            checkpoint / "manifest.json",
+            {"step": 2, "committed_rounds": 2, "world_size": 1, "contract": {}},
+        )
+
+    class Services:
+        def __init__(self, *args):
+            self.startup = {}
+            self.clients = {}
+
+        def __enter__(self):
+            return self
+
+        def check(self):
+            pass
+
+        def close(self):
+            pass
+
+    class Learner:
+        returncode = None
+
+        def __init__(self, argv, **kwargs):
+            self.attempt = argv[argv.index("--attempt") + 1]
+            self.calls = 0
+            self.second_collection = False
+            atomic_json(output / "ready" / f"{self.attempt}-rank-000.json", {})
+            self.publish(first_round)
+
+        def publish(self, r):
+            atomic_json(
+                output / "attempts" / f"{self.attempt}-round-{r:06d}.json",
+                {"step": generator_step, "round": r},
+            )
+            atomic_json(
+                collection_path(output, self.attempt, r, 0),
+                {
+                    "step": r,
+                    "rank": 0,
+                    "records": [
+                        {
+                            "sample_id": f"{r}:{slot}:{draw}",
+                            "generator_step": generator_step,
+                            "policy_version": r,
+                        }
+                        for slot in (0, 1)
+                        for draw in (0, 1)
+                    ],
+                },
+            )
+
+        def poll(self):
+            self.calls += 1
+            assert (
+                self.calls < 30
+            ), "coordinator stopped scoring before the update horizon"
+            if reward_path(output, self.attempt, first_round + 1).exists():
+                self.returncode = 0
+            elif (
+                reward_path(output, self.attempt, first_round).exists()
+                and not self.second_collection
+            ):
+                self.publish(first_round + 1)
+                self.second_collection = True
+            return self.returncode
+
+        def wait(self, timeout):
+            return self.returncode
+
+    scored = []
+
+    def acquire(config, clients, rows):
+        scored.append(rows)
+        return {"reward": {}, "scores": [], "acquisition_seconds": 0.0}
+
+    monkeypatch.setattr(lifecycle, "Services", Services)
+    monkeypatch.setattr(train.subprocess, "Popen", Learner)
+    monkeypatch.setattr(train.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(round_scoring, "acquire_round", acquire)
+    result = train.launch(
+        art_config,
+        {"learner": {"python_paths": []}, "device_type": "cpu"},
+        {},
+        output,
+        checkpoint,
+        generator_step + 2,
+        tmp_path / "config.toml",
+        tmp_path / "assets.json",
+    )
+    assert result["completed_step"] == generator_step + 2
+    assert [[r["sample_id"] for r in rows] for rows in scored] == [
+        [f"{r}:{slot}:{draw}" for slot in (0, 1) for draw in (0, 1)]
+        for r in (first_round, first_round + 1)
+    ]
+
+
 def test_client_import_is_model_free():
     import sys
 

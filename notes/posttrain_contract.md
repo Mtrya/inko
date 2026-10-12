@@ -113,9 +113,10 @@ direction = cov / MAD / rms(cov / MAD)     unit RMS; zero when not active
 magnitude = 1 when active, else 0
 ```
 
-The statistics are complete-group: each learner contributes the partial sums of
-its own draws, two all-reduces sum them (moments, then absolute deviations from
-the global means), and only then does a direction exist. A group is one
+The statistics are complete-group: learners reduce reward sums and counts,
+then global reward extrema, then centered reward-endpoint products and absolute
+deviations. Exactly constant rewards have zero centered reward even when FP32
+summation rounds their mean away from the reward. A group is one
 collection slot of the round — `draw_index // draws_per_prompt` — never prompt
 text, so a repeated prompt still yields independent groups. No rank ever
 estimates a group from its own microbatches, and a group without reward spread
@@ -146,13 +147,20 @@ reference's full-window normalization with `restore_zero_signal = false`. The
 `0.8` noise level, the `1e-5` KL threshold and the `1e-5` epsilon floors are the
 paper's constants, not campaign knobs.
 
-One collection round is followed by two student updates; the ART arm fixes that
-count instead of reading `nft.updates_per_round`. The round's draws split into
-two disjoint halves by draw index, and every trajectory site of a half trains
-once in its window. Both windows regress targets frozen at collection time, so
-the second window's residual `G - d` restores whatever motion the first window
+A trained ART round uses two student updates; the ART arm fixes that
+count instead of reading `nft.updates_per_round`. Each learner shuffles its
+draws with a private round-keyed RNG before splitting them into equal disjoint
+halves. The order is independent of microbatch packing, and every trajectory
+site of a half trains once in its window. Both windows regress targets frozen
+at collection time, so the second window's residual `G - d` restores motion the first window
 produced. `reference_coefficient` composes exactly as under NFT: a velocity MSE
 between the student and the frozen reference at the same items.
+
+When every prompt's guidance is inactive and `reference_coefficient = 0`, the
+round commits as skipped without optimizer, LR or student EMA updates. The
+next collection uses fresh sample IDs and seeds. An enabled reference penalty
+remains an independent training objective, so it still receives both updates.
+An active round retains both windows even if one window's items are all masked.
 
 ### Reference coordinate mapping
 
@@ -205,15 +213,19 @@ rounds, `old <- d(r) old + (1 - d(r)) student`:
 - `constant`: the configured decay.
 - `linear_ramp`: `decay_start + (decay_end - decay_start) * min(r / horizon, 1)`.
 
-The reference recipe ramps `d` from 0 to 0.5 over the run, matching the
-reference implementation's ablation that a frozen old policy stops learning.
+The current Inko recipe ramps `d` from 0 toward 0.5 over 1000 NFT rounds.
+The NFT paper's default ramp is `min(0.001 * i, 0.5)` and its OCR schedules
+retain more of the old policy; these are task-specific recipe choices.
 The old policy moves only at a committed boundary; a resumed run restores the
 exact decay it recorded.
 
 ## Clocks and recovery
 
 `step` counts successful student optimizer updates, `committed_rounds` counts
-complete rounds, and `old_policy_version` counts committed refreshes; under NFT
+complete scored collections including skipped ART rounds, and `skipped_rounds`
+counts collections that produced no update. Thus
+`step = (committed_rounds - skipped_rounds) * updates_per_round` at a committed
+boundary. `old_policy_version` counts committed refreshes; under NFT
 one refresh happens per committed round, so the version equals the
 committed-round count, and the ART arm keeps it at zero. Named student EMA
 shadows advance on each successful student step and are independent of the old
@@ -221,8 +233,8 @@ policy. The LR schedule runs on the student's successful-step clock.
 
 Complete-round checkpoints retain every role in use (student, the NFT old
 policy, optional reference, EMA shadows), the student optimizer and its clock,
-`last_reward`, the prompt cursor and per-rank RNG. Files are fsynced before a
-manifest-bearing directory is atomically renamed; incomplete directories are
+`last_reward`, both round counts, the prompt cursor and per-rank RNG. Files are
+fsynced before a manifest-bearing directory is atomically renamed; incomplete directories are
 never recovery points. Resume requires an unchanged training contract and
 verifies exact restoration before collecting again; work inside an uncommitted
 round is discarded and recollected.
@@ -230,7 +242,7 @@ round is discarded and recollected.
 ## Verification and references
 
 `tests/` covers operator values and gradients against independent oracles,
-group statistics both locally and through the summing collective, clock and
+group statistics both locally and through real learner collectives, clock and
 scheduling mechanics, role isolation, probability admission, the cache-to-item
 trajectory round trip, and exact save/resume. Generation quality is established
 only by real samples and benchmarks under the

@@ -30,7 +30,7 @@ def learner(
 
     from . import checkpoint
     from .clock import Clock, rounds_before
-    from .distributed import all_reduce_sums, initialize, prime_buckets, wrap
+    from .distributed import all_reduce, initialize, prime_buckets, wrap
     from .engine import update_art, update_round
     from .guidance import round_guidance
     from .models import peak_memory, set_device, synchronize
@@ -285,11 +285,10 @@ def learner(
             )
             guidance = None
             if art:
-                guidance = round_guidance(
-                    config, batches, values, reduce=all_reduce_sums
-                )
+                guidance = round_guidance(config, batches, values, reduce=all_reduce)
+            skipped = art and state.skip_inactive_art_round(guidance)
             old_version = clock.old_policy_version
-            for inner in range(config.updates_per_round):
+            for inner in range(0 if skipped else config.updates_per_round):
                 if art:
                     evidence = update_art(
                         config,
@@ -342,7 +341,7 @@ def learner(
                         },
                         flush=True,
                     )
-            decay = state.commit_round()
+            decay = None if skipped else state.commit_round()
             atomic_json(
                 output / "rounds" / f"{attempt}-round-{r:06d}-rank-{rank:03d}.json",
                 {
@@ -350,10 +349,11 @@ def learner(
                     "old_refresh_decay": decay,
                     "cursor": cursor.state_dict(),
                     "complete": True,
+                    "skipped_zero_guidance": skipped,
                 },
             )
             del batches
-            if (
+            if not skipped and (
                 clock.step % config.training.checkpoint_every == 0
                 or clock.next_action(config) == "done"
                 or clock.step == stop_after

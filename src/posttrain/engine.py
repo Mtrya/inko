@@ -215,8 +215,7 @@ def update_art(
     steps = config.collection.steps
     chunks = [
         (rollout, index, start)
-        for rollout in rollouts
-        for index in art_window(config, rollout, window)
+        for rollout, index in art_window(config, rollouts, window)
         for start in range(0, steps, config.execution.microbatch)
     ]
     if not chunks:

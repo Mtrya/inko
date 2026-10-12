@@ -74,9 +74,11 @@ def publish_collection(
                     "conditioning": [
                         tensor_digest(t[index]) for t in rollout.conditioning
                     ],
-                    "unconditional": None
-                    if unconditional is None
-                    else [tensor_digest(t) for t in unconditional],
+                    "unconditional": (
+                        None
+                        if unconditional is None
+                        else [tensor_digest(t) for t in unconditional]
+                    ),
                 }
             )
     atomic_json(
@@ -156,10 +158,15 @@ def score_ready_round(config, services, output, attempt, step):
         len(rows) == len(expected) and {r["sample_id"] for r in rows} == expected,
         "complete global collection required",
     )
+    # Inactive ART collections advance the collection ID without an update.
+    started = json.loads(
+        (Path(output) / "attempts" / f"{attempt}-round-{step:06d}.json").read_text()
+    )
+    generator_step = started["step"]
     require(
         all(
             r["policy_version"] == policy_version
-            and r["generator_step"] == step * config.updates_per_round
+            and r["generator_step"] == generator_step
             for r in rows
         ),
         "collection policy changed",

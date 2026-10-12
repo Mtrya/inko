@@ -11,6 +11,7 @@ from src.evaluation.benchmarks import run as benchmark
 from src.models.inko import Inko
 from src.posttrain.checkpoint import (
     assert_exact,
+    cpu_state,
     inspect,
     load,
     publish,
@@ -18,9 +19,10 @@ from src.posttrain.checkpoint import (
     rng_state,
 )
 from src.posttrain.clock import Clock
-from src.posttrain.engine import update_round
+from src.posttrain.engine import update_art, update_round
+from src.posttrain.guidance import round_guidance
 from src.posttrain.records import file_hash
-from src.posttrain.rollout import PromptCursor
+from src.posttrain.rollout import PromptCursor, art_window, collect_art
 from src.posttrain.scoring.client import ScoreClient, request_for_record
 from src.posttrain.session import TrainingState
 
@@ -75,15 +77,39 @@ def test_checkpoint_publication_is_all_or_nothing(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, "atomic_json", fail)
     with pytest.raises(OSError):
-        publish(tmp_path, 1, {}, {}, {}, 0, torch.device("cpu"))
+        publish(
+            tmp_path,
+            1,
+            {},
+            {"step": 1, "committed_rounds": 1},
+            {},
+            0,
+            torch.device("cpu"),
+        )
     assert not (tmp_path / "step-000001").exists()
 
 
 def test_manifest_in_staging_is_not_a_published_checkpoint(tmp_path):
     device = torch.device("cpu")
-    committed = publish(tmp_path, 1, {"case": "publication"}, {}, {}, 0, device)
+    committed = publish(
+        tmp_path,
+        1,
+        {"case": "publication"},
+        {"step": 1, "committed_rounds": 1},
+        {},
+        0,
+        device,
+    )
     with pytest.raises(ValueError, match="overwrite"):
-        publish(tmp_path, 1, {"case": "publication"}, {}, {}, 0, device)
+        publish(
+            tmp_path,
+            1,
+            {"case": "publication"},
+            {"step": 1, "committed_rounds": 1},
+            {},
+            0,
+            device,
+        )
     staging = next(tmp_path.glob(".incomplete-*"))
     assert (staging / "manifest.json").exists()
     with pytest.raises(ValueError, match="unpublished"):
@@ -138,6 +164,7 @@ def test_export_materializes_the_requested_weight_view(
             "ema": roles.ema,
             "architecture": architecture,
             "step": 2,
+            "committed_rounds": 2,
         },
         {},
         0,
@@ -151,6 +178,133 @@ def test_export_materializes_the_requested_weight_view(
                 if name in roles.ema["ema"]:
                     parameter.copy_(roles.ema["ema"][name])
     assert_exact(merge_student(roles.student).state_dict(), model.state_dict())
+
+
+@pytest.mark.parametrize("optimizer", ["adamw", "muon_adamw"])
+def test_art_skip_preserves_momentum_ema_and_update_schedule_across_resume(
+    tmp_path, art_config, small_model, optimizer
+):
+    torch.set_num_threads(1)
+    torch.manual_seed(31)
+    config = replace(
+        art_config,
+        art=replace(art_config.art, reference_coefficient=0.0),
+        student_optimizer=replace(
+            art_config.student_optimizer, kind=optimizer, schedule="cosine"
+        ),
+        training=replace(art_config.training, steps=6),
+    )
+    base = small_model()
+    state = TrainingState(config, new_roles(config, base), None, Clock())
+    cursor = PromptCursor(5, 123)
+    cond = (
+        torch.full((1, 1, 1024), 0.01),
+        torch.full((1, 1024), 0.01),
+        torch.ones(1, 1),
+    )
+
+    def collect(current, prompts):
+        r = current.clock.committed_rounds
+        return [
+            collect_art(
+                current.roles.student_field,
+                config,
+                [{"id": f"p{prompt}"}],
+                [f"{r}:{slot}:{draw}"],
+                [slot * 2 + draw],
+                r,
+                current.clock.step,
+                cond,
+                "cpu",
+            )
+            for slot, prompt in enumerate(prompts)
+            for draw in range(2)
+        ]
+
+    def update(current, batches):
+        rewards = {r.sample_ids[0]: float(i) for i, r in enumerate(batches)}
+        guidance = round_guidance(config, batches, rewards)
+        assert not current.skip_inactive_art_round(guidance)
+        for window in (0, 1):
+            update_art(
+                config,
+                current.roles,
+                current.roles.student_field,
+                batches,
+                guidance,
+                current.student_optimizer,
+                current.clock.committed_rounds,
+                window,
+            )
+            current.clock.update(config)
+        current.commit_round()
+
+    update(state, collect(state, cursor.take(2)))
+    batches = collect(state, cursor.take(2))
+    tied = round_guidance(config, batches, {r.sample_ids[0]: 0.1 for r in batches})
+    before = cpu_state(state.state_dict())
+    assert state.skip_inactive_art_round(tied)
+    after = state.state_dict()
+    for name in ("student", "ema", "student_optimizer"):
+        assert_exact(before[name], after[name])
+    assert (
+        state.clock.step,
+        state.clock.committed_rounds,
+        state.clock.skipped_rounds,
+    ) == (2, 2, 1)
+    assert state.clock.samples_scored == 8 and state.clock.samples_used == 8
+    state.clock.validate(config)
+    following = collect(state, cursor.take(2))
+    assert following[0].seeds != batches[0].seeds
+    update(state, following)
+    point = publish(
+        tmp_path / "checkpoints",
+        4,
+        {"case": "art-skip"},
+        state.state_dict(),
+        {"cursor": cursor.state_dict()},
+        0,
+        torch.device("cpu"),
+    )
+    assert inspect(point)["committed_rounds"] == 3
+    saved, rank_saved = load(point, {"case": "art-skip"}, 0)
+    recovered = TrainingState(config, new_roles(config, base), None, Clock())
+    recovered.load_state_dict(saved)
+    recovered_cursor = PromptCursor(5, 123)
+    recovered_cursor.load_state_dict(rank_saved["cursor"])
+    restore_rng(rank_saved["rng"], torch.device("cpu"))
+    following = collect(state, cursor.take(2))
+    replay = collect(recovered, recovered_cursor.take(2))
+    for expected, actual in zip(following, replay, strict=True):
+        assert (
+            expected.sample_ids == actual.sample_ids and expected.seeds == actual.seeds
+        )
+        assert torch.equal(expected.states, actual.states)
+        assert torch.equal(expected.predictions, actual.predictions)
+    for window in (0, 1):
+        expected = [r.sample_ids[i] for r, i in art_window(config, following, window)]
+        actual = [r.sample_ids[i] for r, i in art_window(config, replay, window)]
+        assert expected == actual
+    update(state, following)
+    update(recovered, replay)
+    assert_exact(state.state_dict(), recovered.state_dict())
+    assert_exact(cursor.state_dict(), recovered_cursor.state_dict())
+
+
+def test_art_reference_penalty_remains_active_without_reward_guidance(
+    art_config, small_model
+):
+    from src.posttrain.guidance import GroupGuidance
+
+    state = TrainingState(
+        art_config, new_roles(art_config, small_model()), None, Clock()
+    )
+    before = cpu_state(state.state_dict())
+    guidance = GroupGuidance(
+        torch.zeros(2, 16, 2, 2), torch.zeros(2), torch.zeros(2, dtype=torch.bool)
+    )
+    assert not state.skip_inactive_art_round(guidance)
+    assert_exact(before, state.state_dict())
 
 
 def test_config_only_external_service_collection_join_report_and_resume(

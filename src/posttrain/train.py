@@ -85,8 +85,8 @@ def launch(
             saved = inspect(resume)
             require(saved["contract"] == contract, "resume contract changed")
             require(saved["step"] <= stop_after, "resume is past requested boundary")
-            next_score_round = rounds_before(config, saved["step"])
-        last_round = rounds_before(config, stop_after)
+            next_score_round = saved["committed_rounds"]
+        rounds_before(config, stop_after)
         try:
             tracked = (
                 track
@@ -137,11 +137,9 @@ def launch(
                 if telemetry is not None:
                     telemetry.poll()
                 services.check()
-                while next_score_round < last_round:
-                    if not score_ready_round(
-                        config, services, output, attempt, next_score_round
-                    ):
-                        break
+                while score_ready_round(
+                    config, services, output, attempt, next_score_round
+                ):
                     next_score_round += 1
                 for rank, process in enumerate(processes):
                     if process.poll() is not None:

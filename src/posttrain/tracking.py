@@ -98,7 +98,6 @@ def update_metrics(rows):
     """Loss records use world/global_samples scaling; their rank mean is global."""
     first = rows[0]
     metrics = {
-        "clock/student_updates": first["step"],
         "runtime/seconds": max(r["seconds"] for r in rows),
         "runtime/peak_allocated_bytes": max(r["peak_allocated_bytes"] for r in rows),
     }
@@ -130,8 +129,6 @@ def update_metrics(rows):
 
 class TrainingMetrics:
     def __init__(self, tracker, config, output, attempt, saved=None):
-        from .clock import rounds_before
-
         self.tracker, self.config, self.output, self.attempt = (
             tracker,
             config,
@@ -140,7 +137,7 @@ class TrainingMetrics:
         )
         self.ranks = len(config.execution.learner_devices)
         self.step = 0 if saved is None else saved["step"]
-        self.round = rounds_before(config, self.step)
+        self.round = 0 if saved is None else saved["committed_rounds"]
 
     def rows(self, directory, suffix):
         paths = [
@@ -152,10 +149,13 @@ class TrainingMetrics:
         return [json.loads(p.read_text()) for p in paths]
 
     def poll(self):
-        while self.rows("rounds", f"round-{self.round:06d}") is not None:
-            for inner in range(self.config.updates_per_round):
-                rows = self.rows("updates", f"round-{self.round:06d}-inner-{inner:03d}")
-                require(rows is not None, "committed round lacks update telemetry")
-                self.step += 1
-                self.tracker.log(update_metrics(rows), self.step)
+        while (rounds := self.rows("rounds", f"round-{self.round:06d}")) is not None:
+            if not rounds[0]["skipped_zero_guidance"]:
+                for inner in range(self.config.updates_per_round):
+                    rows = self.rows(
+                        "updates", f"round-{self.round:06d}-inner-{inner:03d}"
+                    )
+                    require(rows is not None, "committed round lacks update telemetry")
+                    self.step += 1
+                    self.tracker.log(update_metrics(rows), self.step)
             self.round += 1

@@ -78,7 +78,7 @@ def test_checkpoint_owns_tracking_identity_and_new_arm_does_not_inherit(tmp_path
             root / "checkpoints",
             1,
             {},
-            {"step": 1},
+            {"step": 1, "committed_rounds": 1},
             {},
             0,
             torch.device("cpu"),
@@ -103,9 +103,9 @@ def test_tracking_mismatch_fails_startup(tmp_path, sdk, mismatch):
     atomic_json(
         checkpoint / "tracking.json",
         {
-            "swanlab_project": "another-project"
-            if mismatch == "project"
-            else "inko-posttrain",
+            "swanlab_project": (
+                "another-project" if mismatch == "project" else "inko-posttrain"
+            ),
             "swanlab_run_id": "saved-run",
         },
     )
@@ -194,7 +194,6 @@ def test_rank_scaled_losses_average_and_reward_statistics_join():
     assert metrics["train/student_grad_norm"] == 0.5
     assert metrics["train/nft_loss"] == 1
     assert metrics["train/reference_loss"] == 0.25
-    assert metrics["clock/student_updates"] == 1
     assert metrics["lr/student/muon/0"] == 0.01
     assert metrics["reward/hpsv3.mu/mean"] == 3
     assert metrics["reward/advantages_mean"] == 0
@@ -222,7 +221,10 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
                 )
         delivery.poll()
         assert sdk.logs == []  # An unfinished round is not committed progress.
-        atomic_json(tmp_path / "rounds" / "attempt-round-000000-rank-000.json", {})
+        atomic_json(
+            tmp_path / "rounds" / "attempt-round-000000-rank-000.json",
+            {"skipped_zero_guidance": False},
+        )
         delivery.poll()
         delivery.poll()
     assert [step for step, _ in sdk.logs] == [1, 2]
@@ -236,7 +238,9 @@ def test_resume_delivers_only_new_attempt_records(tmp_path, sdk, training_config
         collection=replace(training_config.collection, prompts_per_round=2),
     )
     with Tracker(tmp_path, "nft") as tracker:
-        delivery = TrainingMetrics(tracker, config, tmp_path, "new", saved={"step": 0})
+        delivery = TrainingMetrics(
+            tracker, config, tmp_path, "new", saved={"step": 0, "committed_rounds": 0}
+        )
         for attempt in ("old", "new"):
             atomic_json(
                 tmp_path
@@ -245,10 +249,52 @@ def test_resume_delivers_only_new_attempt_records(tmp_path, sdk, training_config
                 record(),
             )
             atomic_json(
-                tmp_path / "rounds" / f"{attempt}-round-000000-rank-000.json", {}
+                tmp_path / "rounds" / f"{attempt}-round-000000-rank-000.json",
+                {"skipped_zero_guidance": False},
             )
         delivery.poll()
     assert [step for step, _ in sdk.logs] == [1]
+
+
+def test_art_tracking_resumes_collection_count_and_passes_skipped_rounds(
+    tmp_path, sdk, art_config
+):
+    config = replace(
+        art_config,
+        execution=replace(art_config.execution, learner_devices=(0, 1)),
+        training=replace(art_config.training, steps=6),
+    )
+    with Tracker(tmp_path, "art") as tracker:
+        delivery = TrainingMetrics(
+            tracker, config, tmp_path, "new", saved={"step": 2, "committed_rounds": 3}
+        )
+        atomic_json(
+            tmp_path / "rounds/new-round-000003-rank-000.json",
+            {"skipped_zero_guidance": True},
+        )
+        delivery.poll()
+        assert delivery.round == 3 and sdk.logs == []
+        atomic_json(
+            tmp_path / "rounds/new-round-000003-rank-001.json",
+            {"skipped_zero_guidance": True},
+        )
+        delivery.poll()
+        assert delivery.round == 4 and delivery.step == 2 and sdk.logs == []
+        for rank in (0, 1):
+            for inner in (0, 1):
+                atomic_json(
+                    tmp_path
+                    / "updates"
+                    / f"new-round-000004-inner-{inner:03d}-rank-{rank:03d}.json",
+                    dict(record(), step=3 + inner),
+                )
+            atomic_json(
+                tmp_path / "rounds" / f"new-round-000004-rank-{rank:03d}.json",
+                {"skipped_zero_guidance": False},
+            )
+        delivery.poll()
+        delivery.poll()
+    assert [step for step, _ in sdk.logs] == [3, 4]
 
 
 def test_actual_optimizer_rates_are_read_after_schedule_step(training_config):
@@ -328,7 +374,10 @@ def test_coordinator_delivers_final_update_before_finish(
                 output / "updates" / f"{attempt}-round-000000-inner-000-rank-000.json",
                 record(),
             )
-            atomic_json(output / "rounds" / f"{attempt}-round-000000-rank-000.json", {})
+            atomic_json(
+                output / "rounds" / f"{attempt}-round-000000-rank-000.json",
+                {"skipped_zero_guidance": False},
+            )
 
         def poll(self):
             return 0

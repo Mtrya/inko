@@ -13,7 +13,7 @@ from src.posttrain.clock import Clock
 from src.posttrain.engine import update_art
 from src.posttrain.guidance import GroupGuidance, group_guidance, round_guidance
 from src.posttrain.objectives.art import KL_THRESHOLD, NOISE_LEVEL, losses
-from src.posttrain.rollout import ARTRollout, collect_art, tensor_digest
+from src.posttrain.rollout import ARTRollout, art_window, collect_art, tensor_digest
 from src.posttrain.sampling import sample
 from src.posttrain.session import TrainingState
 from src.posttrain.training_config import ART, load_training_config
@@ -43,55 +43,111 @@ def test_group_guidance_matches_the_hand_computed_direction():
         group_guidance(endpoints[:5], rewards[:5], groups[:5], 2, expected_group_size=3)
 
 
-def test_group_guidance_reduction_equals_the_complete_group_result():
-    torch.manual_seed(5)
-    endpoints = torch.randn(6, 4)
-    rewards = torch.tensor([0.0, 1.0, 3.0, 2.0, 2.0, 9.0])
-    groups = torch.tensor([0, 0, 0, 1, 1, 1])
-    whole = group_guidance(endpoints, rewards, groups, 2, expected_group_size=3)
-    # The collective's true totals, hand-computed over each complete group:
-    # summed reward-endpoint products, endpoint sums, counts, reward sums, and
-    # reward absolute deviations from the global group means. Every rank
-    # receives these same totals from the all-reduce, whatever it contributed.
-    reward_endpoint = torch.stack(
-        [
-            (rewards[groups == g])[:, None].mul(endpoints[groups == g]).sum(0)
-            for g in (0, 1)
-        ]
+@pytest.mark.parametrize("size", [8, 24])
+@pytest.mark.parametrize("reward", [0.1, -0.3])
+def test_exact_fractional_reward_ties_have_zero_guidance(size, reward):
+    torch.manual_seed(1)
+    stats = group_guidance(
+        torch.randn(size, 4),
+        torch.full((size,), reward),
+        torch.zeros(size, dtype=torch.long),
+        1,
+        expected_group_size=size,
     )
-    endpoint_sum = torch.stack([endpoints[groups == g].sum(0) for g in (0, 1)])
-    counts = torch.tensor([3.0, 3.0])
-    reward_sum = torch.tensor([rewards[groups == g].sum() for g in (0, 1)])
-    deviation = torch.tensor(
-        [(rewards[groups == g] - (reward_sum / counts)[g]).abs().sum() for g in (0, 1)]
+    assert stats["active"].tolist() == [False]
+    assert stats["magnitudes"].tolist() == [0.0]
+    assert torch.equal(stats["covariance"], torch.zeros(1, 4))
+    assert torch.equal(stats["directions"], torch.zeros(1, 4))
+
+
+def test_small_nonzero_reward_spread_is_not_treated_as_a_tie():
+    stats = group_guidance(
+        torch.tensor([[0.0, 0.0], [0.0, 1.0]]),
+        torch.tensor([0.0, 1e-8]),
+        torch.zeros(2, dtype=torch.long),
+        1,
+        expected_group_size=2,
     )
-    moments = torch.cat(
-        (reward_endpoint.reshape(-1), endpoint_sum.reshape(-1), counts, reward_sum)
+    assert stats["active"].tolist() == [True]
+    torch.testing.assert_close(
+        stats["directions"], torch.tensor([[0.0, math.sqrt(2)]]), rtol=0, atol=1e-6
     )
 
-    class ScriptedCollective:
-        def __call__(self, payload):
-            return moments if payload.numel() == moments.numel() else deviation
 
-    for rank in range(3):
-        shard = torch.arange(rank, 6, 3)
-        reduced = group_guidance(
-            endpoints[shard],
-            rewards[shard],
-            groups[shard],
-            2,
-            expected_group_size=3,
-            reduce=ScriptedCollective(),
+def test_covariance_is_stable_under_a_representable_reward_offset():
+    endpoints = torch.tensor([[1.0, 4.0], [3.0, 2.0], [5.0, 0.0], [7.0, -2.0]])
+    # Centered rewards [-1.5,-0.5,0.5,1.5] give covariance [10/3,-10/3].
+    for offset in (0.0, 1_000_000.0):
+        stats = group_guidance(
+            endpoints,
+            torch.tensor([0.0, 1.0, 2.0, 3.0]) + offset,
+            torch.zeros(4, dtype=torch.long),
+            1,
+            expected_group_size=4,
         )
-        # Three ranks each hold one draw of both groups; after the reduction
-        # every rank reproduces the complete-group statistics identically.
-        assert reduced["counts"].tolist() == whole["counts"].tolist()
-        assert reduced["active"].tolist() == whole["active"].tolist()
-        assert reduced["magnitudes"].tolist() == whole["magnitudes"].tolist()
-        for field in ("directions", "covariance"):
-            torch.testing.assert_close(
-                reduced[field], whole[field], rtol=2e-6, atol=1e-7
+        torch.testing.assert_close(
+            stats["covariance"], torch.tensor([[10 / 3, -10 / 3]])
+        )
+        torch.testing.assert_close(stats["directions"], torch.tensor([[1.0, -1.0]]))
+
+
+def test_art_windows_shuffle_before_splitting(art_config, monkeypatch):
+    from types import SimpleNamespace
+
+    config = replace(
+        art_config, collection=replace(art_config.collection, prompts_per_round=4)
+    )
+    rollout = SimpleNamespace(
+        draw_indices=list(range(8)),
+        sample_ids=[f"0:{i // 2}:{i % 2}" for i in range(8)],
+        collection_round=0,
+        generator_step=0,
+    )
+
+    def permutation(size, *, generator):
+        assert size == 8 and isinstance(generator, torch.Generator)
+        return torch.tensor([5, 0, 7, 2, 6, 1, 4, 3])
+
+    monkeypatch.setattr(torch, "randperm", permutation)
+    assert [i for _, i in art_window(config, [rollout], 0)] == [5, 0, 7, 2]
+    assert [i for _, i in art_window(config, [rollout], 1)] == [6, 1, 4, 3]
+
+
+def test_art_windows_are_balanced_and_independent_of_microbatch_packing(art_config):
+    from types import SimpleNamespace
+
+    config = replace(
+        art_config,
+        collection=replace(
+            art_config.collection, prompts_per_round=12, draws_per_prompt=8
+        ),
+        execution=replace(art_config.execution, learner_devices=tuple(range(12))),
+    )
+    rng_before = torch.get_rng_state().clone()
+    for rank in range(12):
+        draws = list(range(rank, 96, 12))
+
+        def pack(indices):
+            return SimpleNamespace(
+                draw_indices=indices,
+                sample_ids=[f"3:{i // 8}:{i % 8}" for i in indices],
+                collection_round=3,
+                generator_step=2,
             )
+
+        whole = [pack(draws)]
+        reordered = [pack([i]) for i in reversed(draws)]
+        windows = []
+        for window in (0, 1):
+            expected = [r.draw_indices[i] for r, i in art_window(config, whole, window)]
+            actual = [
+                r.draw_indices[i] for r, i in art_window(config, reordered, window)
+            ]
+            assert actual == expected and len(actual) == 4
+            windows.append(set(actual))
+        assert not windows[0] & windows[1]
+        assert windows[0] | windows[1] == set(draws)
+    assert torch.equal(torch.get_rng_state(), rng_before)
 
 
 def test_group_guidance_marks_an_unreduced_partial_group_as_incomplete():

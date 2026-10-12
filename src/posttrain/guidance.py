@@ -5,7 +5,7 @@ round's draws for one prompt. The aggregate direction is the reward-MAD-scaled
 covariance normalized to unit RMS, the magnitude of an active group is one, and
 a group with no reward spread is inactive. Every statistic is exact over the
 complete group: a caller holding part of a group must pass the collective that
-sums the partial statistics (see `reduce`).
+reduces the partial statistics (see `reduce`).
 """
 
 from dataclasses import dataclass
@@ -37,10 +37,10 @@ def group_guidance(
     """Covariance, direction and magnitude per prompt group.
 
     `endpoints` are flattened local endpoints [N, D], `rewards` and `groups` the
-    matching reward and group index per row. `reduce` must sum a partial-statistic
-    vector across the ranks that hold parts of a group; without it the call sees
-    complete groups itself. Every group must contain exactly `expected_group_size`
-    draws, so an incomplete round fails instead of estimating from a micro-batch.
+    matching reward and group index per row. `reduce(value, operation)` must
+    support "sum" and "max" across the ranks that hold parts of a group; without
+    it the call sees complete groups itself. Every group must contain exactly
+    `expected_group_size` draws.
     """
     x = endpoints.detach().float()
     r = rewards.detach().float().reshape(-1)
@@ -65,41 +65,41 @@ def group_guidance(
     )
     width = x.shape[1]
     shape = (group_count, width)
-    reward_endpoint = torch.zeros(shape, device=x.device).index_add_(
-        0, index, r[:, None] * x
-    )
-    endpoint_sum = torch.zeros(shape, device=x.device).index_add_(0, index, x)
     counts = torch.zeros(group_count, device=x.device).index_add_(
         0, index, torch.ones_like(r)
     )
     reward_sum = torch.zeros(group_count, device=x.device).index_add_(0, index, r)
     if reduce is not None:
-        payload = torch.cat(
-            (
-                reward_endpoint.reshape(-1),
-                endpoint_sum.reshape(-1),
-                counts,
-                reward_sum,
-            )
-        )
-        reward_endpoint, endpoint_sum, counts, reward_sum = reduce(payload).split(
-            [group_count * width, group_count * width, group_count, group_count]
-        )
-        reward_endpoint = reward_endpoint.reshape(shape)
-        endpoint_sum = endpoint_sum.reshape(shape)
+        counts, reward_sum = reduce(torch.cat((counts, reward_sum)), "sum").chunk(2)
     require(
         bool((counts == expected_group_size).all()),
         "incomplete prompt group in guidance",
     )
     means = reward_sum / counts
-    covariance = (reward_endpoint - means[:, None] * endpoint_sum) / (counts - 1)[
-        :, None
-    ]
-    deviation = torch.zeros(group_count, device=x.device).index_add_(
-        0, index, (r - means[index]).abs()
+    maxima = r.new_full((group_count,), -torch.inf).scatter_reduce_(
+        0, index, r, reduce="amax"
+    )
+    neg_minima = r.new_full((group_count,), -torch.inf).scatter_reduce_(
+        0, index, -r, reduce="amax"
     )
     if reduce is not None:
-        deviation = reduce(deviation)
+        maxima, neg_minima = reduce(torch.stack((maxima, neg_minima)), "max").unbind()
+    # A rounded mean can differ from an exactly constant FP32 reward. Detect
+    # ties over the complete group before normalization can amplify roundoff.
+    constant = maxima == -neg_minima
+    centered = torch.where(constant[index], 0.0, r - means[index])
+    numerator = torch.zeros(shape, device=x.device).index_add_(
+        0, index, centered[:, None] * x
+    )
+    deviation = torch.zeros(group_count, device=x.device).index_add_(
+        0, index, centered.abs()
+    )
+    if reduce is not None:
+        numerator, deviation = reduce(
+            torch.cat((numerator.reshape(-1), deviation)), "sum"
+        ).split([group_count * width, group_count])
+        numerator = numerator.reshape(shape)
+    covariance = numerator / (counts - 1)[:, None]
     mad = deviation / counts
     signal = covariance / torch.where(mad > 0, mad, torch.ones_like(mad))[:, None]
     rms = signal.square().mean(1).sqrt()

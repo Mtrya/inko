@@ -3,8 +3,8 @@
 The trainer runs one stage on a fixed base model, with DiffusionNFT or
 DiffusionART selected by the run config. A configuration defines the experiment;
 the [contract](posttrain_contract.md) defines the loss and the
-[recipe](posttrain_recipe.md) records which values are pinned and which are
-open. The runner never reduces image size, sample counts, update counts, model
+[recipe](posttrain_recipe.md) records the objective mechanisms and open values.
+The runner never reduces image size, sample counts, update counts, model
 capacity or precision after a failure.
 
 ## Training controls
@@ -74,21 +74,24 @@ one, and a completed run's exports come from those directories.
 
 `configs/posttrain_art.toml` mirrors `configs/posttrain.toml` with
 `objective = "art"`, an `[art]` section, and no `[nft]` or `[old_policy]`. Its
-round mechanics differ in four ways:
+round mechanics differ as follows:
 
 - Collection rolls out the live student and caches the visited latent and the
   velocity the rollout produced at every sampler step. The cache is fp32,
   host-resident and sharded per learner rank, and a rank's shard is released
   when the round's updates end. The NFT arm never allocates it.
-- Guidance is a per-prompt reward-endpoint covariance over the round, reduced
-  across learner ranks by two all-reduces of partial statistics (moments, then
-  absolute deviations from the global means) before any direction exists. A
-  prompt group with no reward spread is inactive, and its items train on
-  nothing.
-- Two optimizer updates follow each round, each over one disjoint half of the
-  round's draws and all of their trajectory sites, against the same frozen
-  targets. No old-policy refresh happens, so `old_policy_version` stays 0 and a
-  checkpoint carries no old role.
+- Guidance is a per-prompt reward-endpoint covariance over the round. Learners
+  reduce reward sums and counts, reward extrema, then centered covariance
+  products and absolute deviations before any direction exists. A prompt
+  group with exactly constant rewards is inactive.
+- Two optimizer updates follow each active round. Each learner shuffles its
+  draws with a private round-keyed RNG and splits them into equal disjoint
+  windows. Both windows train all of their trajectory sites against the same
+  frozen targets. No old-policy refresh happens, so `old_policy_version` stays 0
+  and a checkpoint carries no old role.
+- With no active guidance and `reference_coefficient = 0`, the collection is
+  recorded as skipped. Collection IDs and seeds advance, while optimizer, LR
+  and student EMA state stay fixed. An enabled reference penalty still trains.
 - Update records add `window`, `art_items`, `art_kept` and `art_masked`, and
   tracking publishes `train/art_masked_fraction` next to the loss terms.
 

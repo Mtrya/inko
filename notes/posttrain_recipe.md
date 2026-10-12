@@ -3,9 +3,9 @@
 Status: the trainer implements one stage on the 600k pretrain EMA base at 896p,
 with the objective selected by the run config — DiffusionNFT with a
 soft-refreshed old policy, or DiffusionART with the cached rollout prediction as
-its anchor. Both arms share the round workload below and compose with a frozen
-reference anchor. No posttraining quality result exists yet; the recipe's open
-values are listed below with the comparison each one needs.
+its anchor. Both arms share the round workload below and support an optional
+frozen reference anchor. No posttraining quality result exists yet; the
+recipe's open values are listed below with the comparison each one needs.
 
 See the [mathematical contract](posttrain_contract.md),
 [evaluation protocol](posttrain_evaluation.md) and
@@ -27,28 +27,34 @@ rollout steps cost nothing in rollout quality; the deployed step count is a
 separate post-training decision. One 20-step conditional forward per sampler
 step means the rollout does not pay for a second unconditional branch.
 
-## Pinned by the reference
+## Implemented objectives
 
-These are structural, not tunables, and follow the reference implementation of
-the objective that names them:
+The trainer implements these mechanisms from the reference methods:
 
 - Per-prompt group-normalized advantage, clipped to `+/-5` and mapped linearly
   to the optimality probability `p in [0, 1]` (NFT).
-- Implicit-policy guidance strength `beta = 1.0` (NFT).
 - Per-branch, per-sample adaptive clean-target weighting with an epsilon floor
   of `1e-5` (NFT).
-- One inner epoch per collected group (NFT).
-- Old-policy soft refresh from 0 toward 0.5 over the run: a frozen old policy
-  stops learning, and a hard copy collapses, per the reference ablation (NFT).
+- Separate frozen old policy, refreshed after the round's student updates (NFT).
 - Unit-RMS reward-endpoint covariance guidance, two update windows per round,
   and the trust-region mask on the reference transition variance with noise
   level `0.8` and KL threshold `1e-5` (ART; constants are not config values).
+
+NFT's beta, inner-update count and old-policy refresh schedule are recipe
+choices. [NFT §4.4 and Appendix C](https://arxiv.org/html/2509.16117v2#A3)
+use beta 1 or 0.1 and task-specific refresh schedules. The default paper ramp
+is `min(0.001 * i, 0.5)`; OCR uses higher retention. Inko currently uses
+`min(0.0005 * r, 0.5)`, where `r` counts previously committed NFT rounds.
+The shared endpoint does not make these the same schedule.
 
 ## Open values
 
 | Value | Current setting | Decision it needs |
 |---|---|---|
-| Anchor coefficient | `reference_coefficient = 1e-4` | Anchor on/off at the reference value; if ambiguous, fit from {1e-3, 1e-4, 1e-5}. The anchor is the intended defense against reward-hacking drift, so reward curves and monitor generations decide it, not the endpoint score. |
+| Anchor coefficient | `reference_coefficient = 0.0` | Compare the anchor against the unregularized objective. Reward curves and monitor generations decide whether it controls reward-hacking drift. |
+| NFT beta | `beta = 1.0` | Initial single-reward reference setting; suitability for Inko's mixed reward remains unverified. |
+| NFT inner updates | 1 per collection round | Initial reuse setting; more updates change the drift from the collected policy. |
+| NFT old-policy refresh | 0 toward 0.5 over 1000 committed rounds | Initial schedule; task-specific stability and reward improvement decide its retention and ramp. |
 | Muon learning rate | `muon_lr = 1e-3`, AdamW `lr = 1e-5` | Bounded sweep around the pretrain-comparable rate, read as reward-curve stability plus internal metrics. |
 | Trainable scope | LoRA r=32 | One comparison against full tuning at the settled configuration. LoRA also makes the reference anchor free. |
 | Run length | 1000 student updates | Long-horizon confirmation; checkpoint selection uses the development suite, the monitor panel and blind review. |

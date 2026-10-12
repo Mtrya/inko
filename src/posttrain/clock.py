@@ -7,7 +7,7 @@ from .schema import require
 
 
 def rounds_before(config, step):
-    """Committed collection rounds at a stop boundary; stops split no round."""
+    """Successful training rounds at an update boundary; skips are not counted."""
     updates = config.updates_per_round
     require(
         0 <= step <= config.training.steps, "generator step outside the training plan"
@@ -20,6 +20,7 @@ def rounds_before(config, step):
 class Clock:
     step: int = 0
     committed_rounds: int = 0
+    skipped_rounds: int = 0
     old_policy_version: int = 0
     samples_used: int = 0
     samples_scored: int = 0
@@ -55,8 +56,21 @@ class Clock:
 
     def check_round(self, config):
         require(
-            rounds_before(config, self.step) == self.committed_rounds + 1,
+            rounds_before(config, self.step)
+            == self.committed_rounds - self.skipped_rounds + 1,
             "commit requires exactly one complete uncommitted collection round",
+        )
+
+    def skip_round(self, config):
+        require(
+            config.objective == "art" and self.next_action(config) == "collect",
+            "only an unfinished ART run can skip a collection",
+        )
+        self.validate(config)
+        self.committed_rounds += 1
+        self.skipped_rounds += 1
+        self.samples_scored += (
+            config.collection.prompts_per_round * config.collection.draws_per_prompt
         )
 
     def validate(self, config):
@@ -64,6 +78,7 @@ class Clock:
             min(
                 self.step,
                 self.committed_rounds,
+                self.skipped_rounds,
                 self.old_policy_version,
                 self.samples_used,
                 self.samples_scored,
@@ -74,7 +89,9 @@ class Clock:
         total = config.collection.prompts_per_round * config.collection.draws_per_prompt
         refreshes = self.committed_rounds if config.objective == "nft" else 0
         require(
-            self.committed_rounds == rounds_before(config, self.step)
+            self.committed_rounds - self.skipped_rounds
+            == rounds_before(config, self.step)
+            and (config.objective == "art" or self.skipped_rounds == 0)
             and self.samples_used == total * self.step
             and self.samples_scored == total * self.committed_rounds
             and self.old_policy_version == refreshes,

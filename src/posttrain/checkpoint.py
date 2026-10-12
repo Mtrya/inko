@@ -94,6 +94,7 @@ def publish(root, step, contract, state, rank_state, rank, device, tracking=None
             staging / "manifest.json",
             {
                 "step": step,
+                "committed_rounds": state["committed_rounds"],
                 "world_size": world_size(),
                 "contract": contract,
             },
@@ -128,10 +129,11 @@ def load(path, contract, rank):
     manifest = inspect(path, contract)
     require(manifest["world_size"] == world_size(), "resume learner count differs")
     state = torch.load(Path(path) / "state.pt", map_location="cpu", weights_only=False)
-    if "step" in state:
-        require(
-            state["step"] == manifest["step"], "checkpoint manifest/state step differs"
-        )
+    require(
+        state["step"] == manifest["step"]
+        and state["committed_rounds"] == manifest["committed_rounds"],
+        "checkpoint manifest/state clocks differ",
+    )
     return (
         state,
         torch.load(
