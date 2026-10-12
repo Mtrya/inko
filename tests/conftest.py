@@ -15,6 +15,7 @@ from src.posttrain.config import (
 )
 from src.posttrain.scoring.contracts import Channel
 from src.posttrain.training_config import (
+    ART,
     NFT,
     Collection,
     OldPolicy,
@@ -91,6 +92,7 @@ def small_model():
 def training_config(sampling_config):
     """Explicit single-stage NFT inputs; recipes never source these contracts."""
     return TrainingConfig(
+        objective="nft",
         initialization=Checkpoint("initial", "ema"),
         student=Student("full", 2, 2.0, "attention_mlp"),
         collection=Collection(
@@ -118,6 +120,7 @@ def training_config(sampling_config):
             time_max=0.98,
         ),
         old_policy=OldPolicy("copy", 0.9, 0.0, 0.5, 3),
+        art=None,
         student_optimizer=Optimizer(
             kind="adamw",
             lr=1e-4,
@@ -150,4 +153,17 @@ def training_config(sampling_config):
         rewards=Rewards(
             (RewardChannel("unfamiliar.fit", "higher", 1.0, "none"),), 1e-4
         ),
+    )
+
+
+@pytest.fixture
+def art_config(training_config):
+    """ART arm inputs: same round workload, cached trajectory anchor and no old policy."""
+    return replace(
+        training_config,
+        objective="art",
+        nft=None,
+        art=ART(reference_coefficient=1e-4),
+        old_policy=None,
+        training=replace(training_config.training, steps=4, checkpoint_every=2),
     )

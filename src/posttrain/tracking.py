@@ -109,6 +109,11 @@ def update_metrics(rows):
         metrics[f"train/{term}_loss"] = statistics.mean(
             r["term_losses"][term] for r in rows
         )
+    if "art_items" in first:
+        items = sum(r["art_items"] for r in rows)
+        metrics["train/art_masked_fraction"] = (
+            sum(r["art_masked"] for r in rows) / items
+        )
     for role, values in first["learning_rates"].items():
         metrics.update({f"lr/{role}/{key}": value for key, value in values.items()})
     reward = first.get("reward")
@@ -148,7 +153,7 @@ class TrainingMetrics:
 
     def poll(self):
         while self.rows("rounds", f"round-{self.round:06d}") is not None:
-            for inner in range(self.config.nft.updates_per_round):
+            for inner in range(self.config.updates_per_round):
                 rows = self.rows("updates", f"round-{self.round:06d}-inner-{inner:03d}")
                 require(rows is not None, "committed round lacks update telemetry")
                 self.step += 1

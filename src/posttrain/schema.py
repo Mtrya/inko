@@ -8,6 +8,10 @@ from types import UnionType
 from typing import get_args, get_origin, get_type_hints
 
 
+def optional(kind):
+    return get_origin(kind) is UnionType and type(None) in get_args(kind)
+
+
 def decode(kind, value, location="config"):
     if kind is object:
         # Opaque structured rubric/diagnostic JSON stays data, never a reward.
@@ -21,12 +25,19 @@ def decode(kind, value, location="config"):
         if not isinstance(value, dict):
             raise ValueError(f"{location}: expected table")
         hints = get_type_hints(kind)
-        if set(value) != set(hints):
+        # TOML has no null, so an optional field may be omitted instead of absent.
+        missing = {k for k, t in hints.items() if k not in value and not optional(t)}
+        if missing or value.keys() - hints.keys():
             raise ValueError(
-                f"{location}: missing={sorted(hints.keys() - value.keys())}, unknown={sorted(value.keys() - hints.keys())}"
+                f"{location}: missing={sorted(missing)}, unknown={sorted(value.keys() - hints.keys())}"
             )
         return kind(
-            **{k: decode(t, value[k], f"{location}.{k}") for k, t in hints.items()}
+            **{
+                k: decode(t, value[k], f"{location}.{k}")
+                for k, t in hints.items()
+                if k in value
+            },
+            **{k: None for k, t in hints.items() if k not in value},
         )
     if origin is UnionType and type(None) in args:
         return (

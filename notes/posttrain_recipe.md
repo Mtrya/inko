@@ -1,9 +1,11 @@
 # Posttraining recipe
 
-Status: the trainer implements one stage — DiffusionNFT on the 600k pretrain
-EMA base at 896p, with a frozen reference anchor and a soft-refreshed old
-policy. No posttraining quality result exists yet; the recipe's open values are
-listed below with the comparison each one needs.
+Status: the trainer implements one stage on the 600k pretrain EMA base at 896p,
+with the objective selected by the run config — DiffusionNFT with a
+soft-refreshed old policy, or DiffusionART with the cached rollout prediction as
+its anchor. Both arms share the round workload below and compose with a frozen
+reference anchor. No posttraining quality result exists yet; the recipe's open
+values are listed below with the comparison each one needs.
 
 See the [mathematical contract](posttrain_contract.md),
 [evaluation protocol](posttrain_evaluation.md) and
@@ -27,17 +29,20 @@ step means the rollout does not pay for a second unconditional branch.
 
 ## Pinned by the reference
 
-These are structural, not tunables, and follow the
-[DiffusionNFT](https://arxiv.org/abs/2509.16117v2) implementation:
+These are structural, not tunables, and follow the reference implementation of
+the objective that names them:
 
 - Per-prompt group-normalized advantage, clipped to `+/-5` and mapped linearly
-  to the optimality probability `p in [0, 1]`.
-- Implicit-policy guidance strength `beta = 1.0`.
+  to the optimality probability `p in [0, 1]` (NFT).
+- Implicit-policy guidance strength `beta = 1.0` (NFT).
 - Per-branch, per-sample adaptive clean-target weighting with an epsilon floor
-  of `1e-5`.
-- One inner epoch per collected group.
+  of `1e-5` (NFT).
+- One inner epoch per collected group (NFT).
 - Old-policy soft refresh from 0 toward 0.5 over the run: a frozen old policy
-  stops learning, and a hard copy collapses, per the reference ablation.
+  stops learning, and a hard copy collapses, per the reference ablation (NFT).
+- Unit-RMS reward-endpoint covariance guidance, two update windows per round,
+  and the trust-region mask on the reference transition variance with noise
+  level `0.8` and KL threshold `1e-5` (ART; constants are not config values).
 
 ## Open values
 
@@ -56,9 +61,10 @@ coefficient is the second lever.
 
 | Path | Responsibility |
 |---|---|
-| `src/posttrain/` | Trainer, NFT objective, sampling, reward transforms, score clients |
+| `src/posttrain/` | Trainer, NFT and ART objectives, sampling, reward transforms, score clients |
 | `src/evaluation/benchmarks/` | Independently runnable benchmark execution and reporting |
 | `configs/posttrain.toml` | Reference single-stage NFT training config |
+| `configs/posttrain_art.toml` | Reference single-stage ART training config: same round workload, no old policy |
 | `configs/prompts/` | Rollout, development, monitor and confirmation suites |
 | `configs/scorers/` | Per-scorer source, weights and output declarations |
 

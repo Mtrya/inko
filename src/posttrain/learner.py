@@ -1,4 +1,4 @@
-"""Resident single-stage NFT learner; publish only complete collection rounds."""
+"""Resident single-stage learner; publish only complete collection rounds."""
 
 import json
 import os
@@ -30,14 +30,17 @@ def learner(
 
     from . import checkpoint
     from .clock import Clock, rounds_before
-    from .distributed import initialize, prime_buckets, wrap
-    from .engine import update_round
+    from .distributed import all_reduce_sums, initialize, prime_buckets, wrap
+    from .engine import update_art, update_round
+    from .guidance import round_guidance
     from .models import peak_memory, set_device, synchronize
     from .roles import Roles
-    from .rollout import PromptCursor, collect_nft, tensor_digest
+    from .rollout import PromptCursor, collect_art, collect_nft, tensor_digest
     from .round_scoring import publish_collection, wait_for_rewards
     from .session import TrainingState
     from .tracking import optimizer_rates
+
+    art = config.objective == "art"
 
     device = set_device(
         assets["device_type"],
@@ -216,7 +219,11 @@ def learner(
         def collect_round():
             chosen = cursor.take(config.collection.prompts_per_round)
             draws = [
-                (contract["prompts"][p], f"{clock.committed_rounds}:{slot}:{draw}")
+                (
+                    slot * config.collection.draws_per_prompt + draw,
+                    contract["prompts"][p],
+                    f"{clock.committed_rounds}:{slot}:{draw}",
+                )
                 for slot, p in enumerate(chosen)
                 for draw in range(config.collection.draws_per_prompt)
             ]
@@ -224,21 +231,36 @@ def learner(
             result = []
             for begin in range(0, len(local), config.execution.microbatch):
                 batch = local[begin : begin + config.execution.microbatch]
-                cond, uncond = conditioning([p["text"] for p, _ in batch])
-                result.append(
-                    collect_nft(
-                        roles.old_field,
-                        config,
-                        [p for p, _ in batch],
-                        [key for _, key in batch],
-                        clock.committed_rounds,
-                        clock.old_policy_version,
-                        clock.step,
-                        cond,
-                        uncond,
-                        device,
+                cond, uncond = conditioning([p["text"] for _, p, _ in batch])
+                if art:
+                    result.append(
+                        collect_art(
+                            roles.student_field,
+                            config,
+                            [p for _, p, _ in batch],
+                            [key for _, _, key in batch],
+                            [index for index, _, _ in batch],
+                            clock.committed_rounds,
+                            clock.step,
+                            cond,
+                            device,
+                        )
                     )
-                )
+                else:
+                    result.append(
+                        collect_nft(
+                            roles.old_field,
+                            config,
+                            [p for _, p, _ in batch],
+                            [key for _, _, key in batch],
+                            clock.committed_rounds,
+                            clock.old_policy_version,
+                            clock.step,
+                            cond,
+                            uncond,
+                            device,
+                        )
+                    )
             return result
 
         while clock.step < stop_after:
@@ -258,28 +280,44 @@ def learner(
             records = publish_collection(
                 config, batches, prompt_map, vae, stats, output, attempt, r, rank
             )
-            reward, state.last_reward = wait_for_rewards(
+            values, state.last_reward = wait_for_rewards(
                 config, output, attempt, r, rank, records
             )
-            old_version = clock.old_policy_version
-            for inner in range(config.nft.updates_per_round):
-                evidence = update_round(
-                    config,
-                    roles,
-                    state.student,
-                    batches,
-                    reward,
-                    state.student_optimizer,
-                    clock.step,
-                    old_version,
+            guidance = None
+            if art:
+                guidance = round_guidance(
+                    config, batches, values, reduce=all_reduce_sums
                 )
+            old_version = clock.old_policy_version
+            for inner in range(config.updates_per_round):
+                if art:
+                    evidence = update_art(
+                        config,
+                        roles,
+                        state.student,
+                        batches,
+                        guidance,
+                        state.student_optimizer,
+                        r,
+                        inner,
+                    )
+                else:
+                    evidence = update_round(
+                        config,
+                        roles,
+                        state.student,
+                        batches,
+                        values,
+                        state.student_optimizer,
+                        clock.step,
+                        old_version,
+                    )
                 clock.update(config)
                 synchronize(device)
                 evidence.update(
                     step=clock.step,
                     collection_round=r,
                     inner_update=inner,
-                    old_version=old_version,
                     cursor=cursor.state_dict(),
                     reward=state.last_reward,
                     seconds=time.monotonic() - start,

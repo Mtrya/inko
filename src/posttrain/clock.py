@@ -8,7 +8,7 @@ from .schema import require
 
 def rounds_before(config, step):
     """Committed collection rounds at a stop boundary; stops split no round."""
-    updates = config.nft.updates_per_round
+    updates = config.updates_per_round
     require(
         0 <= step <= config.training.steps, "generator step outside the training plan"
     )
@@ -40,13 +40,18 @@ class Clock:
 
     def commit_round(self, config, decay):
         self.check_round(config)
-        require(decay is not None, "a committed round requires its old-policy refresh")
         self.committed_rounds += 1
-        self.old_policy_version += 1
-        self.old_refresh_decay = decay
         self.samples_scored += (
             config.collection.prompts_per_round * config.collection.draws_per_prompt
         )
+        if config.objective == "nft":
+            require(
+                decay is not None, "a committed round requires its old-policy refresh"
+            )
+            self.old_policy_version += 1
+            self.old_refresh_decay = decay
+        else:
+            require(decay is None, "the ART objective has no old-policy refresh")
 
     def check_round(self, config):
         require(
@@ -67,21 +72,29 @@ class Clock:
             "invalid committed training clock",
         )
         total = config.collection.prompts_per_round * config.collection.draws_per_prompt
+        refreshes = self.committed_rounds if config.objective == "nft" else 0
         require(
             self.committed_rounds == rounds_before(config, self.step)
             and self.samples_used == total * self.step
             and self.samples_scored == total * self.committed_rounds
-            and self.old_policy_version == self.committed_rounds,
+            and self.old_policy_version == refreshes,
             "committed step/round/sample clocks differ",
         )
-        expected = (
-            refresh_decay(config.old_policy, self.committed_rounds - 1)
-            if self.committed_rounds
-            else None
-        )
-        require(
-            self.old_refresh_decay == expected, "committed old-policy schedule differs"
-        )
+        if config.objective == "nft":
+            expected = (
+                refresh_decay(config.old_policy, self.committed_rounds - 1)
+                if self.committed_rounds
+                else None
+            )
+            require(
+                self.old_refresh_decay == expected,
+                "committed old-policy schedule differs",
+            )
+        else:
+            require(
+                self.old_refresh_decay is None,
+                "the ART objective has no old-policy schedule",
+            )
 
     def state_dict(self):
         return asdict(self)

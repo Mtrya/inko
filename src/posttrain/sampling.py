@@ -56,6 +56,8 @@ def time_grid(steps: int, shift: float) -> tuple[float, ...]:
 class Rollout:
     terminal: torch.Tensor
     grid: tuple[float, ...]
+    states: torch.Tensor | None = None  # [steps, batch, ...] prediction-site latents
+    predictions: torch.Tensor | None = None  # [steps, batch, ...] velocities there
 
 
 @torch.no_grad()
@@ -66,6 +68,7 @@ def sample(
     *,
     grid: tuple[float, ...],
     device="cpu",
+    trajectory=False,
 ) -> Rollout:
     if (
         len(grid) < 2
@@ -78,13 +81,23 @@ def sample(
     if not seeds:
         raise ValueError("empty sampling batch")
     x = sample_noise(seeds, shape, stream="initial", device=device)
+    states, predictions = [], []
     for k, (t, next_t) in enumerate(itertools.pairwise(grid)):
         velocity = model(
             x, torch.full((len(seeds),), t, device=device, dtype=torch.float32)
         ).float()
         if velocity.shape != x.shape:
             raise ValueError("model velocity shape differs from latent")
+        if trajectory:
+            # Detached state and prediction at this step, before the update.
+            states.append(x)
+            predictions.append(velocity)
         x = x + (next_t - t) * velocity
         if not torch.isfinite(x).all():
             raise FloatingPointError(f"nonfinite latent at step {k}")
-    return Rollout(x.detach(), grid)
+    return Rollout(
+        x.detach(),
+        grid,
+        None if not trajectory else torch.stack(states),
+        None if not trajectory else torch.stack(predictions),
+    )

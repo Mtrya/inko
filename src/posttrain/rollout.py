@@ -145,6 +145,86 @@ def collect_nft(
     )
 
 
+@dataclass
+class ARTRollout:
+    sample_ids: list[str]
+    prompt_ids: list[str]
+    draw_indices: list[int]
+    seeds: list[int]
+    generator_step: int
+    terminal: torch.Tensor  # [batch, ...] endpoints of the round's draws
+    states: torch.Tensor  # [batch, steps, ...] visited trajectory states
+    predictions: torch.Tensor  # [batch, steps, ...] rollout velocities there
+    grid: tuple[float, ...]
+    conditioning: tuple
+    collection_round: int
+
+
+@torch.no_grad()
+def collect_art(
+    field,
+    config,
+    prompts,
+    sample_ids,
+    draw_indices,
+    round_index,
+    generator_step,
+    conditioning,
+    device,
+):
+    """Roll out the live policy and cache the trajectory it visits."""
+    c = config.collection
+    seeds = [
+        stream_seed(
+            config.training.seed,
+            round_index,
+            key,
+            "art_collection",
+            generator_step=generator_step,
+        )
+        for key in sample_ids
+    ]
+    shape = (16, c.height // 8, c.width // 8)
+    shift = (
+        max(1, ((shape[1] * shape[2] / 4) / 256) ** 0.5) if c.shift == "shape" else 1
+    )
+    result = sample(
+        lambda x, t: field(x, t, conditioning),
+        seeds,
+        shape,
+        grid=time_grid(c.steps, shift),
+        device=device,
+        trajectory=True,
+    )
+    # Trajectory storage is host-resident fp32: the anchor is exactly the
+    # prediction the rollout made, matching the reference implementation.
+    return ARTRollout(
+        sample_ids,
+        [p["id"] for p in prompts],
+        list(draw_indices),
+        seeds,
+        generator_step,
+        result.terminal,
+        result.states.transpose(0, 1).cpu().contiguous(),
+        result.predictions.transpose(0, 1).cpu().contiguous(),
+        result.grid,
+        conditioning,
+        round_index,
+    )
+
+
+def art_window(config, rollout, window):
+    """Sample positions of one ART update window; the round's draws split in halves."""
+    total = config.collection.prompts_per_round * config.collection.draws_per_prompt
+    if window not in (0, 1):
+        raise ValueError("ART trains two windows per collection round")
+    return [
+        index
+        for index, draw in enumerate(rollout.draw_indices)
+        if (draw < total // 2) == (window == 0)
+    ]
+
+
 def nft_inputs(config, rollout, generator_step, draw):
     seeds = [
         stream_seed(

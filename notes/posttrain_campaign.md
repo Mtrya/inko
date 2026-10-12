@@ -1,10 +1,11 @@
 # Posttrain campaign execution
 
-The trainer runs one stage of DiffusionNFT on a fixed base model. A
-configuration defines the experiment; the [contract](posttrain_contract.md)
-defines the loss and the [recipe](posttrain_recipe.md) records which values are
-pinned and which are open. The runner never reduces image size, sample counts,
-update counts, model capacity or precision after a failure.
+The trainer runs one stage on a fixed base model, with DiffusionNFT or
+DiffusionART selected by the run config. A configuration defines the experiment;
+the [contract](posttrain_contract.md) defines the loss and the
+[recipe](posttrain_recipe.md) records which values are pinned and which are
+open. The runner never reduces image size, sample counts, update counts, model
+capacity or precision after a failure.
 
 ## Training controls
 
@@ -14,11 +15,13 @@ override. `configs/posttrain.toml` is the reference run.
 
 | Section | Meaning |
 |---|---|
+| `objective` | Top-level objective selector, `"nft"` or `"art"`. Each value requires exactly its own section and forbids the other. |
 | `initialization` | Asset ID and weight view (`live` or `ema`) of the base model. The asset ID resolves through the local `--assets` map. |
 | `student` | `full` tuning, or weight LoRA with rank, alpha and target set (`attention` or `attention_mlp`). |
 | `collection` | Prompt suite, prompts per round, draws per prompt, resolution, sampler rule, step count, guidance, shift and text exit layer. |
-| `nft` | Branch parameterization, advantage scaling and clip, `beta`, reduction epsilon, reference coefficient, inner updates per round, time-draw count, time distribution and bounds. |
-| `old_policy` | Refresh strategy (`copy`, `constant`, `linear_ramp`), decay values, and the horizon counted in committed rounds. |
+| `nft` | NFT branch parameterization, advantage scaling and clip, `beta`, reduction epsilon, reference coefficient, inner updates per round, time-draw count, time distribution and bounds. Required under `objective = "nft"`. |
+| `art` | The ART reference coefficient and nothing else: guidance, two update windows, mask and time weights are the paper's constants. Required under `objective = "art"`. |
+| `old_policy` | NFT refresh strategy (`copy`, `constant`, `linear_ramp`), decay values, and the horizon counted in committed rounds. Required under `objective = "nft"` and rejected under `objective = "art"`. |
 | `student_optimizer` | `adamw` or `muon_adamw` with learning rates, betas, weight decay, clip limit and LR schedule. |
 | `execution` | Learner devices, microbatch, timeouts, precision, activation checkpointing, RoCE and deterministic-kernel policy. |
 | `training` | Seed, total student updates, checkpoint interval, and named EMA shadows with decay and storage device. |
@@ -26,11 +29,17 @@ override. `configs/posttrain.toml` is the reference run.
 
 A round is `prompts_per_round * draws_per_prompt` samples that must divide
 evenly across learner devices and microbatches. `training.steps` and
-`training.checkpoint_every` must contain whole rounds of
-`nft.updates_per_round` updates. Validate before launch:
+`training.checkpoint_every` must contain whole rounds of the objective's
+updates: `nft.updates_per_round` for NFT, two for ART. An ART run additionally
+requires `collection.guidance = 1` (it trains against the rollout's own cached
+prediction, so the rollout cannot use CFG) and a round that divides evenly into
+the two windows across learners
+(`prompts_per_round * draws_per_prompt % (2 * learners) == 0`). Validate before
+launch:
 
 ```bash
 python -m src.posttrain.train --config configs/posttrain.toml --validate-only
+python -m src.posttrain.train --config configs/posttrain_art.toml --validate-only
 ```
 
 ## Launch, stop and resume
@@ -60,6 +69,35 @@ without `--resume`; a run that stopped before its first publication restarts
 from the declared initialization. Checkpoints are named
 `step-<run-local-student-update>`; `--stop-after` and the horizon always publish
 one, and a completed run's exports come from those directories.
+
+## ART arm
+
+`configs/posttrain_art.toml` mirrors `configs/posttrain.toml` with
+`objective = "art"`, an `[art]` section, and no `[nft]` or `[old_policy]`. Its
+round mechanics differ in four ways:
+
+- Collection rolls out the live student and caches the visited latent and the
+  velocity the rollout produced at every sampler step. The cache is fp32,
+  host-resident and sharded per learner rank, and a rank's shard is released
+  when the round's updates end. The NFT arm never allocates it.
+- Guidance is a per-prompt reward-endpoint covariance over the round, reduced
+  across learner ranks by two all-reduces of partial statistics (moments, then
+  absolute deviations from the global means) before any direction exists. A
+  prompt group with no reward spread is inactive, and its items train on
+  nothing.
+- Two optimizer updates follow each round, each over one disjoint half of the
+  round's draws and all of their trajectory sites, against the same frozen
+  targets. No old-policy refresh happens, so `old_policy_version` stays 0 and a
+  checkpoint carries no old role.
+- Update records add `window`, `art_items`, `art_kept` and `art_masked`, and
+  tracking publishes `train/art_masked_fraction` next to the loss terms.
+
+`execution.microbatch` counts items per student forward under both objectives,
+so under ART it chunks the trajectory sites of one draw rather than a draw
+group. Update cost scales with the trained sites: a round runs two windows of
+`draws/2 * steps` forwards per learner, so the ART arm's student forward count
+is `steps` times the NFT arm's at the same round workload, while rollout and
+scoring costs are identical.
 
 ## Evaluation cadence
 
@@ -133,8 +171,9 @@ ballot that chooses a third arm cannot order another arm against the reference.
 ## Cost and scope
 
 Every arm declares its question, its decision and its budget before launch.
-SwanLab update records carry the loss, its reference and NFT terms, gradient
-norm, learning rates, and reward statistics per committed update; the interval
-evaluation carries the benchmark and diversity panels. Read the full reward
-curve and the internal metrics before declaring any result: an endpoint score
-alone cannot select a variant, and HPS can rise on visibly degraded outputs.
+SwanLab update records carry the loss, its reference and objective terms,
+gradient norm, learning rates, and reward statistics per committed update, plus
+the ART masked fraction when that objective is active; the interval evaluation
+carries the benchmark and diversity panels. Read the full reward curve and the
+internal metrics before declaring any result: an endpoint score alone cannot
+select a variant, and HPS can rise on visibly degraded outputs.

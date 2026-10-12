@@ -45,6 +45,13 @@ def global_loss(local_losses, global_samples):
     return local_losses.float().sum() * (world_size() / global_samples)
 
 
+def all_reduce_sums(value):
+    """Sum partial statistics across learners; identity outside a process group."""
+    if dist.is_initialized():
+        dist.all_reduce(value)
+    return value
+
+
 def unanimous_finite(valid, device):
     failed = torch.tensor(int(not valid), device=device, dtype=torch.int32)
     if dist.is_initialized():

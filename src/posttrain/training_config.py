@@ -9,6 +9,9 @@ from pathlib import Path
 from .config import Checkpoint, Scorer
 from .schema import decode, name, require
 
+OBJECTIVES = {"nft", "art"}
+ART_UPDATES_PER_ROUND = 2
+
 
 @dataclass(frozen=True)
 class Student:
@@ -44,6 +47,11 @@ class NFT:
     time_distribution: str
     time_min: float
     time_max: float
+
+
+@dataclass(frozen=True)
+class ART:
+    reference_coefficient: float
 
 
 @dataclass(frozen=True)
@@ -150,24 +158,47 @@ class Rewards:
 
 @dataclass(frozen=True)
 class TrainingConfig:
+    objective: str
     initialization: Checkpoint
     student: Student
     collection: Collection
-    nft: NFT
-    old_policy: OldPolicy
+    nft: NFT | None
+    art: ART | None
+    old_policy: OldPolicy | None
     student_optimizer: Optimizer
     execution: TrainingExecution
     training: Training
     scorers: tuple[Scorer, ...]
     rewards: Rewards
 
+    @property
+    def updates_per_round(self):
+        return (
+            ART_UPDATES_PER_ROUND
+            if self.objective == "art"
+            else self.nft.updates_per_round
+        )
+
+    @property
+    def reference_coefficient(self):
+        return (self.nft if self.objective == "nft" else self.art).reference_coefficient
+
     def __post_init__(self):
-        s, c, o, e, t = (
+        s, c, e, t = (
             self.student,
             self.collection,
-            self.nft,
             self.execution,
             self.training,
+        )
+        require(self.objective in OBJECTIVES, "unknown training objective")
+        require(
+            (self.nft is not None) == (self.objective == "nft")
+            and (self.art is not None) == (self.objective == "art"),
+            "training objective requires its own config section",
+        )
+        require(
+            (self.old_policy is not None) == (self.objective == "nft"),
+            "old-policy refresh belongs to the NFT objective",
         )
         require(
             self.initialization.weights in {"live", "ema"},
@@ -181,9 +212,7 @@ class TrainingConfig:
             "invalid student mode/targets",
         )
         require(
-            c.steps > 0
-            and c.shift in {"shape", "none"}
-            and c.guidance >= 0,
+            c.steps > 0 and c.shift in {"shape", "none"} and c.guidance >= 0,
             "invalid collection sampler",
         )
         require(
@@ -191,35 +220,7 @@ class TrainingConfig:
             and all(n > 0 and n % 16 == 0 for n in (c.height, c.width)),
             "invalid collection sizes",
         )
-        require(c.draws_per_prompt >= 2, "NFT requires at least two draws per prompt")
-        require(
-            o.parameterization in {"clean_adaptive", "velocity_mse"}
-            and o.advantage_scale in {"group", "round"}
-            and min(
-                o.advantage_clip,
-                o.beta,
-                o.epsilon,
-                o.updates_per_round,
-                o.time_draws,
-            )
-            > 0
-            and all(
-                math.isfinite(v)
-                for v in (o.advantage_clip, o.beta, o.epsilon, o.reference_coefficient)
-            )
-            and o.reference_coefficient >= 0
-            and o.time_distribution in {"uniform", "grid"}
-            and 0 < o.time_min < o.time_max < 1,
-            "invalid NFT loss/time/group configuration",
-        )
-        old = self.old_policy
-        require(
-            old.strategy in {"copy", "constant", "linear_ramp"}
-            and 0 <= old.decay < 1
-            and 0 <= old.decay_start <= old.decay_end < 1
-            and old.horizon > 0,
-            "invalid old-policy refresh schedule",
-        )
+        require(c.draws_per_prompt >= 2, "at least two draws per prompt are required")
         require(
             bool(e.learner_devices)
             and min(e.learner_devices) >= 0
@@ -253,14 +254,64 @@ class TrainingConfig:
             "invalid training length/seed/EMA",
         )
         require(
-            t.steps % o.updates_per_round == 0
-            and t.checkpoint_every % o.updates_per_round == 0,
+            t.steps % self.updates_per_round == 0
+            and t.checkpoint_every % self.updates_per_round == 0,
             "training length/checkpoint interval must contain complete rounds",
         )
         require(
             self.student_optimizer.warmup_steps <= t.steps,
             "student warmup exceeds the training horizon",
         )
+        if self.objective == "art":
+            require(
+                c.prompts_per_round * c.draws_per_prompt % (2 * len(e.learner_devices))
+                == 0,
+                "ART round must split evenly into two update windows",
+            )
+            require(
+                c.guidance == 1,
+                "ART caches the anchor it trains against; the rollout cannot use CFG",
+            )
+            require(
+                math.isfinite(self.art.reference_coefficient)
+                and self.art.reference_coefficient >= 0,
+                "invalid ART reference coefficient",
+            )
+        else:
+            o = self.nft
+            require(
+                o.parameterization in {"clean_adaptive", "velocity_mse"}
+                and o.advantage_scale in {"group", "round"}
+                and min(
+                    o.advantage_clip,
+                    o.beta,
+                    o.epsilon,
+                    o.updates_per_round,
+                    o.time_draws,
+                )
+                > 0
+                and all(
+                    math.isfinite(v)
+                    for v in (
+                        o.advantage_clip,
+                        o.beta,
+                        o.epsilon,
+                        o.reference_coefficient,
+                    )
+                )
+                and o.reference_coefficient >= 0
+                and o.time_distribution in {"uniform", "grid"}
+                and 0 < o.time_min < o.time_max < 1,
+                "invalid NFT loss/time/group configuration",
+            )
+            old = self.old_policy
+            require(
+                old.strategy in {"copy", "constant", "linear_ramp"}
+                and 0 <= old.decay < 1
+                and 0 <= old.decay_start <= old.decay_end < 1
+                and old.horizon > 0,
+                "invalid old-policy refresh schedule",
+            )
         available = {f"{s.id}.{ch.name}": ch for s in self.scorers for ch in s.outputs}
         channels = self.rewards.channels
         require(

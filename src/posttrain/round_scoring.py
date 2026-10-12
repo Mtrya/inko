@@ -46,12 +46,17 @@ def publish_collection(
             image.save(temporary, format="PNG")
             temporary.replace(image_path)
             latent_path = image_path.with_suffix(".pt")
+            # The ART rollout is the live student at guidance 1: it carries no
+            # unconditional conditioning, and its collecting version is the round.
+            unconditional = (
+                None
+                if config.objective == "art" or rollout.unconditional is None
+                else tuple(t[index].cpu() for t in rollout.unconditional)
+            )
             latent = {
                 "terminal": rollout.terminal[index].cpu(),
                 "conditioning": tuple(t[index].cpu() for t in rollout.conditioning),
-                "unconditional": None
-                if rollout.unconditional is None
-                else tuple(t[index].cpu() for t in rollout.unconditional),
+                "unconditional": unconditional,
             }
             torch.save(latent, latent_path)
             records.append(
@@ -59,7 +64,7 @@ def publish_collection(
                     "sample_id": key,
                     "prompt": prompts[prompt_id],
                     "generator_step": rollout.generator_step,
-                    "policy_version": rollout.old_version,
+                    "policy_version": rollout.collection_round,
                     "group_id": prompt_id,
                     "seed": rollout.seeds[index],
                     "image_path": str(image_path),
@@ -70,8 +75,8 @@ def publish_collection(
                         tensor_digest(t[index]) for t in rollout.conditioning
                     ],
                     "unconditional": None
-                    if rollout.unconditional is None
-                    else [tensor_digest(t[index]) for t in rollout.unconditional],
+                    if unconditional is None
+                    else [tensor_digest(t) for t in unconditional],
                 }
             )
     atomic_json(
@@ -104,12 +109,19 @@ def acquire_round(config, clients, records):
         for future in futures:
             scores.extend(future.result())
     ids = sorted(r["sample_id"] for r in records)
-    result = group_advantages(
-        combine_round(ids, scores, config),
-        {r["sample_id"]: r["prompt"]["id"] for r in records},
-        scale=config.nft.advantage_scale,
-        clip=config.nft.advantage_clip,
-        epsilon=config.rewards.epsilon,
+    combined = combine_round(ids, scores, config)
+    # ART guidance regresses on the combined reward itself; the NFT optimality
+    # probability is not part of its loss.
+    result = (
+        combined
+        if config.objective == "art"
+        else group_advantages(
+            combined,
+            {r["sample_id"]: r["prompt"]["id"] for r in records},
+            scale=config.nft.advantage_scale,
+            clip=config.nft.advantage_clip,
+            epsilon=config.rewards.epsilon,
+        )
     )
     return {
         "reward": result,
@@ -147,7 +159,7 @@ def score_ready_round(config, services, output, attempt, step):
     require(
         all(
             r["policy_version"] == policy_version
-            and r["generator_step"] == step * config.nft.updates_per_round
+            and r["generator_step"] == step * config.updates_per_round
             for r in rows
         ),
         "collection policy changed",
@@ -166,6 +178,11 @@ def score_ready_round(config, services, output, attempt, step):
 
 
 def wait_for_rewards(config, output, attempt, step, rank, records):
+    """Wait for the round's reward packet and select its per-sample update input.
+
+    An NFT update consumes the admitted optimality probabilities; ART guidance
+    consumes the combined rewards. Both maps are keyed by sample ID.
+    """
     path = reward_path(output, attempt, step)
     deadline = time.monotonic() + config.execution.round_timeout
     while not path.exists():
@@ -181,11 +198,10 @@ def wait_for_rewards(config, output, attempt, step, rank, records):
         "reward/collection identity mismatch",
     )
     reward = packet["reward"]
-    probabilities = dict(
-        zip(reward["sample_ids"], reward["probabilities"], strict=True)
-    )
+    key = "combined" if config.objective == "art" else "probabilities"
+    values = dict(zip(reward["sample_ids"], reward[key], strict=True))
     require(
-        {r["sample_id"] for r in records} <= probabilities.keys(),
+        {r["sample_id"] for r in records} <= values.keys(),
         "missing local reward",
     )
-    return probabilities, reward
+    return values, reward

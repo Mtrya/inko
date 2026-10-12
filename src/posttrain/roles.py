@@ -41,10 +41,12 @@ class Roles:
             config.execution.activation_checkpointing
         )
         self.student_field = Velocity(self.student, config.execution.precision)
-        self.old = self.frozen_policy()
-        self.old_field = Velocity(self.old, config.execution.precision)
+        self.old = self.old_field = None
+        if config.objective == "nft":
+            self.old = self.frozen_policy()
+            self.old_field = Velocity(self.old, config.execution.precision)
         self.reference = self.reference_field = None
-        if config.nft.reference_coefficient > 0:
+        if config.reference_coefficient > 0:
             self.reference = self.frozen_policy()
             self.reference_field = Velocity(self.reference, config.execution.precision)
         self.reset_ema()
@@ -60,8 +62,8 @@ class Roles:
 
     @torch.no_grad()
     def refresh_old(self, decay):
-        if not 0 <= decay < 1:
-            raise ValueError("old refresh requires a valid decay")
+        if self.old is None or not 0 <= decay < 1:
+            raise ValueError("old refresh requires an active policy and valid decay")
         current, old = (
             dict(self.student.named_parameters()),
             dict(self.old.named_parameters()),
@@ -101,7 +103,7 @@ class Roles:
     def state_dict(self):
         return {
             "student": self.student.state_dict(),
-            "old": self.old.state_dict(),
+            "old": None if self.old is None else self.old.state_dict(),
             "reference": (
                 None if self.reference is None else self.reference.state_dict()
             ),
