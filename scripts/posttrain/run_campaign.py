@@ -41,8 +41,7 @@ def committed_checkpoints(root):
             and not path.name.startswith(".")
             and (path / "manifest.json").exists()
         ):
-            manifest = inspect(path)
-            found.append((manifest["step"], manifest["initial_fit_steps"], path))
+            found.append((inspect(path)["step"], path))
     return sorted(found)
 
 
@@ -85,7 +84,6 @@ def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker
             Arm(
                 asset,
                 Checkpoint(asset, view),
-                c.rule,
                 c.steps,
                 c.guidance,
                 c.shift,
@@ -120,7 +118,7 @@ def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker
             tracker.evaluation(
                 report,
                 sorted((output / f"{suite}-blind").glob("*.png")),
-                training.fake.initial_steps + manifest["step"],
+                manifest["step"],
             )
     receipt = {
         "step": manifest["step"],
@@ -159,16 +157,14 @@ def execute(config_path, interval_path, assets_path, output, *, track=False):
                 REPO / training.collection.prompts,
                 {"1:1": (training.collection.height, training.collection.width)},
             )
-            expected = training_contract(training, assets, prompts)
+            expected = training_contract(training, prompts)
             require(
-                all(
-                    inspect(path)["contract"] == expected for _, _, path in checkpoints
-                ),
+                all(inspect(path)["contract"] == expected for _, path in checkpoints),
                 "campaign recovery contract differs",
             )
         # Reconcile evaluations from already committed checkpoints before
         # resuming training. An interrupted evaluation never becomes a skip.
-        for step, _, path in checkpoints:
+        for step, path in checkpoints:
             if evaluation_due(training, interval, step):
                 evaluate_checkpoint(
                     path,
@@ -178,7 +174,7 @@ def execute(config_path, interval_path, assets_path, output, *, track=False):
                     output / "evaluation" / path.name,
                     track=track,
                 )
-        last = checkpoints[-1][2] if checkpoints else None
+        last = checkpoints[-1][1] if checkpoints else None
         completed = checkpoints[-1][0] if checkpoints else 0
         for stop in stops:
             if stop <= completed:

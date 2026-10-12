@@ -1,4 +1,4 @@
-"""Inko-time sampling with detached selected-step state and sample-local RNG."""
+"""Deterministic Euler sampling with sample-local RNG."""
 
 import hashlib
 import itertools
@@ -55,11 +55,7 @@ def time_grid(steps: int, shift: float) -> tuple[float, ...]:
 @dataclass
 class Rollout:
     terminal: torch.Tensor
-    selected_input: torch.Tensor | None
-    selected_indices: torch.Tensor | None
-    selected_times: torch.Tensor | None
     grid: tuple[float, ...]
-    selected_prediction: torch.Tensor | None
 
 
 @torch.no_grad()
@@ -68,13 +64,9 @@ def sample(
     seeds: list[int],
     shape: tuple[int, int, int],
     *,
-    rule: str,
     grid: tuple[float, ...],
     device="cpu",
-    selected_indices: list[int] | None = None,
 ) -> Rollout:
-    if rule not in {"euler", "renoise"}:
-        raise ValueError("unknown sampling rule")
     if (
         len(grid) < 2
         or grid[0] != 0
@@ -86,42 +78,13 @@ def sample(
     if not seeds:
         raise ValueError("empty sampling batch")
     x = sample_noise(seeds, shape, stream="initial", device=device)
-    selected = indices = times = prediction = None
-    if selected_indices is not None:
-        if len(selected_indices) != len(seeds) or any(
-            type(k) is not int or not 0 <= k < len(grid) - 1 for k in selected_indices
-        ):
-            raise ValueError("one valid selected index is required per sample")
-        indices = torch.tensor(selected_indices, device=device)
-        selected = torch.empty_like(x)
-        prediction = torch.empty_like(x)
-        times = torch.tensor([grid[k] for k in selected_indices], device=device)
     for k, (t, next_t) in enumerate(itertools.pairwise(grid)):
-        if selected is not None:
-            mask = indices == k
-            selected[mask] = x[mask]
         velocity = model(
             x, torch.full((len(seeds),), t, device=device, dtype=torch.float32)
         ).float()
         if velocity.shape != x.shape:
             raise ValueError("model velocity shape differs from latent")
-        if prediction is not None:
-            prediction[mask] = (x + (1 - t) * velocity)[mask]
-        if rule == "euler":
-            x = x + (next_t - t) * velocity
-        else:
-            clean = x + (1 - t) * velocity
-            x = (
-                clean
-                if k == len(grid) - 2
-                else (
-                    next_t * clean
-                    + (1 - next_t)
-                    * sample_noise(
-                        seeds, shape, stream="transition", index=k + 1, device=device
-                    )
-                )
-            )
+        x = x + (next_t - t) * velocity
         if not torch.isfinite(x).all():
-            raise FloatingPointError(f"nonfinite {rule} latent at step {k}")
-    return Rollout(x.detach(), selected, indices, times, grid, prediction)
+            raise FloatingPointError(f"nonfinite latent at step {k}")
+    return Rollout(x.detach(), grid)

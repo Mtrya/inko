@@ -1,8 +1,6 @@
-"""Separate weight LoRA and post-projection Q/V score parameterizations."""
+"""Weight LoRA adapters on resolved Inko attention and MLP projections."""
 
 import math
-import threading
-from contextlib import contextmanager
 
 import torch
 from torch import nn
@@ -36,44 +34,10 @@ class WeightLoRA(nn.Module):
         return layer
 
 
-class OutputQV(nn.Module):
-    def __init__(self, base, rank, multiplier):
-        super().__init__()
-        self.base = base.requires_grad_(False)
-        width = base.out_features // 3
-        if base.out_features != 3 * base.in_features:
-            raise ValueError("score adapters require fused full-width QKV")
-        self.qa = nn.Linear(width, rank, bias=False).to(base.weight)
-        self.qb = nn.Linear(rank, width, bias=False).to(base.weight)
-        self.va = nn.Linear(width, rank, bias=False).to(base.weight)
-        self.vb = nn.Linear(rank, width, bias=False).to(base.weight)
-        for layer in (self.qa, self.va):
-            nn.init.normal_(layer.weight, mean=0, std=1)
-        for layer in (self.qb, self.vb):
-            nn.init.zeros_(layer.weight)
-        self.multiplier, self.view_scale = multiplier, 1.0
-        self.view_owner = None
-
-    def forward(self, x):
-        if self.view_owner is not None and self.view_owner != threading.get_ident():
-            raise RuntimeError(
-                "score forward overlaps a different worker thread's view"
-            )
-        q, k, v = self.base(x).chunk(3, dim=-1)
-        if self.view_scale != 0:
-            scale = self.multiplier * self.view_scale
-            q = q + scale * self.qb(self.qa(q))
-            v = v + scale * self.vb(self.va(v))
-        return torch.cat((q, k, v), dim=-1)
-
-
-def install_adapters(model, *, kind, rank, scale, targets="attention"):
-    if kind not in {"weight", "qv"} or targets not in {"attention", "attention_mlp"}:
-        raise ValueError("unsupported adapter kind/targets")
-    if rank <= 0 or scale <= 0 or (kind == "qv" and targets != "attention"):
+def install_adapters(model, *, rank, scale, targets="attention"):
+    if targets not in {"attention", "attention_mlp"} or rank <= 0 or scale <= 0:
         raise ValueError("invalid adapter dimensions/targets")
     attention = {"qkv_img", "qkv_txt", "proj_img", "proj_txt", "qkv", "proj"}
-    qkv = {"qkv_img", "qkv_txt", "qkv"}
     selected = []
     model.requires_grad_(False)
     for name, layer in list(model.named_modules()):
@@ -84,84 +48,25 @@ def install_adapters(model, *, kind, rank, scale, targets="attention"):
             or not isinstance(layer, nn.Linear)
         ):
             continue
-        matched = pieces[2] == "attn" and pieces[3] in (
-            attention if kind == "weight" else qkv
-        )
+        matched = pieces[2] == "attn" and pieces[3] in attention
         matched |= (
-            kind == "weight"
-            and targets == "attention_mlp"
+            targets == "attention_mlp"
             and pieces[2] in {"mlp", "mlp_img", "mlp_txt"}
             and pieces[3] in {"up_proj", "down_proj"}
         )
         if matched:
             parent = model.get_submodule(".".join(pieces[:-1]))
-            setattr(
-                parent,
-                pieces[-1],
-                (WeightLoRA if kind == "weight" else OutputQV)(layer, rank, scale),
-            )
+            setattr(parent, pieces[-1], WeightLoRA(layer, rank, scale))
             selected.append(name)
     if not selected:
         raise ValueError("no supported Inko adapter targets resolved")
     return tuple(selected)
 
 
-def prepare_score_views(model):
-    """Only shared Q/V models need a lock; student exports remain copyable."""
-    if any(isinstance(m, OutputQV) for m in model.modules()):
-        model.__dict__.setdefault("_score_forward_lock", threading.RLock())
-
-
-@contextmanager
-def score_forward(model, *, real=False):
-    """Hold view admission through the complete conditional/CFG forward."""
-    lock = model.__dict__.get("_score_forward_lock")
-    if lock is None:
-        yield
-        return
-    if not lock.acquire(blocking=False):
-        raise RuntimeError("overlapping score forwards/views are forbidden")
-    try:
-        active = model.__dict__.get("_score_view_owner") is not None
-        if real != active:
-            raise RuntimeError("score forward role does not match the active view")
-        yield
-    finally:
-        lock.release()
-
-
-@contextmanager
-def score_view(model, scale):
-    adapters = [m for m in model.modules() if isinstance(m, OutputQV)]
-    if not adapters:
-        raise ValueError("score views require shared Q/V adapters")
-    prepare_score_views(model)
-    lock = model.__dict__["_score_forward_lock"]
-    if not lock.acquire(blocking=False):
-        raise RuntimeError("overlapping score views are forbidden")
-    if model.__dict__.get("_score_view_owner") is not None:
-        lock.release()
-        raise RuntimeError("overlapping score views are forbidden")
-    previous = [(m.view_scale, m.view_owner) for m in adapters]
-    try:
-        model.__dict__["_score_view_owner"] = threading.get_ident()
-        for m in adapters:
-            m.view_scale = scale
-            m.view_owner = threading.get_ident()
-        yield model
-    finally:
-        for m, (old, owner) in zip(adapters, previous, strict=True):
-            m.view_scale, m.view_owner = old, owner
-        model.__dict__["_score_view_owner"] = None
-        lock.release()
-
-
 def merge_student(model):
-    """Materialize a detached student copy; score adapters can never be exported."""
+    """Materialize a detached student copy of the merged weight-LoRA weights."""
     import copy
 
-    if any(isinstance(m, OutputQV) for m in model.modules()):
-        raise ValueError("fake-score adapters are not student export weights")
     result = copy.deepcopy(model).cpu().float()
     for name, module in list(result.named_modules()):
         if isinstance(module, WeightLoRA):

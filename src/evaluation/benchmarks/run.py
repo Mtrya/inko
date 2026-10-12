@@ -267,7 +267,7 @@ def _run(config, assets, prompts, output, *, visual_only, suite):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=REPO / "configs/posttrain.toml")
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument(

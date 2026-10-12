@@ -1,11 +1,10 @@
 # Posttraining evaluation protocol
 
-Status: Stage 6.1.2 real 640p sampling/scoring qualification and independent
-review are complete. The 480k
-EMA, shapes, prompts, and HPSv3/VQAScore v3.1 identities are fixed. These are
-untrained starting controls, not posttraining quality improvements. Full-run preparation is a later
-work layer. See the [contract](posttrain_contract.md) and
-[recipe](posttrain_recipe.md).
+Status: the protocol is being applied to a single-stage DiffusionNFT run on the
+600k pretrain EMA at 896p. The sampling/scoring harness, the prompt suites and
+the two scorer services were exercised at 640p with the 480k EMA; the current
+envelope is heavier and its own bounded qualification is still required. See
+the [contract](posttrain_contract.md) and [recipe](posttrain_recipe.md).
 
 ## Evaluation ownership
 
@@ -27,14 +26,14 @@ or an observable difference between variants. This does not require preparing
 the full-run data distribution, a reward ensemble, or a new reference-image
 corpus. The initial inputs are:
 
-| Input | Choice | Evidence and remaining scope |
+| Input | Choice | Remaining scope |
 |---|---|---|
-| Initialization | Preserved 480k EMA, at 640p | Bringup completed; retain observed prompt-following limitations |
-| Rollout prompts | Fixed 512-prompt subset of DiffusionNFT's `pickscore/train.txt`; 32 of these for bring-up | Manifests prepared; semantic overlap review can refine later comparisons |
-| Scored development benchmark | 200 unique DrawBench prompts, one fixed seed each; fixed 16-prompt subset for bring-up | 600 real images and 1,200 required scores complete; one seed per prompt |
-| Visual monitoring | All 48 entries of [monitor.jsonl](../configs/prompts/monitor.jsonl), with existing seeds and aspects | All 144 images inspected; three actual shapes exercised |
+| Initialization | 600k pretrain EMA, at 896p | 896p generation, memory and round time need their own qualification |
+| Rollout prompts | Fixed 512-prompt subset of DiffusionNFT's `pickscore/train.txt`; 32 of these for bring-up | Manifest prepared; semantic overlap review can refine later comparisons |
+| Scored development benchmark | 200 unique DrawBench prompts, one fixed seed each; fixed 16-prompt subset for bring-up | Coverage was exercised at 640p; rerun at 896p before comparing variants |
+| Visual monitoring | All 48 entries of [monitor.jsonl](../configs/prompts/monitor.jsonl), with existing seeds and aspects | Bilingual and multi-seed scoring remain unqualified |
 | Reward/score clients | HPSv3 and VQAScore v3.1 with Qwen3-VL-8B-Instruct; no custom VLM-rubric scorer | Prepared assets verified; real Ascend bringup and service restart completed |
-| Initial report | Separate raw results, paired differences, scene-clustered bootstrap, failures, and cost telemetry | Raw/paired reports complete; blinded-position review of all bringup/monitor and 24 development prompts |
+| Initial report | Separate raw results, paired differences, scene-clustered bootstrap, failures, and cost telemetry | Raw/paired reports complete for the earlier envelope |
 | Diversity check | Multiple fixed seeds on a small declared subset when comparing trained variants | Select the subset and draw count before the comparison |
 
 The inspected [DiffusionNFT prompt source](https://github.com/NVlabs/DiffusionNFT/tree/cbb14f84b8312b620390dfcbe2fab69c1383b104/dataset)
@@ -89,21 +88,20 @@ The first benchmark report contains raw held-out scores, paired score changes,
 blinded wins/ties/regressions, images, score failures, and basic cost telemetry.
 If both scorers are optimized, both held-out metrics remain in-scorer signals;
 blinded review supplies an additional view. An independent composition benchmark
-can be added during layer 1 when needed to resolve a selection. Do not claim
-independent reward-model validation until an independent evaluator has been used.
+can be added during the first work layer when needed to resolve a selection. Do
+not claim independent reward-model validation until an independent evaluator
+has been used.
 
 KID/reference-corpus preparation and broad benchmark coverage are not entry
-requirements for the first increment. The broader evidence table below describes
-later comparisons and final qualification. Expand development evaluation only
-when a question or an ambiguous result needs it; algorithm selection must carry
-the limits of the evidence actually collected. A tiny panel can detect failures
-and compare visible cases, but cannot establish broad superiority.
+requirements for the first increment. Expand development evaluation only when a
+question or an ambiguous result needs it; algorithm selection must carry the
+limits of the evidence actually collected. A tiny panel can detect failures and
+compare visible cases, but cannot establish broad superiority.
 
-Use one preserved checkpoint for a comparison. Algorithm development can start
+Use one preserved checkpoint for a comparison, and record the weight view
+(`live` or a named EMA) with every result. Algorithm development can start
 before a particular pretraining endpoint exists; replace the reference only via
-an explicit comparison boundary. Use 640p and record the exact aspect-dependent
-shapes. Higher-resolution validation becomes necessary when the algorithm
-choice depends on it, not as a prerequisite for preparing the first suite.
+an explicit comparison boundary.
 
 ## Suites and splits
 
@@ -116,14 +114,13 @@ Record prompt bytes or their content hashes with every result.
 |---|---|
 | Rollout training | Online sample collection and reward optimization. |
 | Development evaluation | Repeated variant selection and diagnosis; disjoint from rollout training. |
-| Final evaluation | Held out from recipe selection and used for the final assessment. The confirmation suite (`configs/prompts/posttrain_confirmation.jsonl`, 200 prompts) is reserved for this split and wired as the benchmark's fourth suite slot. |
+| Final evaluation | Held out from recipe selection and used for the final assessment. The confirmation suite (`configs/prompts/posttrain_confirmation.jsonl`, 200 prompts) is reserved for this split. |
 | Monitoring panel | Fixed visual comparisons during development; repeated use makes it a development signal. |
 
 Keep translations, paraphrases, and variants of the same underlying scene in the
 same split. Fix evaluation seeds explicitly and distinguish prompt diversity from
-multiple noise seeds for one prompt. Final suite names, sources, and counts
-remain open; keep large external benchmark assets outside the repository and
-record their immutable identity.
+multiple noise seeds for one prompt. The confirmation suite runs once, after the
+final configuration is chosen.
 
 ## Evidence to report
 
@@ -144,23 +141,24 @@ results and regression examples alongside aggregate metrics.
 ## Comparison protocol
 
 Before each experiment, declare its question, primary selection criterion,
-regressions to watch, and budget. Share initialization and prompt/seed assignments
-where the comparison permits. Record code/config/checkpoint identities, live or
-EMA weights, sampler rule, step grid, guidance, resolution, text conditioning,
-VAE/preprocessing, and evaluator version.
+regressions to watch, and budget. Share initialization and prompt/seed
+assignments where the comparison permits. Record code/config/checkpoint
+identities, live or EMA weights, sampler rule, step grid, guidance, resolution,
+text conditioning, VAE/preprocessing, and evaluator version.
 
 Keep those conditions fixed within a comparison unless one is the experimental
 factor. If an evaluator changes, rerun the control. State whether a comparison
 matches optimizer updates, samples, or accelerator-hours; equal update counts
-can conceal different fake-score or reward costs. Compare quality versus measured
-cost as well as endpoint quality when the methods have different workloads.
+can conceal different rollout volumes, scorer demand and waiting. Compare
+quality versus measured cost as well as endpoint quality when the methods have
+different workloads.
 
 Report sample counts, missing scores, exclusions, seed variability, and an
 appropriate uncertainty estimate. Initially use a paired scene-cluster bootstrap
 with repeat count, confidence, and seed in config. With one seed per prompt,
 intervals describe prompt variation conditional on those seeds, not training-run
-or generation-seed variation. An ambiguous result remains inconclusive. Increasing a training reward
-alone cannot select a variant.
+or generation-seed variation. An ambiguous result remains inconclusive. An
+increase in a training reward alone cannot select a variant.
 
 ## Result artifacts
 
@@ -169,22 +167,3 @@ aggregate/slice metrics, generated images, comparison panels, and timings.
 The manifest identifies exact inputs and evaluation settings. Large artifacts
 live in external run storage; machine-specific locations remain in internal logs.
 Keep concise findings and reproducible conditions with any published decision.
-
-## First qualification
-
-The first deliverable is a reproducible comparison of the selected pretrained
-teacher and its initial 8-step student, with real images, scores, and cost records.
-It establishes a baseline, not evidence that distillation has succeeded.
-The development suite, scorer identities, sampling rules, and reporting format
-have been exercised on the target runtime. See the [qualification results and
-limits](posttrain_recipe.md#samplingscoring-qualification): 792 images, 1,296
-required score results, full coverage, real service restart and artifact reuse.
-Severe untrained renoise degradation remains visible; successful execution
-does not establish that the initial few-step sampler is useful.
-
-Algorithm comparisons require sample review and benchmark evidence appropriate
-to their scope. Choose numerical acceptance margins and the cold-start-to-joint
-transition criterion from development experiments and record them before the
-corresponding comparison. Full-run suites, scorer calibration, and final holdout
-selection are prepared in work layer 3; results from the real run are assessed
-in work layer 4.

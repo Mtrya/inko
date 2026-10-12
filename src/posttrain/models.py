@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from .records import file_hash
-from .sampling import noise_seed, sample, time_grid
+from .sampling import sample, time_grid
 
 
 def set_device(kind: str, index: int, cpu_threads: int):
@@ -134,11 +134,6 @@ class Generator:
             else 1.0
         )
         grid = time_grid(arm.steps, shift)
-        indices = None
-        if self.config.sampling.retain_selected:
-            indices = [
-                noise_seed(p["seed"], "selected_index") % arm.steps for p in prompts
-            ]
 
         def velocity(x, t):
             conditional = self.predict_velocity(x, t, (txt, pooled, mask))
@@ -151,10 +146,8 @@ class Generator:
             velocity,
             [p["seed"] for p in prompts],
             shape,
-            rule=arm.rule,
             grid=grid,
             device=self.device,
-            selected_indices=indices,
         )
         synchronize(self.device)
         sampling_end = time.perf_counter()
@@ -172,12 +165,6 @@ class Generator:
             image.save(temporary, format="PNG")
             temporary.replace(image_path)
             tensors = {"terminal": rollout.terminal[i].cpu()}
-            if rollout.selected_input is not None:
-                tensors.update(
-                    selected_input=rollout.selected_input[i].cpu(),
-                    selected_index=rollout.selected_indices[i].cpu(),
-                    selected_time=rollout.selected_times[i].cpu(),
-                )
             latent_path = directory / f"{prompt['id']}.pt"
             temporary = latent_path.with_suffix(".pt.tmp")
             torch.save(tensors, temporary)
@@ -195,18 +182,6 @@ class Generator:
                     "grid": list(grid),
                     "shape": list(shape),
                     "seed": prompt["seed"],
-                    "selected_index": None if indices is None else indices[i],
-                    "noise_specification": {
-                        "initial": prompt["seed"],
-                        "selected_index": noise_seed(prompt["seed"], "selected_index"),
-                        "transitions": [
-                            noise_seed(prompt["seed"], "transition", k)
-                            for k in range(1, arm.steps)
-                        ]
-                        if arm.rule == "renoise"
-                        else [],
-                        "draw_id": prompt["id"],
-                    },
                     "conditioning_identity": task["conditioning_identity"],
                     "policy_version": task["policy_version"],
                 }

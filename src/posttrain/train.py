@@ -1,4 +1,4 @@
-"""Single-host cold/joint trainer with resident learners and independent scorers."""
+"""Single-host NFT trainer with resident learners and independent scorers."""
 
 import argparse
 import fcntl
@@ -25,12 +25,11 @@ def launch(
     stop_after,
     config_path,
     assets_path,
-    stop_after_fit=None,
     track=False,
 ):
+    from .clock import rounds_before
     from .round_scoring import score_ready_round
     from .scoring.lifecycle import Services, isolated_environment
-    from .stages import round_position, rounds_before
     from .tracking import Tracker, TrainingMetrics
 
     output.mkdir(parents=True, exist_ok=True)
@@ -88,11 +87,6 @@ def launch(
             require(saved["step"] <= stop_after, "resume is past requested boundary")
             next_score_round = rounds_before(config, saved["step"])
         last_round = rounds_before(config, stop_after)
-        initial_steps = (
-            0
-            if contract["boundary"] is None
-            else contract["boundary"]["generator_steps"]
-        )
         try:
             tracked = (
                 track
@@ -105,9 +99,7 @@ def launch(
                 tracker = Tracker(
                     output, config_path.stem, resume=resume, config=asdict(config)
                 ).__enter__()
-                telemetry = TrainingMetrics(
-                    tracker, config, output, attempt, saved, stop_after_fit
-                )
+                telemetry = TrainingMetrics(tracker, config, output, attempt, saved)
             services.__enter__()
             atomic_json(
                 output / "service_startup" / f"{attempt}.json", services.startup
@@ -134,10 +126,7 @@ def launch(
                 ]
                 if resume:
                     argv += ["--resume", str(resume)]
-                if stop_after_fit is not None:
-                    argv += ["--stop-after-fit", str(stop_after_fit)]
-                else:
-                    argv += ["--stop-after", str(stop_after)]
+                argv += ["--stop-after", str(stop_after)]
                 processes.append(
                     subprocess.Popen(
                         argv, env=environment, stdout=log, stderr=subprocess.STDOUT
@@ -149,17 +138,8 @@ def launch(
                     telemetry.poll()
                 services.check()
                 while next_score_round < last_round:
-                    stage, _, _ = round_position(config, next_score_round)
-                    scored = (stage == "cold" and config.objective.mode == "rtdm") or (
-                        stage == "joint" and config.joint.nft_coefficient > 0
-                    )
-                    if scored and not score_ready_round(
-                        config,
-                        services,
-                        output,
-                        attempt,
-                        next_score_round,
-                        initial_generator_steps=initial_steps,
+                    if not score_ready_round(
+                        config, services, output, attempt, next_score_round
                     ):
                         break
                     next_score_round += 1
@@ -176,11 +156,6 @@ def launch(
                         progress = list(
                             (output / "updates").glob(
                                 f"{attempt}-round-*-rank-{rank:03d}.json"
-                            )
-                        )
-                        progress += list(
-                            (output / "fitting").glob(
-                                f"{attempt}-fit-*-rank-{rank:03d}.json"
                             )
                         )
                         latest = max(
@@ -202,13 +177,7 @@ def launch(
             if telemetry is not None:
                 telemetry.poll()
                 require(
-                    telemetry.fit
-                    == (
-                        stop_after_fit
-                        if stop_after_fit is not None
-                        else config.fake.initial_steps
-                    )
-                    and (stop_after_fit is not None or telemetry.step == stop_after),
+                    telemetry.step == stop_after,
                     "completed training lacks SwanLab update records",
                 )
         finally:
@@ -228,17 +197,9 @@ def launch(
             if tracker is not None:
                 tracker.__exit__(*error)
     return {
-        "completed_step": stop_after if stop_after_fit is None else 0,
+        "completed_step": stop_after,
         "attempt": attempt,
-        "checkpoint": str(
-            output
-            / "checkpoints"
-            / (
-                f"step-{stop_after:06d}"
-                if stop_after_fit is None
-                else f"fit-{stop_after_fit:06d}"
-            )
-        ),
+        "checkpoint": str(output / "checkpoints" / f"step-{stop_after:06d}"),
     }
 
 
@@ -249,11 +210,6 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--stop-after", type=int)
-    parser.add_argument(
-        "--stop-after-fit",
-        type=int,
-        help="Commit this many initial fake updates, then stop before any student update",
-    )
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument(
         "--track",
@@ -290,13 +246,7 @@ def main():
     output = args.output.resolve()
     stop = args.stop_after if args.stop_after is not None else config.training.steps
     require(0 < stop <= config.training.steps, "invalid stop boundary")
-    if args.stop_after_fit is not None:
-        require(args.stop_after is None, "choose a fitting or student stop boundary")
-        require(
-            0 < args.stop_after_fit <= config.fake.initial_steps,
-            "invalid initial fitting stop boundary",
-        )
-    from .stages import rounds_before
+    from .clock import rounds_before
 
     rounds_before(config, stop)
     if args.learner_rank is not None:
@@ -313,10 +263,9 @@ def main():
             stop,
             args.rendezvous,
             args.attempt,
-            args.stop_after_fit,
         )
     else:
-        contract = training_contract(config, assets, prompts)
+        contract = training_contract(config, prompts)
         print(
             json.dumps(
                 launch(
@@ -328,7 +277,6 @@ def main():
                     stop,
                     args.config.resolve(),
                     args.assets.resolve(),
-                    args.stop_after_fit,
                     args.track,
                 )
             )

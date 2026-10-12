@@ -49,15 +49,13 @@ def load_interval_config(path):
 
 
 def boundaries(config, interval):
-    from .stages import rounds_before
+    from .clock import rounds_before
 
     require(
         set(interval.weights) <= {"live", *(v.name for v in config.training.ema)},
         "evaluation names an absent EMA view",
     )
     steps = set(range(interval.every, config.training.steps + 1, interval.every))
-    if config.stages.cold_steps:
-        steps.add(config.stages.cold_steps)
     steps.add(config.training.steps)
     for step in sorted(steps):
         rounds_before(config, step)
@@ -67,6 +65,5 @@ def boundaries(config, interval):
 def evaluation_due(config, interval, step):
     return step > 0 and (
         step % interval.every == 0
-        or step == config.stages.cold_steps
         or (interval.include_final and step == config.training.steps)
     )

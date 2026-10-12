@@ -1,8 +1,9 @@
 # Inko: Flow Matching on Art Images
 
 Inko is a bilingual text-to-image model with a 532M-parameter DiT and a
-256p → 640p → 896p pretraining curriculum. Training targets Ascend; the
-post-training release target is an 8-step student.
+256p → 640p → 896p pretraining curriculum. Training targets Ascend;
+post-training is a single-stage DiffusionNFT reinforcement pass on the
+full-step model.
 
 - [Design and training plan](notes/redesign_plan.md)
 - [Pretraining recipe and checkpoint contracts](notes/pretrain_recipe.md)

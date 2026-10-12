@@ -1,4 +1,4 @@
-"""Complete cold/joint training configuration, separate from benchmark arms."""
+"""Complete single-stage NFT training configuration, separate from benchmark arms."""
 
 import json
 import math
@@ -19,46 +19,40 @@ class Student:
 
 
 @dataclass(frozen=True)
-class Fake:
-    strategy: str
-    rank: int
-    multiplier: float
-    updates: int
-    target: str
-    initial_steps: int
-    initial_checkpoint_every: int
-    target_refresh: str
-
-
-@dataclass(frozen=True)
-class FakeProbe:
-    every: int
-    draws: int
-
-
-@dataclass(frozen=True)
-class Objective:
-    mode: str
-    estimator: str
-    epsilon: float
-    time_min: float
-    time_max: float
-    teacher_guidance: float
-
-
-@dataclass(frozen=True)
 class Collection:
     prompts: str
     prompts_per_round: int
     draws_per_prompt: int
     height: int
     width: int
-    rule: str
     steps: int
     guidance: float
     shift: str
-    selected_pmf: tuple[float, ...]
     text_exit_layer: int
+
+
+@dataclass(frozen=True)
+class NFT:
+    parameterization: str
+    advantage_scale: str
+    advantage_clip: float
+    beta: float
+    epsilon: float
+    reference_coefficient: float
+    updates_per_round: int
+    time_draws: int
+    time_distribution: str
+    time_min: float
+    time_max: float
+
+
+@dataclass(frozen=True)
+class OldPolicy:
+    strategy: str
+    decay: float
+    decay_start: float
+    decay_end: float
+    horizon: int
 
 
 @dataclass(frozen=True)
@@ -152,111 +146,33 @@ class RewardChannel:
 class Rewards:
     channels: tuple[RewardChannel, ...]
     epsilon: float
-    weighting: str
-    temperature: float
-
-
-@dataclass(frozen=True)
-class DynaDG:
-    enabled: bool
-    horizon: int
-    start_scale: float
-
-
-@dataclass(frozen=True)
-class DynaRS:
-    enabled: bool
-    horizon: int
-    alpha_start: float
-    beta_start: float
-
-
-@dataclass(frozen=True)
-class Stages:
-    cold_steps: int
-    joint_steps: int
-    initial_checkpoint: str
-
-
-@dataclass(frozen=True)
-class Joint:
-    dmd_coefficient: float
-    nft_coefficient: float
-    reference_coefficient: float
-
-
-@dataclass(frozen=True)
-class NFT:
-    parameterization: str
-    advantage_scale: str
-    advantage_clip: float
-    beta: float
-    epsilon: float
-    updates_per_round: int
-    time_draws: int
-    time_distribution: str
-    time_min: float
-    time_max: float
-
-
-@dataclass(frozen=True)
-class OldPolicy:
-    strategy: str
-    decay: float
-    decay_start: float
-    decay_end: float
-    horizon: int
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
     initialization: Checkpoint
-    teacher: Checkpoint
     student: Student
-    fake: Fake
-    fake_probe: FakeProbe
-    objective: Objective
     collection: Collection
+    nft: NFT
+    old_policy: OldPolicy
     student_optimizer: Optimizer
-    fake_optimizer: Optimizer
     execution: TrainingExecution
     training: Training
     scorers: tuple[Scorer, ...]
     rewards: Rewards
-    dyna_dg: DynaDG
-    dyna_rs: DynaRS
-    stages: Stages
-    joint: Joint
-    nft: NFT
-    old_policy: OldPolicy
-
-    @property
-    def joint_updates(self):
-        return self.nft.updates_per_round if self.joint.nft_coefficient > 0 else 1
-
-    @property
-    def requires_scores(self):
-        return (self.stages.cold_steps > 0 and self.objective.mode == "rtdm") or (
-            self.stages.joint_steps > 0 and self.joint.nft_coefficient > 0
-        )
-
-    def dmd_enabled(self, stage):
-        return stage == "cold" or self.joint.dmd_coefficient > 0
 
     def __post_init__(self):
-        s, f, o, c, e, t = (
+        s, c, o, e, t = (
             self.student,
-            self.fake,
-            self.objective,
             self.collection,
+            self.nft,
             self.execution,
             self.training,
         )
-        for checkpoint in (self.initialization, self.teacher):
-            require(
-                checkpoint.weights in {"live", "ema"},
-                "invalid initialization weight view",
-            )
+        require(
+            self.initialization.weights in {"live", "ema"},
+            "invalid initialization weight view",
+        )
         require(
             s.mode in {"full", "lora"}
             and s.rank > 0
@@ -265,34 +181,7 @@ class TrainingConfig:
             "invalid student mode/targets",
         )
         require(
-            f.strategy in {"full", "teacher_qv"}
-            and f.rank > 0
-            and f.multiplier > 0
-            and f.updates > 0
-            and f.target in {"selected_prediction", "terminal"}
-            and f.initial_steps >= 0
-            and f.initial_checkpoint_every > 0
-            and f.target_refresh in {"round", "update"},
-            "invalid fake role",
-        )
-        require(
-            self.fake_probe.every >= 0 and self.fake_probe.draws > 0,
-            "invalid fresh-sample fake probe cadence/draws",
-        )
-        require(
-            o.mode in {"dmd", "rtdm"}
-            and o.estimator in {"teacher_residual", "clean_difference", "score_kl"},
-            "cold objective must be DMD or RT-DM",
-        )
-        require(
-            o.epsilon > 0
-            and 0 < o.time_min < o.time_max < 1
-            and o.teacher_guidance >= 0,
-            "invalid DMD bounds/guidance",
-        )
-        require(
-            c.rule in {"euler", "renoise"}
-            and c.steps > 0
+            c.steps > 0
             and c.shift in {"shape", "none"}
             and c.guidance >= 0,
             "invalid collection sampler",
@@ -302,11 +191,34 @@ class TrainingConfig:
             and all(n > 0 and n % 16 == 0 for n in (c.height, c.width)),
             "invalid collection sizes",
         )
+        require(c.draws_per_prompt >= 2, "NFT requires at least two draws per prompt")
         require(
-            len(c.selected_pmf) == c.steps
-            and min(c.selected_pmf) >= 0
-            and math.isclose(sum(c.selected_pmf), 1, abs_tol=1e-7),
-            "selected PMF must sum to one across all generator calls",
+            o.parameterization in {"clean_adaptive", "velocity_mse"}
+            and o.advantage_scale in {"group", "round"}
+            and min(
+                o.advantage_clip,
+                o.beta,
+                o.epsilon,
+                o.updates_per_round,
+                o.time_draws,
+            )
+            > 0
+            and all(
+                math.isfinite(v)
+                for v in (o.advantage_clip, o.beta, o.epsilon, o.reference_coefficient)
+            )
+            and o.reference_coefficient >= 0
+            and o.time_distribution in {"uniform", "grid"}
+            and 0 < o.time_min < o.time_max < 1,
+            "invalid NFT loss/time/group configuration",
+        )
+        old = self.old_policy
+        require(
+            old.strategy in {"copy", "constant", "linear_ramp"}
+            and 0 <= old.decay < 1
+            and 0 <= old.decay_start <= old.decay_end < 1
+            and old.horizon > 0,
+            "invalid old-policy refresh schedule",
         )
         require(
             bool(e.learner_devices)
@@ -340,129 +252,32 @@ class TrainingConfig:
             and len({ema.name for ema in t.ema}) == len(t.ema),
             "invalid training length/seed/EMA",
         )
-        stages, joint, nft, old = self.stages, self.joint, self.nft, self.old_policy
         require(
-            stages.cold_steps > 0 or f.initial_steps == 0,
-            "initial fake fitting belongs to a cold-stage run",
+            t.steps % o.updates_per_round == 0
+            and t.checkpoint_every % o.updates_per_round == 0,
+            "training length/checkpoint interval must contain complete rounds",
         )
         require(
-            not self.fake_probe.every
-            or stages.cold_steps > 0
-            or joint.dmd_coefficient > 0,
-            "fake probe requires an active DMD stage",
+            self.student_optimizer.warmup_steps <= t.steps,
+            "student warmup exceeds the training horizon",
+        )
+        available = {f"{s.id}.{ch.name}": ch for s in self.scorers for ch in s.outputs}
+        channels = self.rewards.channels
+        require(
+            bool(self.scorers)
+            and len({s.id for s in self.scorers}) == len(self.scorers)
+            and len({ch.channel for ch in channels}) == len(channels),
+            "unique nonempty scorers/reward channels required",
         )
         require(
-            min(stages.cold_steps, stages.joint_steps) >= 0
-            and stages.cold_steps + stages.joint_steps == t.steps,
-            "stage lengths must sum to training steps",
-        )
-        if stages.cold_steps:
-            require(
-                not stages.initial_checkpoint,
-                "cold stage starts from the declared initial model",
-            )
-        else:
-            require(
-                bool(stages.initial_checkpoint), "joint entry needs a cold checkpoint"
-            )
-        coefficients = (
-            joint.dmd_coefficient,
-            joint.nft_coefficient,
-            joint.reference_coefficient,
+            bool(channels)
+            and math.isclose(sum(ch.weight for ch in channels), 1, abs_tol=1e-7),
+            "reward weights must sum to one",
         )
         require(
-            all(math.isfinite(v) and v >= 0 for v in coefficients),
-            "invalid joint coefficients",
-        )
-        require(
-            (
-                (joint.dmd_coefficient + joint.nft_coefficient > 0)
-                if stages.joint_steps
-                else not any(coefficients)
-            ),
-            "joint stage requires a main objective; absent stage has zero coefficients",
-        )
-        require(
-            joint.reference_coefficient == 0 or joint.nft_coefficient > 0,
-            "reference prediction penalty requires NFT forward inputs",
-        )
-        require(
-            nft.parameterization in {"clean_adaptive", "velocity_mse"}
-            and nft.advantage_scale in {"group", "round"}
-            and min(
-                nft.advantage_clip,
-                nft.beta,
-                nft.epsilon,
-                nft.updates_per_round,
-                nft.time_draws,
-            )
-            > 0
-            and all(
-                math.isfinite(v) for v in (nft.advantage_clip, nft.beta, nft.epsilon)
-            )
-            and nft.time_distribution in {"uniform", "grid"}
-            and 0 < nft.time_min < nft.time_max < 1,
-            "invalid NFT loss/time/group configuration",
-        )
-        require(
-            old.strategy in {"copy", "constant", "linear_ramp"}
-            and 0 <= old.decay < 1
-            and 0 <= old.decay_start <= old.decay_end < 1
-            and old.horizon > 0,
-            "invalid old-policy refresh schedule",
-        )
-        if stages.joint_steps and joint.nft_coefficient > 0:
-            require(
-                c.draws_per_prompt >= 2, "NFT requires at least two draws per prompt"
-            )
-            require(
-                stages.joint_steps % self.joint_updates == 0
-                and t.checkpoint_every % self.joint_updates == 0,
-                "NFT joint length/checkpoint interval must contain complete rounds",
-            )
-        for stage, count in (
-            ("cold", stages.cold_steps),
-            ("joint", stages.joint_steps),
-        ):
-            if count:
-                require(
-                    self.student_optimizer.warmup_steps <= count,
-                    "student warmup exceeds stage horizon",
-                )
-                if self.dmd_enabled(stage):
-                    require(
-                        self.fake_optimizer.warmup_steps <= count * f.updates,
-                        "fake warmup exceeds stage horizon",
-                    )
-        dg, rs, reward = self.dyna_dg, self.dyna_rs, self.rewards
-        require(dg.horizon > 0 and dg.start_scale >= 0, "invalid DynaDG schedule")
-        require(
-            rs.horizon > 0 and rs.alpha_start > rs.beta_start > 0,
-            "DynaRS requires positive alpha_start > beta_start",
-        )
-        require(
-            (not dg.enabled or dg.horizon <= stages.cold_steps)
-            and (not rs.enabled or rs.horizon <= stages.cold_steps),
-            "dynamic horizon exceeds cold generator steps",
-        )
-        require(
-            not dg.enabled or f.strategy == "teacher_qv",
-            "DynaDG requires teacher_qv fake",
-        )
-        require(
-            reward.epsilon > 0
-            and reward.temperature > 0
-            and reward.weighting in {"mean_one_exp", "paper_max_exp"},
-            "invalid RT-DM reward transform",
-        )
-        require(
-            len({s.id for s in self.scorers}) == len(self.scorers), "duplicate scorer"
-        )
-        available = {f"{s.id}.{c.name}": c for s in self.scorers for c in s.outputs}
-        channels = reward.channels
-        require(
-            len({c.channel for c in channels}) == len(channels),
-            "duplicate reward channel",
+            {ch.channel.split(".")[0] for ch in channels}
+            == {s.id for s in self.scorers},
+            "reward/scorer service set differs",
         )
         for channel in channels:
             require(channel.channel in available, "reward channel is undeclared")
@@ -472,28 +287,9 @@ class TrainingConfig:
                 and channel.standardization in {"none", "round"},
                 "invalid reward orientation/weight/standardization",
             )
-            require(
-                not (stages.cold_steps and o.mode == "rtdm")
-                or reward.weighting != "paper_max_exp"
-                or channel.standardization == "none",
-                "paper-max requires raw nonnegative rewards, not standardized channels",
-            )
-        if self.requires_scores:
-            require(
-                bool(channels)
-                and math.isclose(sum(c.weight for c in channels), 1, abs_tol=1e-7),
-                "reward weights must sum to one",
-            )
-            require(
-                {c.channel.split(".")[0] for c in channels}
-                == {s.id for s in self.scorers},
-                "reward/scorer service set differs",
-            )
-        else:
-            require(
-                not channels and not self.scorers,
-                "unscored run has no reward services/channels",
-            )
+        require(
+            self.rewards.epsilon > 0, "reward normalization epsilon must be positive"
+        )
 
 
 def load_training_config(path):

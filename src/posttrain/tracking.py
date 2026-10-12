@@ -1,7 +1,6 @@
-"""Online campaign tracking from complete learner records and benchmark reports."""
+"""Online run tracking from complete learner records and benchmark reports."""
 
 import json
-import math
 import statistics
 from pathlib import Path
 
@@ -97,45 +96,26 @@ def optimizer_rates(optimizer):
 
 def update_metrics(rows):
     """Loss records use world/global_samples scaling; their rank mean is global."""
-    first, ranks = rows[0], len(rows)
+    first = rows[0]
     metrics = {
-        "clock/student_updates": first["student_version"],
-        "clock/fake_updates": first["fake_version"],
+        "clock/student_updates": first["step"],
         "runtime/seconds": max(r["seconds"] for r in rows),
         "runtime/peak_allocated_bytes": max(r["peak_allocated_bytes"] for r in rows),
     }
     for field in ("student_loss", "student_grad_norm"):
         if field in first:
             metrics[f"train/{field}"] = statistics.mean(r[field] for r in rows)
-    for field in ("fake_losses", "fake_grad_norms"):
-        values = [v for r in rows for v in r[field]]
-        if values:
-            metrics[f"train/{field}"] = statistics.mean(values)
     for term in first.get("term_losses", {}):
         metrics[f"train/{term}_loss"] = statistics.mean(
             r["term_losses"][term] for r in rows
         )
-    for term in first.get("local_prediction_gradient_norms", {}):
-        values = [v for r in rows for v in r["local_prediction_gradient_norms"][term]]
-        if values:
-            metrics[f"train/{term}_prediction_grad_norm"] = (
-                math.sqrt(sum(v * v for v in values)) / ranks
-            )
     for role, values in first["learning_rates"].items():
         metrics.update({f"lr/{role}/{key}": value for key, value in values.items()})
-    if "fake_probe" in first:
-        for key in ("velocity_mse", "score_weighted_mse", "samples"):
-            metrics[f"fake_probe/{key}"] = first["fake_probe"][key]
-    for key, value in first.get("cold_schedule", {}).items():
-        if isinstance(value, (int, float)):
-            metrics[f"cold_schedule/{key}"] = value
     reward = first.get("reward")
     if reward is not None:
         for channel, values in reward["statistics"].items():
             for key in ("mean", "std"):
                 metrics[f"reward/{channel}/{key}"] = values[key]
-        for key, value in reward.get("diagnostics", {}).items():
-            metrics[f"reward/{key}"] = value
         for key in ("advantages", "probabilities"):
             if key in reward:
                 metrics[f"reward/{key}_mean"] = statistics.mean(reward[key])
@@ -144,8 +124,8 @@ def update_metrics(rows):
 
 
 class TrainingMetrics:
-    def __init__(self, tracker, config, output, attempt, saved=None, fit_stop=None):
-        from .stages import rounds_before
+    def __init__(self, tracker, config, output, attempt, saved=None):
+        from .clock import rounds_before
 
         self.tracker, self.config, self.output, self.attempt = (
             tracker,
@@ -156,8 +136,6 @@ class TrainingMetrics:
         self.ranks = len(config.execution.learner_devices)
         self.step = 0 if saved is None else saved["step"]
         self.round = rounds_before(config, self.step)
-        self.fit = 0 if saved is None else saved["initial_fit_steps"]
-        self.fit_goal = config.fake.initial_steps if fit_stop is None else fit_stop
 
     def rows(self, directory, suffix):
         paths = [
@@ -169,22 +147,10 @@ class TrainingMetrics:
         return [json.loads(p.read_text()) for p in paths]
 
     def poll(self):
-        while self.fit < self.fit_goal:
-            rows = self.rows("fitting", f"fit-{self.fit + 1:06d}")
-            if rows is None:
-                return
-            self.fit += 1
-            self.tracker.log(update_metrics(rows), self.fit)
         while self.rows("rounds", f"round-{self.round:06d}") is not None:
-            from .stages import round_position
-
-            stage, _, _ = round_position(self.config, self.round)
-            updates = self.config.joint_updates if stage == "joint" else 1
-            for inner in range(updates):
+            for inner in range(self.config.nft.updates_per_round):
                 rows = self.rows("updates", f"round-{self.round:06d}-inner-{inner:03d}")
                 require(rows is not None, "committed round lacks update telemetry")
                 self.step += 1
-                self.tracker.log(
-                    update_metrics(rows), self.config.fake.initial_steps + self.step
-                )
+                self.tracker.log(update_metrics(rows), self.step)
             self.round += 1

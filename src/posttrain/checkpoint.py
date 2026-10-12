@@ -81,8 +81,7 @@ def publish(root, step, contract, state, rank_state, rank, device, tracking=None
     if rank == 0:
         save_tensor_file(staging / "state.pt", cpu_state(state))
     barrier()
-    fitting = state.get("initial_fit_steps", 0) if step == 0 else 0
-    destination = root / (f"fit-{fitting:06d}" if fitting else f"step-{step:06d}")
+    destination = root / f"step-{step:06d}"
     if rank == 0:
         require(
             {p.name for p in staging.iterdir()}
@@ -95,8 +94,6 @@ def publish(root, step, contract, state, rank_state, rank, device, tracking=None
             staging / "manifest.json",
             {
                 "step": step,
-                "initial_fit_steps": state.get("initial_fit_steps", 0),
-                "fake_steps": state.get("fake_steps"),
                 "world_size": world_size(),
                 "contract": contract,
             },
@@ -135,11 +132,6 @@ def load(path, contract, rank):
         require(
             state["step"] == manifest["step"], "checkpoint manifest/state step differs"
         )
-    require(
-        state.get("initial_fit_steps", 0) == manifest["initial_fit_steps"]
-        and state.get("fake_steps") == manifest["fake_steps"],
-        "checkpoint manifest/state fake clocks differ",
-    )
     return (
         state,
         torch.load(

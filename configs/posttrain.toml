@@ -1,65 +1,91 @@
-# Complete sampling qualification recipe; local paths/endpoints live in --assets.
-[sampling]
-precision = "bfloat16"
-batch_size = 2
-retain_selected = true
+# Complete single-stage DiffusionNFT run. Every tunable is required.
+# Model, service, endpoint and storage paths live in the --assets JSON.
+# The base is the 600k pretrain EMA; see notes/posttrain_recipe.md.
+
+[initialization]
+asset = "initial"
+weights = "ema"
+
+[student]
+mode = "lora"
+rank = 32
+alpha = 32.0
+targets = "attention"
+
+[collection]
+prompts = "configs/prompts/posttrain_rollout.jsonl"
+prompts_per_round = 12
+draws_per_prompt = 8
+height = 896
+width = 896
+# The base model's ODE quality is flat between 20 and 50 steps at CFG 1.
+steps = 20
+guidance = 1.0
+shift = "shape"
 text_exit_layer = 20
-[sampling.shapes]
-"1:1" = [640, 640]
-"3:4" = [736, 560]
-"4:3" = [560, 736]
-"9:16" = [848, 480]
-"16:9" = [480, 848]
+
+[nft]
+parameterization = "clean_adaptive"
+advantage_scale = "group"
+advantage_clip = 5.0
+beta = 1.0
+epsilon = 1e-05
+reference_coefficient = 1e-4
+updates_per_round = 1
+time_draws = 1
+time_distribution = "uniform"
+time_min = 0.02
+time_max = 0.98
+
+[old_policy]
+strategy = "linear_ramp"
+decay = 0.0
+decay_start = 0.0
+decay_end = 0.5
+# Refresh clock is committed collection rounds, so the ramp spans this run.
+horizon = 1000
+
+[student_optimizer]
+kind = "muon_adamw"
+lr = 1e-05
+betas = [0.9, 0.999]
+epsilon = 1e-08
+weight_decay = 0.0
+conditioning_weight_decay = 0.0
+max_grad_norm = 1.0
+muon_lr = 0.001
+muon_weight_decay = 0.0
+muon_momentum = 0.95
+schedule = "constant"
+warmup_steps = 0
+minimum_ratio = 0.1
+
 [execution]
 learner_devices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-max_inflight_batches = 24
+microbatch = 1
+cpu_threads = 4
+collective_timeout = 600
 startup_timeout = 1800
-task_timeout = 600
-cpu_threads = 4
-[evaluation]
-suite = "configs/prompts/posttrain_drawbench.jsonl"
-bringup_suite = "configs/prompts/posttrain_drawbench_bringup.jsonl"
-monitor_suite = "configs/prompts/monitor.jsonl"
-confirmation_suite = "configs/prompts/posttrain_confirmation.jsonl"
-channels = ["hpsv3.mu", "vqascore.probability"]
-bootstrap_seed = 1729
-bootstrap_repeats = 2000
-confidence = 0.95
-[evaluation.diversity]
-enabled = false
-asset = ""
-pair_batch_size = 1
-cpu_threads = 4
+round_timeout = 600
+precision = "bfloat16"
+activation_checkpointing = false
+intra_host_roce = true
+deterministic_algorithms = true
 
-[[arms]]
-name = "teacher_euler50"
-rule = "euler"
-steps = 50
-guidance = 1.0
-shift = "shape"
-[arms.checkpoint]
-asset = "initial"
-weights = "ema"
+[training]
+seed = 1729
+steps = 1000
+checkpoint_every = 50
 
-[[arms]]
-name = "undistilled_euler8"
-rule = "euler"
-steps = 8
-guidance = 1.0
-shift = "shape"
-[arms.checkpoint]
-asset = "initial"
-weights = "ema"
+[[training.ema]]
+name = "fast"
+decay = 0.9
+device = "learner"
 
-[[arms]]
-name = "student_renoise8"
-rule = "renoise"
-steps = 8
-guidance = 1.0
-shift = "shape"
-[arms.checkpoint]
-asset = "initial"
-weights = "ema"
+[[training.ema]]
+name = "slow"
+decay = 0.999
+device = "learner"
 
 [[scorers]]
 id = "hpsv3"
@@ -85,3 +111,20 @@ transport = "shared_file"
 [[scorers.outputs]]
 name = "probability"
 direction = "higher"
+
+[rewards]
+epsilon = 1e-4
+
+# Round standardization puts both raw channel scales on one mixture scale;
+# the group advantage then normalizes within each prompt.
+[[rewards.channels]]
+channel = "hpsv3.mu"
+direction = "higher"
+weight = 0.5
+standardization = "round"
+
+[[rewards.channels]]
+channel = "vqascore.probability"
+direction = "higher"
+weight = 0.5
+standardization = "round"

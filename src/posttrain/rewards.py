@@ -1,4 +1,4 @@
-"""Global round reward orientation, population statistics and detached weights."""
+"""Global round reward orientation, population statistics and group advantages."""
 
 import torch
 
@@ -57,36 +57,6 @@ def combine_round(sample_ids, score_records, config):
         "raw": raw,
         "statistics": statistics,
         "combined": combined.tolist(),
-    }
-
-
-def transform_round(sample_ids, score_records, config):
-    result = combine_round(sample_ids, score_records, config)
-    sample_ids = result["sample_ids"]
-    combined = torch.tensor(result["combined"], dtype=torch.float32)
-    if config.rewards.weighting == "mean_one_exp":
-        # Subtract the reward maximum before division: finite extreme rewards
-        # cannot overflow into +inf logits and poison softmax.
-        weights = len(sample_ids) * torch.softmax(
-            (combined - combined.max()) / config.rewards.temperature, dim=0
-        )
-    else:
-        require(
-            bool((combined >= 0).all()) and bool(combined.max() > 0),
-            "paper-max requires nonnegative rewards and a positive global maximum",
-        )
-        weights = torch.exp(combined / combined.max())
-    require(bool(torch.isfinite(weights).all()), "nonfinite RT-DM weights")
-    return {
-        **result,
-        "weights": weights.tolist(),
-        "diagnostics": {
-            "reward_min": float(combined.min()),
-            "reward_max": float(combined.max()),
-            "weight_max": float(weights.max()),
-            "weight_mean": float(weights.mean()),
-            "effective_samples": float(weights.sum().square() / weights.square().sum()),
-        },
     }
 
 

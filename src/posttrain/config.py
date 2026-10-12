@@ -19,7 +19,6 @@ class Checkpoint:
 class Arm:
     name: str
     checkpoint: Checkpoint
-    rule: str
     steps: int
     guidance: float
     shift: str
@@ -29,7 +28,6 @@ class Arm:
 class Sampling:
     precision: str
     batch_size: int
-    retain_selected: bool
     text_exit_layer: int
     shapes: dict[str, tuple[int, int]]
 
@@ -149,7 +147,7 @@ class Config:
             name(a.name)
             name(a.checkpoint.asset)
             name(a.checkpoint.weights)
-            require(a.rule in {"euler", "renoise"} and a.steps > 0, "invalid sampler")
+            require(a.steps > 0, "invalid sampler")
             require(
                 a.guidance >= 0 and a.shift in {"shape", "none"},
                 "invalid guidance/shift",

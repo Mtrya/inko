@@ -16,10 +16,11 @@ where the data is mounted. Platform setup and credentials are in the local
 | `posttrain.run_campaign` | Drive one training run with interval evaluations: resume committed segments, export weight views, benchmark suites and assemble blind panels. |
 | `posttrain.readouts` | Join a completed blind ballot to benchmark scores; report comparable pairs and scorer/human disagreement. |
 
-The cold/joint trainer is `python -m src.posttrain.train`; the standalone evaluation
-harness is `python -m src.evaluation.benchmarks.run`.
-Its current commands and qualification limits are in
-[the posttraining recipe](../notes/posttrain_recipe.md#samplingscoring-commands).
+The single-stage DiffusionNFT trainer is `python -m src.posttrain.train`; the
+standalone evaluation harness is `python -m src.evaluation.benchmarks.run`.
+Commands, config schema and current limits are in
+[the posttraining recipe](../notes/posttrain_recipe.md) and
+[campaign guide](../notes/posttrain_campaign.md).
 
 ## Pretraining (`scripts/pretrain/`)
 

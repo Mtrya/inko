@@ -2,12 +2,155 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
+import torch
 from PIL import Image
+from test_posttrain_nft import new_roles, probabilities, round_rollouts
 from test_posttrain_scoring import Backend, Endpoint
 
 from src.evaluation.benchmarks import run as benchmark
+from src.models.inko import Inko
+from src.posttrain.checkpoint import (
+    assert_exact,
+    inspect,
+    load,
+    publish,
+    restore_rng,
+    rng_state,
+)
+from src.posttrain.clock import Clock
+from src.posttrain.engine import update_round
 from src.posttrain.records import file_hash
+from src.posttrain.rollout import PromptCursor
 from src.posttrain.scoring.client import ScoreClient, request_for_record
+from src.posttrain.session import TrainingState
+
+
+def test_committed_round_state_round_trips_through_a_checkpoint(
+    tmp_path, training_config, small_model
+):
+    torch.set_num_threads(1)
+    torch.manual_seed(21)
+    config = training_config
+    base = small_model()
+    roles = new_roles(config, base)
+    state = TrainingState(config, roles, None, Clock())
+    rollouts = round_rollouts(config, roles, base)
+    state.last_reward = update_round(
+        config,
+        roles,
+        roles.student_field,
+        rollouts,
+        probabilities(rollouts),
+        state.student_optimizer,
+        0,
+        state.clock.old_policy_version,
+    )
+    state.clock.update(config)
+    with pytest.raises(ValueError, match="clocks differ"):
+        state.state_dict()
+    state.commit_round()
+    point = publish(
+        tmp_path / "checkpoints",
+        state.clock.step,
+        {"case": "nft"},
+        state.state_dict(),
+        {"cursor": 7},
+        0,
+        torch.device("cpu"),
+    )
+    committed, rank_state = load(point, {"case": "nft"}, 0)
+    assert rank_state["cursor"] == 7 and inspect(point)["step"] == 1
+    recovered = TrainingState(config, new_roles(config, base), None, Clock())
+    recovered.load_state_dict(committed)
+    assert_exact(state.state_dict(), recovered.state_dict())
+    with pytest.raises(ValueError, match="clocks differ"):
+        recovered.load_state_dict(dict(committed, old_policy_version=9))
+
+
+def test_checkpoint_publication_is_all_or_nothing(tmp_path, monkeypatch):
+    import src.posttrain.checkpoint as module
+
+    def fail(*args, **kwargs):
+        raise OSError("publication fault")
+
+    monkeypatch.setattr(module, "atomic_json", fail)
+    with pytest.raises(OSError):
+        publish(tmp_path, 1, {}, {}, {}, 0, torch.device("cpu"))
+    assert not (tmp_path / "step-000001").exists()
+
+
+def test_manifest_in_staging_is_not_a_published_checkpoint(tmp_path):
+    device = torch.device("cpu")
+    committed = publish(tmp_path, 1, {"case": "publication"}, {}, {}, 0, device)
+    with pytest.raises(ValueError, match="overwrite"):
+        publish(tmp_path, 1, {"case": "publication"}, {}, {}, 0, device)
+    staging = next(tmp_path.glob(".incomplete-*"))
+    assert (staging / "manifest.json").exists()
+    with pytest.raises(ValueError, match="unpublished"):
+        inspect(staging)
+    assert inspect(committed)["step"] == 1
+
+
+def test_prompt_cursor_and_rank_rng_restore_exactly(tmp_path):
+    cursor = PromptCursor(5, 123)
+    cursor.take(4)
+    state = cursor.state_dict()
+    expected = cursor.take(7)
+    cursor.load_state_dict(state)
+    assert cursor.take(7) == expected
+    device = torch.device("cpu")
+    torch.manual_seed(5)
+    saved = rng_state(device)
+    first = [torch.rand(3) for _ in range(2)]
+    restore_rng(saved, device)
+    assert all(
+        torch.equal(a, b)
+        for a, b in zip(first, [torch.rand(3) for _ in range(2)], strict=True)
+    )
+
+
+@pytest.mark.parametrize(
+    "mode,view", [("full", "live"), ("full", "ema"), ("lora", "live"), ("lora", "ema")]
+)
+def test_export_materializes_the_requested_weight_view(
+    tmp_path, training_config, small_model, mode, view
+):
+    from dataclasses import asdict as to_dict
+
+    from scripts.posttrain.export import export
+    from src.posttrain.adapters import merge_student
+
+    config = replace(
+        training_config, student=replace(training_config.student, mode=mode)
+    )
+    roles = new_roles(config, small_model())
+    with torch.no_grad():
+        for parameter in roles.student.parameters():
+            if parameter.requires_grad:
+                parameter.add_(0.01)
+    architecture = roles.student.get_config()
+    path = publish(
+        tmp_path / "checkpoints",
+        2,
+        {"config": to_dict(config)},
+        {
+            "student": roles.student.state_dict(),
+            "ema": roles.ema,
+            "architecture": architecture,
+            "step": 2,
+        },
+        {},
+        0,
+        torch.device("cpu"),
+    )
+    export(path, view, tmp_path / "export")
+    model = Inko.from_single_file(str(tmp_path / "export" / "weights.pt"))
+    if view == "ema":
+        with torch.no_grad():
+            for name, parameter in roles.student.named_parameters():
+                if name in roles.ema["ema"]:
+                    parameter.copy_(roles.ema["ema"][name])
+    assert_exact(merge_student(roles.student).state_dict(), model.state_dict())
 
 
 def test_config_only_external_service_collection_join_report_and_resume(

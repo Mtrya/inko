@@ -113,27 +113,24 @@ loss/gradient/functional monitoring through subsequent resolution transitions.
 Review the fixed bilingual panel, live/EMA losses and internal stability
 telemetry at the recipe's cadence. Follow the evidence-based review and
 recovery rules in [the training recipe](pretrain_recipe.md). A final capability
-benchmark at 600k (form pending) determines the Stage-6 SFT go/no-go.
+benchmark at 600k (form pending) determines the Stage-6 go/no-go.
 
 Exit: a complete pretraining checkpoint, verified sampling and resolution transitions,
 measured compute/exposure, and a record of observed abilities and limitations.
 
 ## Stage 6 — Ascend post-training
 
-The release target is an **8-step student**. The provisional
-[recipe](posttrain_recipe.md) follows two training stages:
+Post-training is a **single DiffusionNFT reinforcement stage** on the full-step
+model; the earlier distillation/DMD direction is closed. The
+[recipe](posttrain_recipe.md) trains the 600k EMA base at 896p with 20-step
+CFG-free rollouts against the HPSv3/VQAScore reward stack.
 
-1. Cold start with RT-DM, DynaDG, and DynaRS.
-2. Joint DiffusionNFT and DMD, using distribution matching to regularize reward
-   optimization against the teacher distribution.
-
-This baseline starts the experiments. Objectives, components, optimization,
-sampling, rewards, prompt/data mixtures, and custom techniques remain open
-comparison axes. The exact losses and state transitions will be specified in the
+The exact loss and state transitions are specified in the
 [contract](posttrain_contract.md); benchmark and generation evidence determine
-selection under the [evaluation protocol](posttrain_evaluation.md).
+the remaining choices under the
+[evaluation protocol](posttrain_evaluation.md).
 
-Organize Stage 6 into four work layers, distinct from the two training stages:
+Organize Stage 6 into four work layers:
 
 1. Algorithm implementation, experiments, and comparisons to select the
    algorithm, including a small initial prompt suite, scorer, and benchmark.
@@ -142,8 +139,8 @@ Organize Stage 6 into four work layers, distinct from the two training stages:
    recalibration where scorer throughput or workload shape changes.
 4. Launch the real run, monitor/recover it, and perform final evaluation.
 
-Current work is layer 1. Develop through sampling/scoring, minimal distribution
-matching, complete cold start, and joint training before broader comparisons.
+Current work is layer 1. The single-stage trainer is implemented; the
+experiment campaign in the internal plan selects the recipe.
 Core logic, including reward/score clients, belongs in `src/posttrain/`;
 benchmarks belong in `src/evaluation/benchmarks/`; rollout prompts belong in
 `configs/prompts/`. The planned trainer uses complete explicit configs.
@@ -160,7 +157,7 @@ score waiting, training, and synchronization. Layer 3 prepares the intended
 real workload and repeats affected measurements before setting the main budget.
 The final run uses the selected completed-pretraining teacher and recipe.
 
-Exit: a selected 8-step checkpoint with reproducible config and inference
+Exit: a selected posttrained checkpoint with reproducible config and inference
 settings, held-out benchmarks and image review, domain/diversity evidence,
 measured cost, recovery qualification, and a recipe explaining the decisions
 and limitations. The internal ledger and progress log track ongoing work;
@@ -177,13 +174,13 @@ Published model links, inference metadata and repository coordinates must
 consistently identify the release. Artifact provenance retains exact source
 experiment identities.
 
-Publish the selected 8-step student to Hugging Face with weights, inference
+Publish the selected posttrained checkpoint to Hugging Face with weights, inference
 configuration, model card, provenance/license constraints, evaluation and
 limitations. Deploy and smoke-test a Hugging Face Space. Write the README with
 installation, minimal inference/training examples and a navigable document map;
 verify its quickstart in a clean environment.
 
-Publish self-contained explanations of Flow Matching and DMD2/DMDR/NFT,
+Publish self-contained explanations of Flow Matching and DiffusionNFT,
 including equations, training/sampling procedures, implementation mapping and
 limitations. Explain methods directly; private run nicknames or unavailable
 discussions cannot carry the explanation. Estimate publication and hosting
@@ -197,6 +194,6 @@ costs before deployment.
 - Caption/judge provider changes: cache responses and record exact request
   identity; measure limits again on the intended workload.
 - Reward hacking and diversity loss: keep held-out signals and domain review
-  throughout joint training.
+  throughout posttraining.
 - Source restrictions: preserve provenance and separate restricted entries;
   release permissions depend on the selected data and artifacts.

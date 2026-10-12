@@ -1,13 +1,13 @@
-"""Campaign tracking identity, rank aggregation, and committed update delivery."""
+"""Run tracking identity, rank aggregation, and committed update delivery."""
 
 import json
+import subprocess
 import sys
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
 import torch
-from test_posttrain_dmd import config
 
 from src.posttrain.checkpoint import publish
 from src.posttrain.records import atomic_json
@@ -56,14 +56,14 @@ def sdk(monkeypatch):
 
 def test_online_start_and_manifest_only_restart_keep_identity(tmp_path, sdk):
     root = tmp_path / "arm"
-    with Tracker(root, "cold_estimator", config={"setting": "input"}):
+    with Tracker(root, "nft_reference", config={"setting": "input"}):
         pass
     assert sdk.calls[0]["mode"] == "online"
     assert sdk.calls[0]["resume"] == "never"
     assert sdk.calls[0]["settings"] == {"interactive": False}
     assert sdk.calls[0]["project"] == "inko-posttrain"
-    assert sdk.calls[0]["name"] == "cold_estimator"
-    with Tracker(root, "cold_estimator"):
+    assert sdk.calls[0]["name"] == "nft_reference"
+    with Tracker(root, "nft_reference"):
         pass
     assert sdk.calls[1]["id"] == "generated-run"
     assert sdk.calls[1]["resume"] == "must"
@@ -72,7 +72,7 @@ def test_online_start_and_manifest_only_restart_keep_identity(tmp_path, sdk):
 
 def test_checkpoint_owns_tracking_identity_and_new_arm_does_not_inherit(tmp_path, sdk):
     root = tmp_path / "source"
-    with Tracker(root, "cold"):
+    with Tracker(root, "run"):
         identity = json.loads((root / "tracking.json").read_text())
         checkpoint = publish(
             root / "checkpoints",
@@ -91,7 +91,7 @@ def test_checkpoint_owns_tracking_identity_and_new_arm_does_not_inherit(tmp_path
     with Tracker(tmp_path / "restored", None, resume=checkpoint):
         pass
     assert sdk.calls[-1]["id"] == "generated-run" and sdk.calls[-1]["resume"] == "must"
-    with Tracker(tmp_path / "joint_branch", "nft_only"):
+    with Tracker(tmp_path / "another_arm", "other"):
         pass
     assert "id" not in sdk.calls[-1] and sdk.calls[-1]["resume"] == "never"
 
@@ -127,7 +127,9 @@ def test_tracking_mismatch_fails_startup(tmp_path, sdk, mismatch):
         pytest.fail("startup should reject mismatched tracking")
 
 
-def test_missing_online_credentials_prevents_training_start(tmp_path, monkeypatch, sdk):
+def test_missing_online_credentials_prevents_training_start(
+    tmp_path, monkeypatch, sdk, training_config
+):
     from src.posttrain import train
 
     def fail(**kwargs):
@@ -135,16 +137,28 @@ def test_missing_online_credentials_prevents_training_start(tmp_path, monkeypatc
 
     sdk.init = fail
     launched = []
-    monkeypatch.setattr(train.subprocess, "Popen", lambda *a, **k: launched.append(a))
+    real_popen = subprocess.Popen
+
+    def popen(argv, **kwargs):
+        if "src.posttrain.train" in argv:
+            launched.append(argv)
+            raise AssertionError("learner must not start without tracking")
+        return real_popen(argv, **kwargs)
+
+    monkeypatch.setattr(train.subprocess, "Popen", popen)
     with pytest.raises(RuntimeError, match="no API key"):
         train.launch(
-            config(),
-            {"learner": {"python_paths": []}, "device_type": "cpu"},
-            {"boundary": None},
+            training_config,
+            {
+                "learner": {"python_paths": []},
+                "device_type": "cpu",
+                "services": {"unfamiliar": {"endpoints": [], "launches": []}},
+            },
+            {"prompts": []},
             tmp_path / "run",
             None,
             3,
-            tmp_path / "arm.json",
+            tmp_path / "run.json",
             tmp_path / "assets.json",
             track=True,
         )
@@ -160,48 +174,46 @@ def test_failure_marks_run_crashed(tmp_path, sdk):
 def record(loss=2):
     return {
         "step": 1,
-        "student_version": 1,
-        "fake_version": 5,
         "seconds": 3.0,
         "peak_allocated_bytes": 100,
         "student_loss": loss,
         "student_grad_norm": 0.5,
-        "fake_losses": [2.0, 4.0],
-        "fake_grad_norms": [0.1, 0.3],
-        "learning_rates": {"student": {"adamw/0": 0.001}, "fake": {"muon/0": 0.01}},
-        "fake_probe": {"velocity_mse": 1.5, "score_weighted_mse": 2.5, "samples": 4},
-        "cold_schedule": {"real_scale": 0.7, "clock": "generator"},
+        "term_losses": {"nft": 1.0, "reference": 0.25},
+        "learning_rates": {"student": {"muon/0": 0.01}},
         "reward": {
-            "statistics": {"service.metric": {"mean": 3.0, "std": 2.0}},
-            "diagnostics": {"effective_samples": 2.0},
+            "statistics": {"hpsv3.mu": {"mean": 3.0, "std": 2.0}},
+            "advantages": [1.0, -1.0],
+            "probabilities": [1.0, 0.0],
         },
     }
 
 
-def test_rank_scaled_losses_average_and_global_probe_is_not_summed():
+def test_rank_scaled_losses_average_and_reward_statistics_join():
     metrics = update_metrics([record(2), record(6)])
     assert metrics["train/student_loss"] == 4
-    assert metrics["train/fake_losses"] == 3
-    assert metrics["fake_probe/velocity_mse"] == 1.5
-    assert metrics["reward/service.metric/std"] == 2
-    assert metrics["reward/effective_samples"] == 2
-    assert metrics["clock/fake_updates"] == 5
-    assert metrics["lr/fake/muon/0"] == 0.01
-    assert metrics["cold_schedule/real_scale"] == 0.7
-    assert "cold_schedule/clock" not in metrics
+    assert metrics["train/student_grad_norm"] == 0.5
+    assert metrics["train/nft_loss"] == 1
+    assert metrics["train/reference_loss"] == 0.25
+    assert metrics["clock/student_updates"] == 1
+    assert metrics["lr/student/muon/0"] == 0.01
+    assert metrics["reward/hpsv3.mu/mean"] == 3
+    assert metrics["reward/advantages_mean"] == 0
+    assert metrics["reward/probabilities_std"] == 0.5
 
 
 def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
-    tmp_path, sdk, sampling_config
+    tmp_path, sdk, training_config
 ):
-    from test_posttrain_joint import joint_config
-
-    c = joint_config(sampling_config.scorers[0])
-    c = replace(c, execution=replace(c.execution, learner_devices=(0, 1)))
-    with Tracker(tmp_path, "joint") as tracker:
-        delivery = TrainingMetrics(tracker, c, tmp_path, "attempt")
+    config = replace(
+        training_config,
+        nft=replace(training_config.nft, updates_per_round=2),
+        training=replace(training_config.training, steps=2, checkpoint_every=2),
+        collection=replace(training_config.collection, prompts_per_round=2),
+    )
+    with Tracker(tmp_path, "nft") as tracker:
+        delivery = TrainingMetrics(tracker, config, tmp_path, "attempt")
         for inner in range(2):
-            for rank in range(2):
+            for rank in range(1):
                 atomic_json(
                     tmp_path
                     / "updates"
@@ -209,46 +221,44 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
                     record(2 + 4 * rank),
                 )
         delivery.poll()
-        assert sdk.logs == []  # An unfinished NFT round is not committed progress.
+        assert sdk.logs == []  # An unfinished round is not committed progress.
         atomic_json(tmp_path / "rounds" / "attempt-round-000000-rank-000.json", {})
-        delivery.poll()
-        assert sdk.logs == []
-        atomic_json(tmp_path / "rounds" / "attempt-round-000000-rank-001.json", {})
         delivery.poll()
         delivery.poll()
     assert [step for step, _ in sdk.logs] == [1, 2]
-    assert all(metrics["train/student_loss"] == 4 for _, metrics in sdk.logs)
+    assert all(metrics["train/student_loss"] == 2 for _, metrics in sdk.logs)
 
 
-def test_fitting_and_resume_deliver_only_new_attempt_records(tmp_path, sdk):
-    c = config()
-    c = replace(c, fake=replace(c.fake, initial_steps=3))
-    with Tracker(tmp_path, "cold") as tracker:
-        delivery = TrainingMetrics(
-            tracker, c, tmp_path, "new", saved={"step": 0, "initial_fit_steps": 1}
-        )
+def test_resume_delivers_only_new_attempt_records(tmp_path, sdk, training_config):
+    config = replace(
+        training_config,
+        training=replace(training_config.training, steps=1),
+        collection=replace(training_config.collection, prompts_per_round=2),
+    )
+    with Tracker(tmp_path, "nft") as tracker:
+        delivery = TrainingMetrics(tracker, config, tmp_path, "new", saved={"step": 0})
         for attempt in ("old", "new"):
-            for fit in (1, 2, 3):
-                atomic_json(
-                    tmp_path / "fitting" / f"{attempt}-fit-{fit:06d}-rank-000.json",
-                    record(),
-                )
+            atomic_json(
+                tmp_path
+                / "updates"
+                / f"{attempt}-round-000000-inner-000-rank-000.json",
+                record(),
+            )
+            atomic_json(
+                tmp_path / "rounds" / f"{attempt}-round-000000-rank-000.json", {}
+            )
         delivery.poll()
-        atomic_json(
-            tmp_path / "updates" / "new-round-000000-inner-000-rank-000.json", record()
-        )
-        atomic_json(tmp_path / "rounds" / "new-round-000000-rank-000.json", {})
-        delivery.poll()
-    assert [step for step, _ in sdk.logs] == [2, 3, 4]
+    assert [step for step, _ in sdk.logs] == [1]
 
 
-def test_actual_optimizer_rates_are_read_after_schedule_step():
+def test_actual_optimizer_rates_are_read_after_schedule_step(training_config):
     from src.posttrain.optim import RoleOptimizer
 
-    c = config()
     model = torch.nn.Linear(2, 1)
     optimizer = RoleOptimizer(
-        model, replace(c.student_optimizer, lr=0.1, warmup_steps=2), 3
+        model,
+        replace(training_config.student_optimizer, lr=0.1, warmup_steps=2),
+        3,
     )
     loss = model(torch.ones(1, 2)).square().sum()
     loss.backward()
@@ -258,7 +268,7 @@ def test_actual_optimizer_rates_are_read_after_schedule_step():
 
 
 def test_interval_scores_named_views_and_panels_share_training_run(tmp_path, sdk):
-    with Tracker(tmp_path, "cold"):
+    with Tracker(tmp_path, "run"):
         pass
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
@@ -294,12 +304,17 @@ def test_interval_scores_named_views_and_panels_share_training_run(tmp_path, sdk
     ]
 
 
-def test_coordinator_delivers_final_update_before_finish(tmp_path, monkeypatch, sdk):
+def test_coordinator_delivers_final_update_before_finish(
+    tmp_path, monkeypatch, sdk, sampling_config, training_config
+):
+    from test_posttrain_scoring import Backend, Endpoint
+
     from src.posttrain import train
 
-    c = config()
-    c = replace(
-        c, training=replace(c.training, steps=1), stages=replace(c.stages, cold_steps=1)
+    config = replace(
+        training_config,
+        training=replace(training_config.training, steps=1),
+        collection=replace(training_config.collection, prompts_per_round=2),
     )
     output = tmp_path / "training"
 
@@ -321,18 +336,35 @@ def test_coordinator_delivers_final_update_before_finish(tmp_path, monkeypatch, 
         def wait(self, timeout):
             return 0
 
-    monkeypatch.setattr(train.subprocess, "Popen", CompletedLearner)
-    train.launch(
-        c,
-        {"learner": {"python_paths": []}, "device_type": "cpu"},
-        {"boundary": None},
-        output,
-        None,
-        1,
-        tmp_path / "cold.json",
-        tmp_path / "assets.json",
-        track=True,
-    )
+    real_popen = subprocess.Popen
+
+    def popen(argv, **kwargs):
+        if "src.posttrain.train" in argv:
+            return CompletedLearner(argv, **kwargs)
+        return real_popen(argv, **kwargs)
+
+    monkeypatch.setattr(train.subprocess, "Popen", popen)
+    endpoint = Endpoint(tmp_path, sampling_config.scorers[0], Backend())
+    try:
+        train.launch(
+            config,
+            {
+                "learner": {"python_paths": []},
+                "device_type": "cpu",
+                "services": {
+                    "unfamiliar": {"endpoints": [endpoint.url], "launches": []}
+                },
+            },
+            {"prompts": []},
+            output,
+            None,
+            1,
+            tmp_path / "run.json",
+            tmp_path / "assets.json",
+            track=True,
+        )
+    finally:
+        endpoint.close()
     assert len(sdk.logs) == 1 and sdk.logs[0][0] == 1
     assert sdk.finishes == [{"state": "success"}]
 
@@ -347,13 +379,13 @@ def test_interval_runner_opens_checkpoint_tracker_before_evaluation(
     checkpoint.mkdir(parents=True)
     atomic_json(
         checkpoint / "tracking.json",
-        {"swanlab_project": "inko-posttrain", "swanlab_run_id": "cold-run"},
+        {"swanlab_project": "inko-posttrain", "swanlab_run_id": "run"},
     )
     received = []
 
     def evaluate(*args):
         received.append(args[-1])
-        assert sdk.get_run().id == "cold-run"
+        assert sdk.get_run().id == "run"
         return {"step": 1}
 
     monkeypatch.setattr(run_campaign, "_evaluate_checkpoint", evaluate)

@@ -1,124 +1,123 @@
 # Posttrain campaign execution
 
-The trainer can express the campaign's initial fitting, estimator and optimizer
-comparisons, named student EMA views, cold-to-joint branches and periodic
-evaluation. A configuration defines the experiment. The runner never reduces
-image size, sample counts, update counts, model capacity or precision after a
-failure. The [mathematical contract](posttrain_contract.md) defines the losses
-and state transitions. The [recipe note](posttrain_recipe.md) distinguishes
-implementation evidence from unresolved training choices.
+The trainer runs one stage of DiffusionNFT on a fixed base model. A
+configuration defines the experiment; the [contract](posttrain_contract.md)
+defines the loss and the [recipe](posttrain_recipe.md) records which values are
+pinned and which are open. The runner never reduces image size, sample counts,
+update counts, model capacity or precision after a failure.
 
 ## Training controls
 
-Training configurations accept TOML or JSON with the same exact schema. Complete
-examples live in `configs/posttrain/campaign_qualification/`. They are bounded
-execution checks, not fitted recipe values. Their rollout source is the
-512-prompt pool `configs/prompts/posttrain_rollout.jsonl`.
+A training config is TOML or JSON with one exact schema. Missing or unknown
+fields fail validation; there is no config inheritance and no environment
+override. `configs/posttrain.toml` is the reference run.
 
-| Control | Meaning |
+| Section | Meaning |
 |---|---|
-| `fake.initial_steps` | Total fake optimizer updates before the first cold student update. Zero uses the regular ratio from the start. |
-| `fake.initial_checkpoint_every` | Publish recovery state at this initial-fitting interval. The requested fitting stop and the end of fitting also publish. |
-| `fake.updates` | Fake updates before each subsequent cold student update and each joint DMD update. |
-| `fake.target_refresh` | `round` retains collected targets; `update` regenerates targets for each fake update from the held student and same prompts. |
-| `fake_probe.every`, `fake_probe.draws` | Optional fresh-sample regression diagnostic cadence and independent collection count. `every = 0` disables it. |
-| `objective.estimator` | `teacher_residual`, `clean_difference` or `score_kl`. The contract defines their different scales. |
-| `student_optimizer`, `fake_optimizer` | Independent AdamW or Muon/AdamW settings. Muon supports full matrices and adapter matrices. |
-| `training.ema` | A list of `{name, decay, device}` student shadows. Use distinct names; `live` is reserved. Device is explicitly `learner` or `cpu`. |
+| `initialization` | Asset ID and weight view (`live` or `ema`) of the base model. The asset ID resolves through the local `--assets` map. |
+| `student` | `full` tuning, or weight LoRA with rank, alpha and target set (`attention` or `attention_mlp`). |
+| `collection` | Prompt suite, prompts per round, draws per prompt, resolution, sampler rule, step count, guidance, shift and text exit layer. |
+| `nft` | Branch parameterization, advantage scaling and clip, `beta`, reduction epsilon, reference coefficient, inner updates per round, time-draw count, time distribution and bounds. |
+| `old_policy` | Refresh strategy (`copy`, `constant`, `linear_ramp`), decay values, and the horizon counted in committed rounds. |
+| `student_optimizer` | `adamw` or `muon_adamw` with learning rates, betas, weight decay, clip limit and LR schedule. |
+| `execution` | Learner devices, microbatch, timeouts, precision, activation checkpointing, RoCE and deterministic-kernel policy. |
+| `training` | Seed, total student updates, checkpoint interval, and named EMA shadows with decay and storage device. |
+| `scorers`, `rewards` | Declared score services with acquisition limits, and the reward channels with direction, weight and standardization. |
 
-For example, `initial_steps = 128` and `updates = 5` means 128 fake updates
-before student update 1, then five before each later student update. Initial
-fitting does not move the student or EMA, consume rollout prompts, acquire
-rewards or advance a generator schedule. It has its own recoverable clock.
-The fresh probe measures regression on new current-student samples. It cannot
-certify the true student score or image quality.
-
-Validate a complete training input before launch:
+A round is `prompts_per_round * draws_per_prompt` samples that must divide
+evenly across learner devices and microbatches. `training.steps` and
+`training.checkpoint_every` must contain whole rounds of
+`nft.updates_per_round` updates. Validate before launch:
 
 ```bash
-python -m src.posttrain.train \
-  --config configs/posttrain/campaign_qualification/cold_full.json --validate-only
+python -m src.posttrain.train --config configs/posttrain.toml --validate-only
 ```
 
-An explicit fitting boundary can be inspected and resumed in new processes:
+## Launch, stop and resume
 
 ```bash
-python -m src.posttrain.train --config /external/training.json \
-  --assets /external/assets.json --output /external/run --stop-after-fit 16
-python -m src.posttrain.train --config /external/training.json \
-  --assets /external/assets.json --output /external/run \
-  --resume /external/run/checkpoints/fit-000016
+python -m src.posttrain.train --config configs/posttrain.toml \
+  --assets /external/posttrain-assets.json --output /external/run
+python -m src.posttrain.train --config configs/posttrain.toml \
+  --assets /external/posttrain-assets.json --output /external/run \
+  --stop-after 100
+python -m src.posttrain.train --config configs/posttrain.toml \
+  --assets /external/posttrain-assets.json --output /external/run \
+  --resume /external/run/checkpoints/step-000100 --stop-after 200
 ```
 
-A committed cold checkpoint can initialize a separate joint run through
-`stages.initial_checkpoint`. Initialization imports live
-student and active fake weights and resets optimizers, EMA, cursor and RNG.
-It is different from resume. The fake lineage uses actual optimizer updates,
-including initial fitting. Joint branches may choose a different fake ratio.
+The coordinator writes the run manifest, starts the declared scorer services,
+and spawns one resident learner per configured device. `--stop-after` ends the
+run at a committed boundary without changing the configured horizon, so a long
+horizon can be reached in segments. `--track` logs to the `inko-posttrain`
+SwanLab project; a recovered run keeps its experiment identity.
 
-Exact resume requires an unchanged training contract.
+`--resume` requires a byte-identical training contract (config plus prompt
+suite) and restores the last complete round: roles, optimizer state, clock,
+prompt cursor, per-rank RNG and last reward. Work inside an uncommitted round is
+discarded and recollected. A run with committed checkpoints refuses to start
+without `--resume`; a run that stopped before its first publication restarts
+from the declared initialization. Checkpoints are named
+`step-<run-local-student-update>`; `--stop-after` and the horizon always publish
+one, and a completed run's exports come from those directories.
 
-Declare the long joint horizon before launching a composition arm. Stop at a
-complete collection round, evaluate it, and resume the same horizon if retained.
-A completed joint checkpoint cannot initialize a longer run. Changing the
-horizon changes the training contract and its schedules.
+## Evaluation cadence
 
-## Evaluation and readouts
+Interval evaluation is declared by a separate config with one exact schema.
+`sampling_config` names the benchmark's own arm declaration (schema:
+`sampling`/`execution`/`evaluation`/`scorers` blocks plus an `arms` list, each
+arm declaring `name`, `checkpoint`, `steps`, `guidance`, `shift`), and `weights` selects the
+checkpoint views the driver exports and adds as arms:
 
-The benchmark has four explicitly labeled suite slots: development, bringup,
-monitor and confirmation. `prepare_prompts` reserves confirmation prompts after
-excluding rollout, development and monitor texts under Unicode, case and
-whitespace normalization. This checks exact normalized overlap, not semantic
-paraphrases. Repeated-seed manifests preserve scene and caption identity.
-
-Conditional diversity uses LPIPS-AlexNet on all unordered seed pairs for each
-exact caption. It keeps the original image resolution and never pairs caption
-variants. Caption means are averaged within a scene; scenes have equal weight.
-Each caption needs at least two distinct seeds. A single-seed panel is rejected
-when diversity is enabled.
-
-Prepare metric weights on a machine with download access:
-
-```bash
-python -m scripts.posttrain.prepare_metric \
-  --output /external/lpips-alex.pt --cache /external/torch-hub
+```json
+{
+  "sampling_config": "/external/evaluation-sampling.json",
+  "every": 50,
+  "suites": ["development", "monitor"],
+  "weights": ["live", "slow"],
+  "include_final": true,
+  "blind_seed": 7
+}
 ```
 
-Copy the complete metric asset to the execution machine. Set the benchmark's
-`evaluation.diversity.asset`, and map that asset in
-`assets.metrics`. Evaluation uses the prepared complete weights without downloads.
-Pair batch size and CPU thread count are explicit settings. Raw reward reports
-include standard deviation, range and quantiles alongside scene-level paired
-comparisons. Reward scores remain descriptive measurements, not human judgments.
-
-An interval input names the sampling config, generator-step cadence,
-suite names, weight views, final-evaluation choice and blind shuffle seed. See
-`configs/posttrain/campaign_qualification/interval.json`. Every stop must be a
-complete collection round. The cold boundary always receives an evaluation.
+`weights` names `live` or a `training.ema` shadow. `every` is a student-update
+interval and must fall on complete rounds. The driver validates the interval
+together with the training config:
 
 ```bash
-python -m scripts.posttrain.run_campaign --config /external/training.json \
+python -m scripts.posttrain.run_campaign --config configs/posttrain.toml \
   --interval /external/interval.json --validate-only
-python -m scripts.posttrain.run_campaign --config /external/training.json \
-  --interval /external/interval.json --assets /external/assets.json \
+python -m scripts.posttrain.run_campaign --config configs/posttrain.toml \
+  --interval /external/interval.json --assets /external/posttrain-assets.json \
   --output /external/campaign
 ```
 
-Run the same command after interruption. The driver checks committed checkpoints,
-finishes their required evaluations and resumes training. Each segment releases
-all training processes before generation and scoring. Exports name their actual
-view and step. A failed evaluation blocks advancement. Existing blind
-ballots are preserved on restart. `complete.json` is published only after the
-required final work succeeds.
+The driver trains one segment per declared stop, then lets every learner and
+owned scorer process exit before it exports weight views and runs the benchmark
+suites. Exports and reports are reconciled from already committed checkpoints
+on restart, so an interrupted evaluation is retried rather than skipped; a
+failed evaluation blocks further training. `complete.json` appears only after
+the final required work succeeds.
 
-If startup stops before the first checkpoint is published, the matching run
-manifest permits a restart from the declared initialization. Uncommitted work
-has no recoverable state. Once a checkpoint is published, training requires explicit
-resume; the campaign driver supplies it. Changed contracts are rejected in both
-cases.
+Each evaluated checkpoint produces exports under `exports/<view>`, one directory
+per benchmark suite, a blind panel under `<suite>-blind`, and an
+`evaluation.json` receipt naming the exported views and suites. The benchmark
+itself runs standalone with `python -m src.evaluation.benchmarks.run --config
+<sampling config>`; `--suite monitor` is visual-only and skips automatic
+reporting.
 
-Each checkpoint evaluation produces exports, per-suite benchmark outputs and a
-blind panel. Complete its ballot separately, then join human choices to scores:
+Suites and their prompt files come from `configs/prompts/`:
+`development` is the 200-prompt DrawBench suite, `bringup` its 16-prompt subset,
+`monitor` the 48-entry visual panel, and `confirmation` the held-out final
+suite. `scripts.posttrain.prepare_prompts` rebuilds them from the pinned
+reference prompt source and keeps rollout, development and monitor texts
+disjoint under Unicode, case and whitespace normalization. That check is exact
+text overlap, not semantic paraphrase detection.
+
+## Blind readouts
+
+Complete a blind panel's ballot separately, then join human choices to the
+scorer deltas:
 
 ```bash
 python -m scripts.posttrain.readouts join --run /external/benchmark \
@@ -126,18 +125,16 @@ python -m scripts.posttrain.readouts join --run /external/benchmark \
   --ballot /external/blind/ballot.json --output /external/disagreement.json
 ```
 
-Use the actual panel filenames written by `scripts.eval.blind_panel`. The join
-requires complete ballots and preserves score direction. A choice of a third
-arm does not order another arm against the reference. It reports comparable
-pairs and scorer-up/human-down counts without inventing missing judgments.
+Use the panel filenames written by `scripts.eval.blind_panel`. The join requires
+a complete ballot, preserves channel direction, and reports comparable pairs
+with scorer-up/human-down counts instead of inventing missing judgments. A
+ballot that chooses a third arm cannot order another arm against the reference.
 
-## Execution qualification
+## Cost and scope
 
-Representative execution qualification is complete and archived under
-`notes/internal/`. It covered initial-fitting recovery, fresh fitting targets,
-cold-to-joint transitions, Muon on full weights and Q/V adapters, the full fake
-model, two EMA exports, and interval generations with reward and diversity
-scores. Qualifying these paths establishes execution under their recorded
-runtime and placement. It does not establish convergence, a winning setting or
-safety at arbitrary scales and horizons. New resource envelopes need their own
-bounded qualification with the intended scientific workload preserved.
+Every arm declares its question, its decision and its budget before launch.
+SwanLab update records carry the loss, its reference and NFT terms, gradient
+norm, learning rates, and reward statistics per committed update; the interval
+evaluation carries the benchmark and diversity panels. Read the full reward
+curve and the internal metrics before declaring any result: an endpoint score
+alone cannot select a variant, and HPS can rise on visibly degraded outputs.

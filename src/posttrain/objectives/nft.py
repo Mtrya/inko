@@ -4,7 +4,18 @@ import math
 
 import torch
 
-from .dmd import clean_prediction
+
+def expand_time(t, x):
+    return t.float().reshape((-1,) + (1,) * (x.ndim - 1))
+
+
+def clean_prediction(x, t, velocity):
+    return x.float() + (1 - expand_time(t, x)) * velocity.float()
+
+
+def forward_noise(clean, t, noise):
+    t = expand_time(t, clean)
+    return t * clean.detach().float() + (1 - t) * noise.float()
 
 
 def mean_elements(value):
@@ -52,11 +63,7 @@ def losses(
     plus = (1 - beta) * old + beta * new.float()
     minus = (1 + beta) * old - beta * new.float()
     if parameterization == "clean_adaptive":
-        shape = (-1,) + (1,) * (new.ndim - 1)
-        z = (
-            times.float().view(shape) * terminal
-            + (1 - times.float().view(shape)) * noise
-        )
+        z = forward_noise(terminal, times, noise)
         positive = clean_prediction(z, times, plus) - terminal
         negative = clean_prediction(z, times, minus) - terminal
         hp = mean_elements(positive.detach().abs()).clamp_min(epsilon)

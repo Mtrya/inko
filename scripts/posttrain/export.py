@@ -27,7 +27,6 @@ def export(checkpoint, weights, output):
     if config.student.mode == "lora":
         install_adapters(
             model,
-            kind="weight",
             rank=config.student.rank,
             scale=config.student.alpha,
             targets=config.student.targets,

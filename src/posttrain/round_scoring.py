@@ -29,16 +29,13 @@ def publish_collection(
 
     from src.utils.vae_codec import decode_latents
 
-    from .rollout import NOISE_VERSION, NFTRollout, tensor_digest
+    from .rollout import tensor_digest
 
     directory = Path(output) / "images" / attempt / f"round-{step:06d}"
     directory.mkdir(parents=True, exist_ok=True)
     records = []
     mean, std = stats
     for rollout in rollouts:
-        nft = isinstance(rollout, NFTRollout)
-        policy_role = "old" if nft else "student"
-        policy_version = rollout.old_version if nft else rollout.student_version
         require(rollout.collection_round == step, "collection round changed")
         images = decode_latents(rollout.terminal * std + mean, vae)
         for index, (key, prompt_id, image) in enumerate(
@@ -56,50 +53,25 @@ def publish_collection(
                 if rollout.unconditional is None
                 else tuple(t[index].cpu() for t in rollout.unconditional),
             }
-            if not nft:
-                latent.update(
-                    {
-                        "selected_input": rollout.selected_input[index].cpu(),
-                        "selected_time": rollout.selected_time[index].cpu(),
-                        "selected_index": rollout.selected_index[index].cpu(),
-                        "selected_prediction": rollout.selected_prediction[index].cpu(),
-                    }
-                )
             torch.save(latent, latent_path)
             records.append(
                 {
                     "sample_id": key,
                     "prompt": prompts[prompt_id],
-                    "student_version": rollout.student_version,
-                    "stage": rollout.stage,
-                    "policy_role": policy_role,
-                    "policy_version": policy_version,
+                    "generator_step": rollout.generator_step,
+                    "policy_version": rollout.old_version,
                     "group_id": prompt_id,
                     "seed": rollout.seeds[index],
                     "image_path": str(image_path),
                     "image_sha256": file_hash(image_path),
                     "latent_path": str(latent_path),
                     "latent_sha256": file_hash(latent_path),
-                    "selected_index": None
-                    if nft
-                    else int(rollout.selected_index[index]),
-                    "selected_time": None
-                    if nft
-                    else float(rollout.selected_time[index]),
                     "conditioning": [
                         tensor_digest(t[index]) for t in rollout.conditioning
                     ],
                     "unconditional": None
                     if rollout.unconditional is None
                     else [tensor_digest(t[index]) for t in rollout.unconditional],
-                    "noise_specification": {
-                        "version": NOISE_VERSION,
-                        "stage": rollout.stage,
-                        "generator_step": rollout.student_version,
-                        "round": step,
-                        "sample": key,
-                        "collection_seed": rollout.seeds[index],
-                    },
                 }
             )
     atomic_json(
@@ -109,11 +81,10 @@ def publish_collection(
     return records
 
 
-def acquire_round(config, clients, records, *, stage):
-    """Complete each required request before admitting any reward-weighted update."""
-    from .rewards import combine_round, group_advantages, transform_round
+def acquire_round(config, clients, records):
+    """Complete each required request before admitting any optimizer update."""
+    from .rewards import combine_round, group_advantages
 
-    require(stage in {"cold", "joint"}, "invalid scoring stage")
     require(
         len({r["sample_id"] for r in records}) == len(records),
         "duplicate collected sample",
@@ -133,16 +104,13 @@ def acquire_round(config, clients, records, *, stage):
         for future in futures:
             scores.extend(future.result())
     ids = sorted(r["sample_id"] for r in records)
-    if stage == "cold":
-        result = transform_round(ids, scores, config)
-    else:
-        result = group_advantages(
-            combine_round(ids, scores, config),
-            {r["sample_id"]: r["prompt"]["id"] for r in records},
-            scale=config.nft.advantage_scale,
-            clip=config.nft.advantage_clip,
-            epsilon=config.rewards.epsilon,
-        )
+    result = group_advantages(
+        combine_round(ids, scores, config),
+        {r["sample_id"]: r["prompt"]["id"] for r in records},
+        scale=config.nft.advantage_scale,
+        clip=config.nft.advantage_clip,
+        epsilon=config.rewards.epsilon,
+    )
     return {
         "reward": result,
         "scores": scores,
@@ -150,17 +118,8 @@ def acquire_round(config, clients, records, *, stage):
     }
 
 
-def score_ready_round(
-    config, services, output, attempt, step, *, initial_generator_steps=0
-):
-    from .stages import round_position
-
-    stage, stage_step, _ = round_position(config, step)
-    policy_role = "old" if stage == "joint" else "student"
-    version = (step - config.stages.cold_steps) if stage == "joint" else stage_step
-    student_version = initial_generator_steps + (
-        stage_step if stage == "cold" else config.stages.cold_steps + stage_step
-    )
+def score_ready_round(config, services, output, attempt, step):
+    policy_version = step
     paths = [
         collection_path(output, attempt, step, rank)
         for rank in range(len(config.execution.learner_devices))
@@ -187,21 +146,18 @@ def score_ready_round(
     )
     require(
         all(
-            r["stage"] == stage
-            and r["policy_role"] == policy_role
-            and r["policy_version"] == version
-            and r["student_version"] == student_version
+            r["policy_version"] == policy_version
+            and r["generator_step"] == step * config.nft.updates_per_round
             for r in rows
         ),
         "collection policy changed",
     )
-    result = acquire_round(config, services.clients, rows, stage=stage)
+    result = acquire_round(config, services.clients, rows)
     atomic_json(
         destination,
         {
             "step": step,
-            "stage": stage,
-            "policy_version": version,
+            "policy_version": policy_version,
             "collections": [file_hash(path) for path in paths],
             **result,
         },
@@ -225,7 +181,11 @@ def wait_for_rewards(config, output, attempt, step, rank, records):
         "reward/collection identity mismatch",
     )
     reward = packet["reward"]
-    value = "probabilities" if packet["stage"] == "joint" else "weights"
-    weights = dict(zip(reward["sample_ids"], reward[value], strict=True))
-    require({r["sample_id"] for r in records} <= weights.keys(), "missing local reward")
-    return weights, reward
+    probabilities = dict(
+        zip(reward["sample_ids"], reward["probabilities"], strict=True)
+    )
+    require(
+        {r["sample_id"] for r in records} <= probabilities.keys(),
+        "missing local reward",
+    )
+    return probabilities, reward
