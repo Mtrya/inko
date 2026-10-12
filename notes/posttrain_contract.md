@@ -39,11 +39,12 @@ itself under ART. Each round is followed by the objective's student updates —
 NFT only, one old-policy refresh; then the round commits. A stop boundary that
 splits a round is rejected before launch.
 
-Noise is drawn from per-sample CPU generators keyed by run seed, generator
-step, round, sample ID and stream, so rank packing and microbatch order do not
-change any sample's inputs. Collection uses the objective's own stream, and
-under NFT the old-policy version; training inputs additionally use the inner
-update and time-draw index.
+Collection noise is drawn from per-sample CPU generators keyed by run seed,
+round and sample ID, using one shared collection stream. Optimizer steps and
+policy versions do not affect it, so comparison arms share initial noise even
+when update counts differ or ART skips a collection. Rank packing and
+microbatch order do not change any sample's inputs. Training inputs use
+separate streams keyed additionally by optimizer step and inner draw index.
 
 ## Reward to probability
 

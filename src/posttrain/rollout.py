@@ -116,8 +116,8 @@ def collect_nft(
             config.training.seed,
             round_index,
             key,
-            f"old_collection/{old_version}",
-            generator_step=generator_step,
+            "collection",
+            generator_step=0,
         )
         for key in sample_ids
     ]
@@ -179,8 +179,8 @@ def collect_art(
             config.training.seed,
             round_index,
             key,
-            "art_collection",
-            generator_step=generator_step,
+            "collection",
+            generator_step=0,
         )
         for key in sample_ids
     ]

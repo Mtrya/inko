@@ -13,6 +13,44 @@ from src.posttrain.evaluation_config import (
     boundaries,
     evaluation_due,
 )
+from src.posttrain.rollout import collect_art, collect_nft
+
+
+@pytest.mark.parametrize(
+    "round_index,nft_step,art_step", [(0, 0, 0), (5, 5, 10), (5, 5, 4)]
+)
+def test_collection_noise_is_shared_across_algorithms_and_optimizer_clocks(
+    training_config, art_config, round_index, nft_step, art_step
+):
+    prompts = [{"id": "p0"}, {"id": "p1"}]
+    ids = [f"{round_index}:0:0", f"{round_index}:1:0"]
+    nft = collect_nft(
+        lambda x, *args: torch.zeros_like(x),
+        training_config,
+        prompts,
+        ids,
+        round_index,
+        round_index,
+        nft_step,
+        (),
+        None,
+        "cpu",
+    )
+    art = collect_art(
+        lambda x, *args: torch.zeros_like(x),
+        art_config,
+        prompts[::-1],
+        ids[::-1],
+        [1, 0],
+        round_index,
+        art_step,
+        (),
+        "cpu",
+    )
+    assert nft.seeds == art.seeds[::-1]
+    assert nft.seeds[0] != nft.seeds[1]
+    torch.testing.assert_close(nft.terminal, art.states.flip(0)[:, 0], rtol=0, atol=0)
+    assert nft.generator_step == nft_step and art.generator_step == art_step
 
 
 def test_skipped_rounds_reach_budget_and_publish_distinct_recovery_points(
