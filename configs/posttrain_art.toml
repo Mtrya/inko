@@ -28,8 +28,9 @@ text_exit_layer = 20
 
 # One optimizer update per disjoint half of the round's (draw, step) items;
 # the cached rollout prediction is the anchor, so there is no old policy.
+# E0 runs without the reference anchor; 1e-4 is E1's on-state.
 [art]
-reference_coefficient = 1e-4
+reference_coefficient = 0.0
 
 [student_optimizer]
 kind = "muon_adamw"
