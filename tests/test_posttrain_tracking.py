@@ -40,6 +40,8 @@ def sdk(monkeypatch):
             return self.run
 
         def get_run(self):
+            if self.run is None:
+                raise RuntimeError("No active Run. Call swanlab.init() first.")
             return self.run
 
         def define_metric(self, key, **kwargs):
@@ -177,6 +179,25 @@ def test_failure_marks_run_crashed(tmp_path, sdk):
     with pytest.raises(RuntimeError, match="training error"), Tracker(tmp_path, "arm"):
         raise RuntimeError("training error")
     assert sdk.finishes == [{"state": "crashed"}]
+
+
+@pytest.mark.parametrize("stage", ["initialization", "metric_setup"])
+def test_startup_failure_preserves_error_and_closes_only_started_run(
+    tmp_path, sdk, stage
+):
+    error = RuntimeError("tracking startup failed")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    if stage == "initialization":
+        sdk.init = fail
+    else:
+        sdk.define_metric = fail
+    with pytest.raises(RuntimeError) as caught:
+        Tracker(tmp_path, "arm").__enter__()
+    assert caught.value is error
+    assert sdk.finishes == ([] if stage == "initialization" else [{"state": "crashed"}])
 
 
 def record(loss=2):
@@ -768,9 +789,10 @@ def test_failed_scoring_publishes_retries_and_failures_before_round_aborts(
         for slot in (0, 1)
         for draw in (0, 1)
     ]
-    with pytest.raises(ValueError, match="required score failed"), Tracker(
-        tmp_path, "run"
-    ) as tracker:
+    with (
+        pytest.raises(ValueError, match="required score failed"),
+        Tracker(tmp_path, "run") as tracker,
+    ):
         acquire_round(
             training_config,
             {"unfamiliar": FailedClient()},

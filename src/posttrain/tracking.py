@@ -58,6 +58,7 @@ class Tracker:
         if identity is not None:
             kwargs["id"] = identity["swanlab_run_id"]
         self.sdk = swanlab
+        run = None
         try:
             run = swanlab.init(**kwargs)
             require(run.mode == "online", "SwanLab must remain online")
@@ -84,7 +85,7 @@ class Tracker:
             for key in ("runtime/collection_round", "runtime/execution_seconds"):
                 swanlab.define_metric(key, hidden=True, x_axis="_step")
         except BaseException:
-            if swanlab.get_run() is not None:
+            if run is not None:
                 swanlab.finish(state="crashed")
             raise
         return self
