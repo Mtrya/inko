@@ -12,7 +12,7 @@ from pathlib import Path
 from src.evaluation.benchmarks.prompts import load_prompts
 from src.evaluation.benchmarks.run import REPO, run
 from src.posttrain.checkpoint import inspect
-from src.posttrain.config import Arm, Checkpoint, load_config
+from src.posttrain.config import Checkpoint, load_config
 from src.posttrain.evaluation_config import (
     boundaries,
     evaluation_due,
@@ -79,15 +79,8 @@ def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker
             record = export(checkpoint, view, destination)
         asset = f"student_{view}"
         mapped[asset] = str(destination / "weights.pt")
-        c = training.collection
         arms.append(
-            Arm(
-                asset,
-                Checkpoint(asset, view),
-                c.steps,
-                c.guidance,
-                c.shift,
-            )
+            replace(base.arms[0], name=asset, checkpoint=Checkpoint(asset, view))
         )
         exports.append(record)
     config = replace(base, arms=tuple(arms))

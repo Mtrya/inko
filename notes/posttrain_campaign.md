@@ -98,7 +98,10 @@ Interval evaluation is declared by a separate config with one exact schema.
 `sampling_config` names the benchmark's own arm declaration (schema:
 `sampling`/`execution`/`evaluation`/`scorers` blocks plus an `arms` list, each
 arm declaring `name`, `checkpoint`, `steps`, `guidance`, `shift`), and `weights` selects the
-checkpoint views the driver exports and adds as arms:
+checkpoint views the driver exports and adds as arms.
+
+Each exported view uses the reference arm's declared steps, guidance and shift.
+These evaluation controls are independent of the training rollout.
 
 ```json
 {

@@ -8,7 +8,7 @@ from scripts.posttrain.run_campaign import committed_checkpoints
 from src.evaluation.benchmarks.diversity import validate_panel
 from src.posttrain.checkpoint import inspect, load, publish
 from src.posttrain.clock import Clock
-from src.posttrain.config import Diversity
+from src.posttrain.config import Arm, Checkpoint, Diversity
 from src.posttrain.evaluation_config import (
     IntervalEvaluation,
     boundaries,
@@ -152,6 +152,60 @@ def test_diversity_validation_applies_only_to_declared_suites(sampling_config):
     with pytest.raises(ValueError, match="at least two seeds"):
         validate_panel(config, [prompt], "development")
     validate_panel(config, [prompt, dict(prompt, id="q", seed=2)], "development")
+
+
+def test_interval_sampling_uses_declared_benchmark_rule_and_reuses_export(
+    tmp_path, monkeypatch, training_config, sampling_config
+):
+    from scripts.posttrain import run_campaign
+
+    point = publish(
+        tmp_path / "training/checkpoints",
+        2,
+        training_contract(training_config, []),
+        {"step": 2, "committed_rounds": 1},
+        {},
+        0,
+        torch.device("cpu"),
+    )
+    output = tmp_path / "evaluation"
+    atomic_json(
+        output / "exports/ema/export.json",
+        {"weights": "ema", "step": 2, "committed_rounds": 1},
+    )
+    baseline = replace(
+        sampling_config,
+        arms=(Arm("base", Checkpoint("initial", "ema"), 7, 2.5, "none"),),
+    )
+    interval = IntervalEvaluation("sampling.toml", 1, ("monitor",), ("ema",), True, 7)
+    received = []
+
+    def export(*args):
+        raise AssertionError("a published export must be reused")
+
+    def evaluate(config, assets, rows, destination, **kwargs):
+        received.append(config.arms)
+        assert kwargs == {"visual_only": True, "suite": "monitor"}
+        return {"suite": "monitor"}
+
+    monkeypatch.setattr(run_campaign, "load_config", lambda path: baseline)
+    monkeypatch.setattr(run_campaign, "load_prompts", lambda *args: [])
+    monkeypatch.setattr(run_campaign, "export", export)
+    monkeypatch.setattr(run_campaign, "run", evaluate)
+    monkeypatch.setattr(run_campaign, "panel", lambda *args: None)
+    receipt = run_campaign._evaluate_checkpoint(
+        point, training_config, interval, {"checkpoints": {}}, output, None
+    )
+    assert len(received) == 1 and received[0][0] == baseline.arms[0]
+    student = received[0][1]
+    assert (
+        student.name,
+        student.checkpoint,
+        student.steps,
+        student.guidance,
+        student.shift,
+    ) == ("student_ema", Checkpoint("student_ema", "ema"), 7, 2.5, "none")
+    assert receipt["step"] == 2 and receipt["committed_rounds"] == 1
 
 
 def test_recovery_keeps_complete_evaluations_and_finishes_interrupted_before_training(
