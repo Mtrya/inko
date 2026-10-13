@@ -1,4 +1,4 @@
-"""Single-host NFT trainer with resident learners and independent scorers."""
+"""Single-host ART trainer with resident learners and independent scorers."""
 
 import argparse
 import fcntl

@@ -1,3 +1,4 @@
+import copy
 from dataclasses import replace
 
 import pytest
@@ -16,9 +17,7 @@ from src.posttrain.config import (
 from src.posttrain.scoring.contracts import Channel
 from src.posttrain.training_config import (
     ART,
-    NFT,
     Collection,
-    OldPolicy,
     Optimizer,
     RewardChannel,
     Rewards,
@@ -90,9 +89,8 @@ def small_model():
 
 @pytest.fixture
 def training_config(sampling_config):
-    """Explicit single-stage NFT inputs; recipes never source these contracts."""
+    """Explicit single-stage ART inputs; recipes never source these contracts."""
     return TrainingConfig(
-        objective="nft",
         initialization=Checkpoint("initial", "ema"),
         student=Student("full", 2, 2.0, "attention_mlp"),
         collection=Collection(
@@ -102,25 +100,10 @@ def training_config(sampling_config):
             height=16,
             width=16,
             steps=2,
-            guidance=1.0,
             shift="shape",
             text_exit_layer=1,
         ),
-        nft=NFT(
-            parameterization="clean_adaptive",
-            advantage_scale="group",
-            advantage_clip=5.0,
-            beta=1.0,
-            epsilon=1e-05,
-            reference_coefficient=1e-4,
-            updates_per_round=1,
-            time_draws=1,
-            time_distribution="uniform",
-            time_min=0.02,
-            time_max=0.98,
-        ),
-        old_policy=OldPolicy("copy", 0.9, 0.0, 0.5, 3),
-        art=None,
+        art=ART(reference_coefficient=1e-4),
         student_optimizer=Optimizer(
             kind="adamw",
             lr=1e-4,
@@ -157,13 +140,7 @@ def training_config(sampling_config):
 
 
 @pytest.fixture
-def art_config(training_config):
-    """ART arm inputs: same round workload, cached trajectory anchor and no old policy."""
-    return replace(
-        training_config,
-        objective="art",
-        nft=None,
-        art=ART(reference_coefficient=1e-4),
-        old_policy=None,
-        training=replace(training_config.training, rounds=2, checkpoint_every=1),
-    )
+def new_roles():
+    from src.posttrain.roles import Roles
+
+    return lambda config, base: Roles(copy.deepcopy(base), config)

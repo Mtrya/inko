@@ -1,4 +1,4 @@
-"""Complete single-stage NFT training configuration, separate from benchmark arms."""
+"""Complete single-stage ART training configuration, separate from benchmark arms."""
 
 import json
 import math
@@ -9,7 +9,6 @@ from pathlib import Path
 from .config import Checkpoint, Scorer
 from .schema import decode, name, require
 
-OBJECTIVES = {"nft", "art"}
 ART_UPDATES_PER_ROUND = 2
 
 
@@ -29,38 +28,13 @@ class Collection:
     height: int
     width: int
     steps: int
-    guidance: float
     shift: str
     text_exit_layer: int
 
 
 @dataclass(frozen=True)
-class NFT:
-    parameterization: str
-    advantage_scale: str
-    advantage_clip: float
-    beta: float
-    epsilon: float
-    reference_coefficient: float
-    updates_per_round: int
-    time_draws: int
-    time_distribution: str
-    time_min: float
-    time_max: float
-
-
-@dataclass(frozen=True)
 class ART:
     reference_coefficient: float
-
-
-@dataclass(frozen=True)
-class OldPolicy:
-    strategy: str
-    decay: float
-    decay_start: float
-    decay_end: float
-    horizon: int
 
 
 @dataclass(frozen=True)
@@ -158,13 +132,10 @@ class Rewards:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    objective: str
     initialization: Checkpoint
     student: Student
     collection: Collection
-    nft: NFT | None
-    art: ART | None
-    old_policy: OldPolicy | None
+    art: ART
     student_optimizer: Optimizer
     execution: TrainingExecution
     training: Training
@@ -173,15 +144,11 @@ class TrainingConfig:
 
     @property
     def updates_per_round(self):
-        return (
-            ART_UPDATES_PER_ROUND
-            if self.objective == "art"
-            else self.nft.updates_per_round
-        )
+        return ART_UPDATES_PER_ROUND
 
     @property
     def reference_coefficient(self):
-        return (self.nft if self.objective == "nft" else self.art).reference_coefficient
+        return self.art.reference_coefficient
 
     def __post_init__(self):
         s, c, e, t = (
@@ -189,16 +156,6 @@ class TrainingConfig:
             self.collection,
             self.execution,
             self.training,
-        )
-        require(self.objective in OBJECTIVES, "unknown training objective")
-        require(
-            (self.nft is not None) == (self.objective == "nft")
-            and (self.art is not None) == (self.objective == "art"),
-            "training objective requires its own config section",
-        )
-        require(
-            (self.old_policy is not None) == (self.objective == "nft"),
-            "old-policy refresh belongs to the NFT objective",
         )
         require(
             self.initialization.weights in {"live", "ema"},
@@ -212,7 +169,7 @@ class TrainingConfig:
             "invalid student mode/targets",
         )
         require(
-            c.steps > 0 and c.shift in {"shape", "none"} and c.guidance >= 0,
+            c.steps > 0 and c.shift in {"shape", "none"},
             "invalid collection sampler",
         )
         require(
@@ -257,56 +214,16 @@ class TrainingConfig:
             self.student_optimizer.warmup_steps <= t.rounds * self.updates_per_round,
             "student warmup exceeds the training horizon",
         )
-        if self.objective == "art":
-            require(
-                c.prompts_per_round * c.draws_per_prompt % (2 * len(e.learner_devices))
-                == 0,
-                "ART round must split evenly into two update windows",
-            )
-            require(
-                c.guidance == 1,
-                "ART caches the anchor it trains against; the rollout cannot use CFG",
-            )
-            require(
-                math.isfinite(self.art.reference_coefficient)
-                and self.art.reference_coefficient >= 0,
-                "invalid ART reference coefficient",
-            )
-        else:
-            o = self.nft
-            require(
-                o.parameterization in {"clean_adaptive", "velocity_mse"}
-                and o.advantage_scale in {"group", "round"}
-                and min(
-                    o.advantage_clip,
-                    o.beta,
-                    o.epsilon,
-                    o.updates_per_round,
-                    o.time_draws,
-                )
-                > 0
-                and all(
-                    math.isfinite(v)
-                    for v in (
-                        o.advantage_clip,
-                        o.beta,
-                        o.epsilon,
-                        o.reference_coefficient,
-                    )
-                )
-                and o.reference_coefficient >= 0
-                and o.time_distribution in {"uniform", "grid"}
-                and 0 < o.time_min < o.time_max < 1,
-                "invalid NFT loss/time/group configuration",
-            )
-            old = self.old_policy
-            require(
-                old.strategy in {"copy", "constant", "linear_ramp"}
-                and 0 <= old.decay < 1
-                and 0 <= old.decay_start <= old.decay_end < 1
-                and old.horizon > 0,
-                "invalid old-policy refresh schedule",
-            )
+        require(
+            c.prompts_per_round * c.draws_per_prompt % (2 * len(e.learner_devices))
+            == 0,
+            "ART round must split evenly into two update windows",
+        )
+        require(
+            math.isfinite(self.art.reference_coefficient)
+            and self.art.reference_coefficient >= 0,
+            "invalid ART reference coefficient",
+        )
         available = {f"{s.id}.{ch.name}": ch for s in self.scorers for ch in s.outputs}
         channels = self.rewards.channels
         require(

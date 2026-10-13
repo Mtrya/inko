@@ -1,14 +1,10 @@
 # Posttraining mathematical contract
 
-The trainer optimizes the 600k base model in one stage: one objective, no
-distillation. The objective is selected by the top-level `objective` key —
-`"nft"` for [DiffusionNFT](https://arxiv.org/abs/2509.16117v2)
-(`configs/posttrain.toml`, the reference configuration) or `"art"` for
-[DiffusionART](https://arxiv.org/abs/2610.12572) (`configs/posttrain_art.toml`).
-Each objective declares exactly its own section, `[nft]` or `[art]`. Numerical
-choices belong in the runnable config; this note defines their meaning. See the
-[recipe](posttrain_recipe.md) and
-[evaluation protocol](posttrain_evaluation.md).
+The trainer optimizes the 600k base model with
+[DiffusionART](https://arxiv.org/abs/2610.12572) in one stage.
+`configs/posttrain.toml` declares the complete training configuration. Numerical
+choices belong in that config; this note defines their meaning. See the
+[recipe](posttrain_recipe.md) and [evaluation protocol](posttrain_evaluation.md).
 
 ## Flow convention
 
@@ -26,82 +22,34 @@ The interpolation and velocity target live in [flow.paths](../src/flow/paths.py)
 A reference using noise time `tau = 1 - t` and velocity `epsilon - x` changes
 both the time direction and the velocity sign; translate its noising and
 clean-prediction equations together, as the ART
-[coordinate mapping](#reference-coordinate-mapping) does. Gradients reach the
-model only through the differentiated `clean_adaptive` branch below.
+[coordinate mapping](#reference-coordinate-mapping) does. Gradients reach the model through the student velocity prediction.
 
 ## Round structure
 
 One collection round produces `prompts_per_round * draws_per_prompt` samples.
-The rollout policy collects every sample of a round at the same committed step,
-at the configured step count and guidance: the old policy under NFT, the student
-itself under ART. Each round is followed by the objective's student updates —
-`nft.updates_per_round` under NFT, two disjoint windows under ART — then, under
-NFT only, one old-policy refresh; then the round commits. A stop boundary that
+The live student collects every sample at the same committed optimizer step,
+using the configured sampler with guidance 1. Two disjoint training windows
+follow an active collection, then the round commits. A stop boundary that
 splits a round is rejected before launch.
 
 Collection noise is drawn from per-sample CPU generators keyed by run seed,
-round and sample ID, using one shared collection stream. Optimizer steps and
-policy versions do not affect it, so comparison arms share initial noise even
-when update counts differ or ART skips a collection. Rank packing and
-microbatch order do not change any sample's inputs. Training inputs use
-separate streams keyed additionally by optimizer step and inner draw index.
+round and sample ID. Optimizer steps do not affect it, so comparison arms share
+initial noise even when one arm skips a collection. Rank packing and
+microbatch order do not change any sample's inputs. The window permutation
+uses a separate keyed stream.
 
-## Reward to probability
+## Combined reward
 
 Scorers return raw channels; `combine_round` orients each declared channel by
 its direction, optionally standardizes it over the round, and mixes channels
 with nonnegative weights that sum to one. Missing, failed or nonfinite required
 scores abort before any optimizer update; they never become zero rewards.
-
-Exact prompt ID defines a group. Over the round's samples `i` with combined
-reward `R_i`, group mean `mu_g`, group population standard deviation `s_g` (or
-the round population standard deviation under `advantage_scale = "round"`) and
-`epsilon_reward`:
-
-```text
-A_i = (R_i - mu_g) / (s_g + epsilon_reward)
-p_i = 0.5 + clip(A_i, -C, C) / (2 C)   in [0, 1]
-```
-
-`C = nft.advantage_clip`. A constant group keeps `p = 0.5`, which cancels at
-`new = old` but anchors the student after it moves. The whole set of `p` values
-for a round is admitted together; a partial round cannot start an update.
-
-## NFT objective
-
-Let `x` be a collected terminal latent, `epsilon` independent forward noise,
-`t` a sampled physical time, `v_old` the frozen old-policy velocity and `v_new`
-the differentiated student velocity at `(t x + (1 - t) epsilon, t, c)`:
-
-```text
-v_plus  = (1 - beta) stopgrad(v_old) + beta v_new
-v_minus = (1 + beta) stopgrad(v_old) - beta v_new
-x_plus/minus = clean(z, t, v_plus/minus)
-h_plus/minus = stopgrad(max(mean_elements(abs(x_plus/minus - x)), epsilon_nft))
-l_plus/minus = mean_elements((x_plus/minus - x)^2) / h_plus/minus
-l_nft = C / beta * (p l_plus + (1 - p) l_minus)
-```
-
-The two detached normalizers are separate; `mean_elements` averages all latent
-elements per sample. `C` and `beta` are distinct positive parameters, and the
-`1/beta` and `C` scales match the fixed optimality weight. Inko evaluates this
-in FP32 against an independent CPU double oracle. The `velocity_mse`
-parameterization replaces both branch losses with
-`mean_elements((v_plus/minus - (x - epsilon))^2)` and uses no adaptive
-denominator.
-
-Forward times are bounded uniform draws on `(nft.time_min, nft.time_max)`, or
-draws from the deployed collection grid excluding its terminal endpoint
-`t = 1`. Each time draw has independent keyed time and noise; branch losses
-average over the draws within a sample, and the sample mean is reduced
-globally across learners.
+The complete combined-reward map is admitted before guidance is constructed.
 
 ## ART objective
 
-[DiffusionART](https://arxiv.org/abs/2610.12572) replaces the NFT branches with
-a frozen-target regression over the trajectory the rollout policy just visited:
-the cached rollout prediction at each visited state is the anchor. The ART arm
-therefore allocates no old policy and refreshes none.
+ART regresses frozen targets over the trajectory the rollout policy just
+visited: the cached rollout prediction at each visited state is the anchor.
 
 For one prompt group of `K = draws_per_prompt` draws with terminal latents `x_k`
 and combined rewards `R_k`, and `r_k = R_k - mean(R)`:
@@ -148,14 +96,13 @@ reference's full-window normalization with `restore_zero_signal = false`. The
 `0.8` noise level, the `1e-5` KL threshold and the `1e-5` epsilon floors are the
 paper's constants, not campaign knobs.
 
-A trained ART round uses two student updates; the ART arm fixes that
-count instead of reading `nft.updates_per_round`. Each learner shuffles its
+A trained ART round uses exactly two student updates. Each learner shuffles its
 draws with a private round-keyed RNG before splitting them into equal disjoint
 halves. The order is independent of microbatch packing, and every trajectory
 site of a half trains once in its window. Both windows regress targets frozen
 at collection time, so the second window's residual `G - d` restores motion the first window
-produced. `reference_coefficient` composes exactly as under NFT: a velocity MSE
-between the student and the frozen reference at the same items.
+produced. The optional reference anchor adds a velocity MSE between the
+student and the frozen reference at the same items.
 
 When every prompt's guidance is inactive and `reference_coefficient = 0`, the
 round commits as skipped without optimizer, LR or student EMA updates. The
@@ -193,11 +140,11 @@ reference's, not an approximation of them.
 
 The frozen reference is the entry student: the base weights under LoRA, a full
 copy under full tuning. On the same `(z, t, c)` inputs as the trained items of
-either objective:
+the ART windows:
 
 ```text
 l_ref = mean_elements((v_new - stopgrad(v_reference))^2)
-L = mean(l_nft or l_art) + reference_coefficient * mean(l_ref)
+L = mean(l_art) + reference_coefficient * mean(l_ref)
 ```
 
 `l_ref` is a velocity prediction penalty, not a distribution divergence. Its
@@ -205,39 +152,21 @@ coefficient is zero only for the anchor-off comparison, in which case no
 reference role is allocated. The reference never receives gradients and never
 changes during a run.
 
-## Old-policy refresh
-
-After every committed round, with `r` the number of previously committed
-rounds, `old <- d(r) old + (1 - d(r)) student`:
-
-- `copy`: `d = 0` (the old policy is the student at every round boundary).
-- `constant`: the configured decay.
-- `linear_ramp`: `decay_start + (decay_end - decay_start) * min(r / horizon, 1)`.
-
-The current Inko recipe ramps `d` from 0 toward 0.5 over 1000 NFT rounds.
-The NFT paper's default ramp is `min(0.001 * i, 0.5)` and its OCR schedules
-retain more of the old policy; these are task-specific recipe choices.
-The old policy moves only at a committed boundary; a resumed run restores the
-exact decay it recorded.
-
 ## Clocks and recovery
 
 `step` counts successful student optimizer updates, `committed_rounds` counts
 complete scored collections including skipped ART rounds, and `skipped_rounds`
 counts collections that produced no update. Thus
 `step = (committed_rounds - skipped_rounds) * updates_per_round` at a committed
-boundary. `old_policy_version` counts committed refreshes; under NFT
-one refresh happens per committed round, so the version equals the
-committed-round count, and the ART arm keeps it at zero. Named student EMA
-shadows advance on each successful student step and are independent of the old
-policy. The LR schedule runs on the student's successful-step clock.
+boundary. Named student EMA shadows advance on each successful student step.
+The LR schedule runs on the student's successful-step clock.
 The training horizon, checkpoint cadence and interval evaluation count
 committed collections, including skips. A cosine LR schedule uses the nominal
 maximum update count (`rounds * updates_per_round`); skipped rounds do not
 advance that schedule or the student EMA.
 
-Complete-round checkpoints retain every role in use (student, the NFT old
-policy, optional reference, EMA shadows), the student optimizer and its clock,
+Complete-round checkpoints retain every role in use (student, optional
+reference, EMA shadows), the student optimizer and its clock,
 `last_reward`, both round counts, the prompt cursor and per-rank RNG. Files are
 fsynced before a manifest-bearing directory is atomically renamed; incomplete directories are
 never recovery points. Resume requires an unchanged training contract and
@@ -248,14 +177,11 @@ round is discarded and recollected.
 
 `tests/` covers operator values and gradients against independent oracles,
 group statistics both locally and through real learner collectives, clock and
-scheduling mechanics, role isolation, probability admission, the cache-to-item
+scheduling mechanics, role isolation, reward admission, the cache-to-item
 trajectory round trip, and exact save/resume. Generation quality is established
 only by real samples and benchmarks under the
 [evaluation protocol](posttrain_evaluation.md).
 
-[DiffusionNFT](https://arxiv.org/abs/2509.16117v2) defines the forward-process
-reward optimization, the implicit positive/negative branches and the
-old-policy formulation implemented here.
 [DiffusionART](https://arxiv.org/abs/2610.12572) defines the reward-endpoint
 covariance guidance, the frozen-target regression and the directional
 corrective mask.

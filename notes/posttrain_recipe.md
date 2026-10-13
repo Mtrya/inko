@@ -1,11 +1,9 @@
 # Posttraining recipe
 
-Status: the trainer implements one stage on the 600k pretrain EMA base at 896p,
-with the objective selected by the run config — DiffusionNFT with a
-soft-refreshed old policy, or DiffusionART with the cached rollout prediction as
-its anchor. Both arms share the round workload below and support an optional
-frozen reference anchor. No posttraining quality result exists yet; the
-recipe's open values are listed below with the comparison each one needs.
+Status: DiffusionART is selected for the remaining recipe comparisons after
+complete 1000-round ART/NFT curves on the 600k pretrain EMA at 896p. The
+anchor coefficient, learning rate, trainable scope and final checkpoint remain
+open. `configs/posttrain.toml` is the unanchored ART comparison configuration.
 
 See the [mathematical contract](posttrain_contract.md),
 [evaluation protocol](posttrain_evaluation.md) and
@@ -21,44 +19,51 @@ See the [mathematical contract](posttrain_contract.md),
 | Reward | HPSv3 `mu` and VQAScore v3.1 `probability`, equal weights, round-standardized |
 | Optimizer | Muon for matrices plus AdamW for conditioning tensors |
 | Student | LoRA r=32 on attention projections (full tuning is the alternative) |
+| Student EMA views | Fast 0.9 and slow 0.999, updated per optimizer step; interval reads use slow |
 
 The base model's ODE quality is flat between 20 and 50 steps at CFG 1, so 20
 rollout steps cost nothing in rollout quality; the deployed step count is a
-separate post-training decision. One 20-step conditional forward per sampler
-step means the rollout does not pay for a second unconditional branch.
+separate post-training decision. Each sampler step uses one conditional forward.
 
-## Implemented objectives
+## Algorithm choice and implemented mechanism
 
-The trainer implements these mechanisms from the reference methods:
+ART carries forward from the paired development comparison and repeated
+visual reads. Its HPS/VQA gains exceed NFT across the useful learning regions;
+this advantage also appears before ART's largest diversity contraction. For
+example, ART round 300 has HPS 6.004, VQA .266 and LPIPS .752; NFT round 800
+has .044, .209 and .754. Similar LPIPS does not guarantee the same forms of
+diversity, so checkpoint selection also uses actual generations.
 
-- Per-prompt group-normalized advantage, clipped to `+/-5` and mapped linearly
-  to the optimality probability `p in [0, 1]` (NFT).
-- Per-branch, per-sample adaptive clean-target weighting with an epsilon floor
-  of `1e-5` (NFT).
-- Separate frozen old policy, refreshed after the round's student updates (NFT).
-- Unit-RMS reward-endpoint covariance guidance, two update windows per round,
-  and the trust-region mask on the reference transition variance with noise
-  level `0.8` and KL threshold `1e-5` (ART; constants are not config values).
+ART's later HPS approaches a plateau while LPIPS continues to decline and
+some unrelated prompts become floral portraits. Its final checkpoint is not
+automatically the selected checkpoint. Shared loss of artistic texture alone
+is not a harmful-collapse criterion. Final quality assessment remains reserved
+for the settled recipe and its held-out confirmation.
 
-NFT's beta, inner-update count and old-policy refresh schedule are recipe
-choices. [NFT §4.4 and Appendix C](https://arxiv.org/html/2509.16117v2#A3)
-use beta 1 or 0.1 and task-specific refresh schedules. The default paper ramp
-is `min(0.001 * i, 0.5)`; OCR uses higher retention. Inko currently uses
-`min(0.0005 * r, 0.5)`, where `r` counts previously committed NFT rounds.
-The shared endpoint does not make these the same schedule.
+The completed [ART run](https://swanlab.cn/@mtrya/inko-posttrain/runs/85ut8u5j)
+and [NFT control](https://swanlab.cn/@mtrya/inko-posttrain/runs/2t30rxqx) retain
+the score, diversity, optimizer and runtime trajectories. Their interval
+artifacts retain blind monitor and development comparisons. Both completed
+1000 collected rounds with no skipped rounds; ART performed 2000 optimizer
+updates and NFT 1000. Both used slow EMA decay 0.999 per optimizer step;
+ART therefore advances its EMA twice per active round. The algorithm comparison
+includes this difference in EMA age.
+
+The active trainer implements unit-RMS reward-endpoint covariance guidance,
+two disjoint update windows per round and directional trust-region masking.
+Targets are the cached rollout predictions plus each prompt group's guidance.
+The reference transition noise level is 0.8; the KL threshold and epsilon
+floors are 1e-5. An optional frozen-base velocity MSE composes with the ART
+loss. These equations are defined in the [contract](posttrain_contract.md).
 
 ## Open values
 
 | Value | Current setting | Decision it needs |
 |---|---|---|
-| Anchor coefficient | `reference_coefficient = 0.0` | Compare the anchor against the unregularized objective. Reward curves and monitor generations decide whether it controls reward-hacking drift. |
-| NFT beta | `beta = 1.0` | Initial single-reward reference setting; suitability for Inko's mixed reward remains unverified. |
-| NFT inner updates | 1 per collection round | Initial reuse setting; more updates change the drift from the collected policy. |
-| NFT old-policy refresh | 0 toward 0.5 over 1000 committed rounds | Initial schedule; task-specific stability and reward improvement decide its retention and ramp. |
-| Muon learning rate | `muon_lr = 1e-3`, AdamW `lr = 1e-5` | Bounded sweep around the pretrain-comparable rate, read as reward-curve stability plus internal metrics. |
-| Trainable scope | LoRA r=32 | One comparison against full tuning at the settled configuration. LoRA shares the frozen reference base; the anchor still requires reference forwards. |
-| Run length | 1000 collected rounds, including skipped ART collections | Long-horizon confirmation; checkpoint selection uses the development suite, the monitor panel and blind review. |
-| Group size, time draws, EMA decays | 8 draws per prompt, 1 time draw, two named shadows | Not yet studied; each is a config value with a mechanism test, not a fitted recipe value. |
+| Anchor coefficient | Off at 0.0; first on-state 1e-4 | Compare paired development curves, generations, adherence onset and diversity to determine whether it controls drift without capping gains. |
+| Muon learning rate | `muon_lr = 1e-3` | Fit {3e-4, 1e-3, 3e-3} by learning trajectory and numerical stability. The LoRA arm has no trainable AdamW branch. |
+| Trainable scope | LoRA r=32 | Compare full tuning at the settled configuration, starting its AdamW branch at 1e-4. LoRA shares the frozen reference base; the anchor still requires reference forwards. |
+| Run length | 1000 rounds used for the algorithm comparison | Select the final horizon from the full quality/diversity trajectories; confirm the settled recipe once. |
 
 Reward-hacking evidence is handled scorer-side or data-side first; the anchor
 coefficient is the second lever.
@@ -67,10 +72,9 @@ coefficient is the second lever.
 
 | Path | Responsibility |
 |---|---|
-| `src/posttrain/` | Trainer, NFT and ART objectives, sampling, reward transforms, score clients |
+| `src/posttrain/` | ART trainer, sampling, reward transforms and score clients |
 | `src/evaluation/benchmarks/` | Independently runnable benchmark execution and reporting |
-| `configs/posttrain.toml` | Reference single-stage NFT training config |
-| `configs/posttrain_art.toml` | Reference single-stage ART training config: same round workload, no old policy |
+| `configs/posttrain.toml` | Complete single-stage ART training config |
 | `configs/prompts/` | Rollout, development, monitor and confirmation suites |
 | `configs/scorers/` | Per-scorer source, weights and output declarations |
 
@@ -122,13 +126,12 @@ student; scorers never join collectives. Startup primes each wrapper's
 reduction layout with a zero-loss backward and restores RNG before
 initialization or resume.
 
-Execution mechanics — role separation, complete-round recovery, export,
-interval evaluation and the scorer services — were qualified at 640p with 12
-learners on the Ascend node. The 896p, 8-draw, 20-step rollout and the 600k EMA
-base are a heavier envelope that has not been measured: allocate a bounded
-qualification run before the long campaign, and treat memory and round-time
-numbers from the earlier envelope as inapplicable. No configuration reduces
-image size, sample count, update count, capacity or precision after a failure.
+The 896p, 20-step, 12-prompt by 8-draw envelope completed qualification
+and the full algorithm comparison. The ART run used sixteen Ascend devices
+(twelve learners and four scorer devices), took 26.74 allocated hours including
+twenty interval evaluations, and used 427.81 NPU-hours. Its final collection
+round took 75.57 seconds. Enabling the reference adds forwards; its incremental
+cost is measured in the anchor comparison.
 
 Mechanism tests in `tests/` cover the operator values, group statistics, role
 isolation, scheduling, prediction admission and exact save/resume. They cannot

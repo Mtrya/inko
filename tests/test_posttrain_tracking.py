@@ -207,7 +207,10 @@ def record(loss=2):
         "student_loss": loss,
         "student_grad_norm": 0.5,
         "reference_enabled": True,
-        "term_losses": {"nft": loss, "reference": 0.25},
+        "art_items": 4,
+        "art_kept": 4,
+        "art_masked": 0,
+        "term_losses": {"art": loss, "reference": 0.25},
         "learning_rates": {"muon": 0.01},
     }
 
@@ -238,7 +241,6 @@ def publish_round(output, attempt, number, rank=0, *, skipped=False, skips=0):
                 "sample_ids": ids,
                 "combined": [0, 1, 0, 0],
                 "raw": {"unfamiliar.fit": [1, 3, 2, 2]},
-                "groups": {"a": {"sample_ids": ids[:2]}, "b": {"sample_ids": ids[2:]}},
             }
         },
     )
@@ -248,8 +250,10 @@ def test_rank_scaled_objective_losses_average_and_disabled_reference_is_omitted(
     metrics = update_metrics([record(2), record(6)])
     assert metrics == {
         "train/grad_norm": 0.5,
-        "train/nft_loss": 4,
+        "train/art_loss": 4,
         "train/reference_loss": 0.25,
+        "train/art_inactive_fraction": 0.0,
+        "train/art_rejected_fraction": 0.0,
         "train/lr/muon": 0.01,
     }
     disabled = dict(record(), reference_enabled=False)
@@ -261,11 +265,10 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
 ):
     config = replace(
         training_config,
-        nft=replace(training_config.nft, updates_per_round=2),
         training=replace(training_config.training, rounds=1, checkpoint_every=1),
         collection=replace(training_config.collection, prompts_per_round=2),
     )
-    with Tracker(tmp_path, "nft") as tracker:
+    with Tracker(tmp_path, "art") as tracker:
         delivery = TrainingMetrics(tracker, config, tmp_path, "attempt")
         for inner in range(2):
             for rank in range(1):
@@ -281,10 +284,10 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
         delivery.poll()
         delivery.poll()
     updates = [
-        (step, values) for step, values in sdk.logs if "train/nft_loss" in values
+        (step, values) for step, values in sdk.logs if "train/art_loss" in values
     ]
     assert [step for step, _ in updates] == [1, 2]
-    assert all(metrics["train/nft_loss"] == 2 for _, metrics in updates)
+    assert all(metrics["train/art_loss"] == 2 for _, metrics in updates)
     collections = [
         (step, values)
         for step, values in sdk.logs
@@ -293,7 +296,7 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
     assert len(collections) == 1
     assert collections[0][0] == 1
     assert collections[0][1]["train/reward/unfamiliar.fit/mean"] == 2
-    assert collections[0][1]["train/nft_constant_group_fraction"] == 0.5
+    assert collections[0][1]["train/art_active_group_fraction"] == 0.75
     assert sdk.definitions["train/reward/*"]["x_axis"] == "runtime/collection_round"
 
 
@@ -303,29 +306,30 @@ def test_resume_delivers_only_new_attempt_records(tmp_path, sdk, training_config
         training=replace(training_config.training, rounds=1),
         collection=replace(training_config.collection, prompts_per_round=2),
     )
-    with Tracker(tmp_path, "nft") as tracker:
+    with Tracker(tmp_path, "art") as tracker:
         delivery = TrainingMetrics(
             tracker, config, tmp_path, "new", saved={"step": 0, "committed_rounds": 0}
         )
         for attempt in ("old", "new"):
-            atomic_json(
-                tmp_path
-                / "updates"
-                / f"{attempt}-round-000000-inner-000-rank-000.json",
-                record(),
-            )
+            for inner in (0, 1):
+                atomic_json(
+                    tmp_path
+                    / "updates"
+                    / f"{attempt}-round-000000-inner-{inner:03d}-rank-000.json",
+                    dict(record(), step=inner + 1),
+                )
             publish_round(tmp_path, attempt, 0)
         delivery.poll()
-    assert [step for step, values in sdk.logs if "train/nft_loss" in values] == [1]
+    assert [step for step, values in sdk.logs if "train/art_loss" in values] == [1, 2]
 
 
 def test_art_tracking_resumes_collection_count_and_passes_skipped_rounds(
-    tmp_path, sdk, art_config
+    tmp_path, sdk, training_config
 ):
     config = replace(
-        art_config,
-        execution=replace(art_config.execution, learner_devices=(0, 1)),
-        training=replace(art_config.training, rounds=6),
+        training_config,
+        execution=replace(training_config.execution, learner_devices=(0, 1)),
+        training=replace(training_config.training, rounds=6),
     )
     with Tracker(tmp_path, "art") as tracker:
         delivery = TrainingMetrics(
@@ -352,7 +356,7 @@ def test_art_tracking_resumes_collection_count_and_passes_skipped_rounds(
             publish_round(tmp_path, "new", 4, rank=rank, skips=3)
         delivery.poll()
         delivery.poll()
-    assert [step for step, values in sdk.logs if "train/nft_loss" in values] == [3, 4]
+    assert [step for step, values in sdk.logs if "train/art_loss" in values] == [3, 4]
     assert [
         values["runtime/collection_round"]
         for _, values in sdk.logs
@@ -462,10 +466,13 @@ def test_coordinator_delivers_final_update_before_finish(
         def __init__(self, argv, **kwargs):
             attempt = argv[argv.index("--attempt") + 1]
             assert (output / "tracking.json").exists()
-            atomic_json(
-                output / "updates" / f"{attempt}-round-000000-inner-000-rank-000.json",
-                record(),
-            )
+            for inner in (0, 1):
+                atomic_json(
+                    output
+                    / "updates"
+                    / f"{attempt}-round-000000-inner-{inner:03d}-rank-000.json",
+                    dict(record(), step=inner + 1),
+                )
             publish_round(output, attempt, 0)
 
         def poll(self):
@@ -503,7 +510,7 @@ def test_coordinator_delivers_final_update_before_finish(
         )
     finally:
         endpoint.close()
-    assert [step for step, values in sdk.logs if "train/nft_loss" in values] == [1]
+    assert [step for step, values in sdk.logs if "train/art_loss" in values] == [1, 2]
     assert sdk.finishes == [{"state": "success"}]
 
 
@@ -806,7 +813,7 @@ def test_failed_scoring_publishes_retries_and_failures_before_round_aborts(
     ]
     assert values[-1]["runtime/scoring/unfamiliar/failed_requests"] == 4
     assert values[-1]["runtime/scoring/unfamiliar/retry_attempts"] == 4
-    assert not any("train/nft_loss" in metrics for _, metrics in sdk.logs)
+    assert not any("train/art_loss" in metrics for _, metrics in sdk.logs)
     assert sdk.finishes == [{"state": "crashed"}]
 
 

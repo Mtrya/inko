@@ -217,7 +217,7 @@ def test_duplicate_and_wrong_envelopes_rejected(sampling_config, image_input):
         replace(r, request_id=identity("wrong"))
 
 
-def test_round_acquisition_maps_grouped_rewards_to_probabilities(
+def test_round_acquisition_returns_combined_rewards(
     tmp_path, training_config, image_input
 ):
     from src.posttrain.round_scoring import acquire_round
@@ -240,10 +240,7 @@ def test_round_acquisition_maps_grouped_rewards_to_probabilities(
         result = acquire_round(training_config, {spec.id: client}, records)
         reward = result["reward"]
         assert reward["sample_ids"] == sorted(sample_ids)
-        assert reward["group_ids"] == ["0:0", "0:0", "0:1", "0:1"]
-        # Backend returns one score per prompt text, so each group is constant
-        # and receives the neutral probability.
-        assert reward["probabilities"] == [0.5] * 4
+        assert reward["combined"] == [0.75] * 4
         assert len(result["scores"]) == len(records)
     finally:
         endpoint.close()
@@ -265,13 +262,11 @@ def test_round_barrier_joins_the_published_reward_packet(tmp_path, training_conf
         "step": step,
         "policy_version": step,
         "collections": [file_hash(collection)],
-        "reward": {"sample_ids": ["3:0:0", "3:0:1"], "probabilities": [1.0, 0.0]},
+        "reward": {"sample_ids": ["3:0:0", "3:0:1"], "combined": [1.0, -1.0]},
     }
     atomic_json(reward_path(output, attempt, step), packet)
-    probabilities, reward = wait_for_rewards(
-        training_config, output, attempt, step, 0, local
-    )
-    assert probabilities == {"3:0:0": 1.0, "3:0:1": 0.0} and reward == packet["reward"]
+    values, reward = wait_for_rewards(training_config, output, attempt, step, 0, local)
+    assert values == {"3:0:0": 1.0, "3:0:1": -1.0} and reward == packet["reward"]
     with pytest.raises(ValueError, match="missing local reward"):
         wait_for_rewards(
             training_config, output, attempt, step, 0, [{"sample_id": "3:9:9"}]
@@ -283,7 +278,7 @@ def test_round_barrier_joins_the_published_reward_packet(tmp_path, training_conf
 
 @pytest.mark.parametrize("resume", [False, True])
 def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
-    tmp_path, monkeypatch, art_config, resume
+    tmp_path, monkeypatch, training_config, resume
 ):
     import os
     import time
@@ -326,7 +321,7 @@ def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
             self.second_collection = False
             ready = output / "ready" / f"{self.attempt}-rank-000.json"
             atomic_json(ready, {})
-            old = time.time() - 2 * art_config.execution.round_timeout
+            old = time.time() - 2 * training_config.execution.round_timeout
             os.utime(ready, (old, old))
             self.publish(first_round)
 
@@ -388,7 +383,7 @@ def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
     monkeypatch.setattr(train.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(round_scoring, "acquire_round", acquire)
     result = train.launch(
-        replace(art_config, training=replace(art_config.training, rounds=4)),
+        replace(training_config, training=replace(training_config.training, rounds=4)),
         {"learner": {"python_paths": []}, "device_type": "cpu"},
         {},
         output,

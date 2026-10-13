@@ -1,8 +1,6 @@
-# Complete single-stage DiffusionNFT run. Every tunable is required.
+# Complete single-stage DiffusionART run. Every tunable is required.
 # Model, service, endpoint and storage paths live in the --assets JSON.
 # The base is the 600k pretrain EMA; see notes/posttrain_recipe.md.
-
-objective = "nft"
 
 [initialization]
 asset = "initial"
@@ -22,31 +20,15 @@ height = 896
 width = 896
 # The base model's ODE quality is flat between 20 and 50 steps at CFG 1.
 steps = 20
-guidance = 1.0
 shift = "shape"
 text_exit_layer = 20
 
-[nft]
-parameterization = "clean_adaptive"
-advantage_scale = "group"
-advantage_clip = 5.0
-beta = 1.0
-epsilon = 1e-05
-# E0 runs without the reference anchor; 1e-4 is E1's on-state.
+# One optimizer update per disjoint half of the round's (draw, step) items;
+# the cached rollout prediction is the anchor, so there is no old policy.
+# The completed algorithm comparison has no reference anchor.
+# The anchor-on comparison uses 1e-4.
+[art]
 reference_coefficient = 0.0
-updates_per_round = 1
-time_draws = 1
-time_distribution = "uniform"
-time_min = 0.02
-time_max = 0.98
-
-[old_policy]
-strategy = "linear_ramp"
-decay = 0.0
-decay_start = 0.0
-decay_end = 0.5
-# Refresh clock is committed collection rounds, so the ramp spans this run.
-horizon = 1000
 
 [student_optimizer]
 kind = "muon_adamw"

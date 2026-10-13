@@ -31,16 +31,14 @@ def learner(
     from . import checkpoint
     from .clock import Clock
     from .distributed import all_reduce, initialize, prime_buckets, wrap
-    from .engine import update_art, update_round
+    from .engine import update_art
     from .guidance import round_guidance
     from .models import peak_memory, set_device, synchronize
     from .roles import Roles
-    from .rollout import PromptCursor, collect_art, collect_nft, tensor_digest
+    from .rollout import PromptCursor, collect_art, tensor_digest
     from .round_scoring import publish_collection, wait_for_rewards
     from .session import TrainingState
     from .tracking import optimizer_rates
-
-    art = config.objective == "art"
 
     device = set_device(
         assets["device_type"],
@@ -123,21 +121,10 @@ def learner(
                 pooling=True,
                 exit_layer=config.collection.text_exit_layer,
             )
-            cond = (txt, pooled, mask)
-            uncond = None
-            if config.collection.guidance != 1:
-                ut, um, up = encode_text(
-                    [""] * len(strings),
-                    text,
-                    tokenizer,
-                    pooling=True,
-                    exit_layer=config.collection.text_exit_layer,
-                )
-                uncond = (ut, up, um)
-            return cond, uncond
+            return (txt, pooled, mask)
 
         setup_rng = checkpoint.rng_state(device)
-        cond, uncond = conditioning(
+        cond = conditioning(
             [contract["prompts"][0]["text"]] * config.execution.microbatch
         )
         latent = torch.zeros(
@@ -148,11 +135,9 @@ def learner(
             device=device,
         )
         times = torch.full((config.execution.microbatch,), 0.5, device=device)
-        prime_buckets(
-            state.student, latent, times, cond, uncond, config.collection.guidance
-        )
+        prime_buckets(state.student, latent, times, cond)
         checkpoint.restore_rng(setup_rng, device)
-        del setup_rng, cond, uncond, latent, times
+        del setup_rng, cond, latent, times
         cursor = PromptCursor(len(contract["prompts"]), seed)
         if resume:
             cursor.load_state_dict(rank_saved["cursor"])
@@ -233,36 +218,20 @@ def learner(
             result = []
             for begin in range(0, len(local), config.execution.microbatch):
                 batch = local[begin : begin + config.execution.microbatch]
-                cond, uncond = conditioning([p["text"] for _, p, _ in batch])
-                if art:
-                    result.append(
-                        collect_art(
-                            roles.student_field,
-                            config,
-                            [p for _, p, _ in batch],
-                            [key for _, _, key in batch],
-                            [index for index, _, _ in batch],
-                            clock.committed_rounds,
-                            clock.step,
-                            cond,
-                            device,
-                        )
+                cond = conditioning([p["text"] for _, p, _ in batch])
+                result.append(
+                    collect_art(
+                        roles.student_field,
+                        config,
+                        [p for _, p, _ in batch],
+                        [key for _, _, key in batch],
+                        [index for index, _, _ in batch],
+                        clock.committed_rounds,
+                        clock.step,
+                        cond,
+                        device,
                     )
-                else:
-                    result.append(
-                        collect_nft(
-                            roles.old_field,
-                            config,
-                            [p for _, p, _ in batch],
-                            [key for _, _, key in batch],
-                            clock.committed_rounds,
-                            clock.old_policy_version,
-                            clock.step,
-                            cond,
-                            uncond,
-                            device,
-                        )
-                    )
+                )
             return result
 
         while clock.committed_rounds < stop_after:
@@ -288,37 +257,22 @@ def learner(
                 config, output, attempt, r, rank, records
             )
             rewarded = time.monotonic()
-            guidance = None
-            if art:
-                guidance = round_guidance(config, batches, values, reduce=all_reduce)
-            skipped = art and state.skip_inactive_art_round(guidance)
+            guidance = round_guidance(config, batches, values, reduce=all_reduce)
+            skipped = state.skip_inactive_art_round(guidance)
             synchronize(device)
             guided = time.monotonic()
-            old_version = clock.old_policy_version
             for inner in range(0 if skipped else config.updates_per_round):
                 update_start = time.monotonic()
-                if art:
-                    evidence = update_art(
-                        config,
-                        roles,
-                        state.student,
-                        batches,
-                        guidance,
-                        state.student_optimizer,
-                        r,
-                        inner,
-                    )
-                else:
-                    evidence = update_round(
-                        config,
-                        roles,
-                        state.student,
-                        batches,
-                        values,
-                        state.student_optimizer,
-                        clock.step,
-                        old_version,
-                    )
+                evidence = update_art(
+                    config,
+                    roles,
+                    state.student,
+                    batches,
+                    guidance,
+                    state.student_optimizer,
+                    r,
+                    inner,
+                )
                 clock.update(config)
                 synchronize(device)
                 evidence.update(
@@ -342,19 +296,17 @@ def learner(
                         {k: v for k, v in evidence.items() if k != "inputs"},
                         flush=True,
                     )
-            decay = None if skipped else state.commit_round()
+            if not skipped:
+                state.commit_round()
             synchronize(device)
             atomic_json(
                 output / "rounds" / f"{attempt}-round-{r:06d}-rank-{rank:03d}.json",
                 {
                     "clock": clock.state_dict(),
-                    "old_refresh_decay": decay,
                     "cursor": cursor.state_dict(),
                     "complete": True,
                     "skipped_zero_guidance": skipped,
-                    "active_group_fraction": (
-                        float(guidance.active.float().mean()) if art else None
-                    ),
+                    "active_group_fraction": float(guidance.active.float().mean()),
                     "peak_allocated_bytes": peak_memory(device),
                     "timings": {
                         "collection": collected - start,

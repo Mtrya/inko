@@ -2,11 +2,10 @@
 
 import copy
 import math
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
 import torch
-from test_posttrain_nft import new_roles
 
 from src.posttrain.checkpoint import assert_exact
 from src.posttrain.clock import Clock
@@ -15,8 +14,9 @@ from src.posttrain.guidance import GroupGuidance, group_guidance, round_guidance
 from src.posttrain.objectives.art import KL_THRESHOLD, NOISE_LEVEL, losses
 from src.posttrain.rollout import ARTRollout, art_window, collect_art, tensor_digest
 from src.posttrain.sampling import sample
+from src.posttrain.schema import decode
 from src.posttrain.session import TrainingState
-from src.posttrain.training_config import ART, load_training_config
+from src.posttrain.training_config import ART, TrainingConfig
 
 
 def test_group_guidance_matches_the_hand_computed_direction():
@@ -91,11 +91,12 @@ def test_covariance_is_stable_under_a_representable_reward_offset():
         torch.testing.assert_close(stats["directions"], torch.tensor([[1.0, -1.0]]))
 
 
-def test_art_windows_shuffle_before_splitting(art_config, monkeypatch):
+def test_art_windows_shuffle_before_splitting(training_config, monkeypatch):
     from types import SimpleNamespace
 
     config = replace(
-        art_config, collection=replace(art_config.collection, prompts_per_round=4)
+        training_config,
+        collection=replace(training_config.collection, prompts_per_round=4),
     )
     rollout = SimpleNamespace(
         draw_indices=list(range(8)),
@@ -113,15 +114,17 @@ def test_art_windows_shuffle_before_splitting(art_config, monkeypatch):
     assert [i for _, i in art_window(config, [rollout], 1)] == [6, 1, 4, 3]
 
 
-def test_art_windows_are_balanced_and_independent_of_microbatch_packing(art_config):
+def test_art_windows_are_balanced_and_independent_of_microbatch_packing(
+    training_config,
+):
     from types import SimpleNamespace
 
     config = replace(
-        art_config,
+        training_config,
         collection=replace(
-            art_config.collection, prompts_per_round=12, draws_per_prompt=8
+            training_config.collection, prompts_per_round=12, draws_per_prompt=8
         ),
-        execution=replace(art_config.execution, learner_devices=tuple(range(12))),
+        execution=replace(training_config.execution, learner_devices=tuple(range(12))),
     )
     rng_before = torch.get_rng_state().clone()
     for rank in range(12):
@@ -158,10 +161,10 @@ def test_group_guidance_marks_an_unreduced_partial_group_as_incomplete():
         group_guidance(endpoints, rewards, groups, 2, expected_group_size=4)
 
 
-def test_round_guidance_groups_by_draw_slot_not_prompt_identity(art_config):
+def test_round_guidance_groups_by_draw_slot_not_prompt_identity(training_config):
     # A prompt repeated within one round (the cursor can cross an epoch
     # boundary) still forms two independent groups keyed by collection slot.
-    config = art_config
+    config = training_config
     terminals = [
         torch.tensor([[1.0, 0.0]]),
         torch.tensor([[0.0, 1.0]]),
@@ -354,12 +357,10 @@ def test_inactive_and_invalid_items_are_rejected_or_dropped():
         losses(new, cached, times, deltas, torch.zeros(2, 2), torch.ones(2))
 
 
-def test_collection_caches_aligned_trajectory_and_leaves_the_nft_path_lean(
-    art_config, small_model
-):
+def test_collection_caches_aligned_trajectory(new_roles, training_config, small_model):
     torch.set_num_threads(1)
     torch.manual_seed(9)
-    config = art_config
+    config = training_config
     roles = new_roles(config, small_model())
     cond = (
         torch.randn(1, 2, 1024),
@@ -408,12 +409,15 @@ def test_collection_caches_aligned_trajectory_and_leaves_the_nft_path_lean(
     assert lean.states is None and lean.predictions is None
 
 
+@pytest.mark.parametrize("mode", ["full", "lora"])
 def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
-    art_config, small_model
+    new_roles, training_config, small_model, mode
 ):
     torch.set_num_threads(1)
     torch.manual_seed(10)
-    config = art_config
+    config = replace(
+        training_config, student=replace(training_config.student, mode=mode)
+    )
     roles = new_roles(config, small_model())
     cond = (torch.randn(1, 1, 1024), torch.randn(1, 1024), torch.ones(1, 1))
     rollouts = [
@@ -446,7 +450,7 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
     no_anchor = replace(config, art=ART(reference_coefficient=0.0))
     assert new_roles(no_anchor, small_model()).reference is None
     state = TrainingState(config, roles, None, Clock())
-    assert roles.old is None and roles.reference is not None
+    assert roles.reference is not None
     frozen = copy.deepcopy(roles.reference.state_dict())
     student = copy.deepcopy(roles.student.state_dict())
     cached = rollouts[0].predictions.clone()
@@ -497,10 +501,6 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
     assert windows[0] & windows[1] == set()
     assert windows[0] | windows[1] == set(by_id)
     state.commit_round()
-    assert state.clock.old_refresh_decay is None
-    assert state.clock.old_policy_version == 0
-    saved = state.state_dict()
-    assert saved["old"] is None and saved["old_schedule"] is None
     with pytest.raises(ValueError, match="stale or missing ART"):
         update_art(
             config,
@@ -515,7 +515,7 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
     assert state.student_optimizer.steps == 2
 
 
-def test_art_reward_barrier_returns_the_combined_rewards(tmp_path, art_config):
+def test_art_reward_barrier_returns_the_combined_rewards(tmp_path, training_config):
     from src.posttrain.records import atomic_json, file_hash
     from src.posttrain.round_scoring import (
         collection_path,
@@ -537,43 +537,63 @@ def test_art_reward_barrier_returns_the_combined_rewards(tmp_path, art_config):
         },
     }
     atomic_json(reward_path(output, attempt, step), packet)
-    values, reward = wait_for_rewards(art_config, output, attempt, step, 0, local)
-    # ART guidance consumes the combined reward; no optimality probability exists.
+    values, reward = wait_for_rewards(training_config, output, attempt, step, 0, local)
     assert values == {"0:0:0": 1.0, "0:0:1": -1.0, "0:1:0": 0.5, "0:1:1": -0.5}
     assert reward == packet["reward"]
     with pytest.raises(ValueError, match="missing local reward"):
-        wait_for_rewards(art_config, output, attempt, step, 0, [{"sample_id": "0:9:9"}])
+        wait_for_rewards(
+            training_config, output, attempt, step, 0, [{"sample_id": "0:9:9"}]
+        )
 
 
-def test_art_config_rejects_the_other_objective_sections(art_config, training_config):
-    nft = load_training_config("configs/posttrain.toml")
-    art = load_training_config("configs/posttrain_art.toml")
-    assert nft.updates_per_round == 1 and nft.objective == "nft" and nft.art is None
-    assert art.updates_per_round == 2 and art.objective == "art"
-    assert art.nft is None and art.old_policy is None
-    with pytest.raises(ValueError, match="own config section"):
-        replace(art_config, nft=training_config.nft)
-    with pytest.raises(ValueError, match="old-policy refresh belongs"):
-        replace(art_config, old_policy=training_config.old_policy)
-    with pytest.raises(ValueError, match="own config section"):
-        replace(training_config, objective="art")
-    with pytest.raises(ValueError, match="cannot use CFG"):
-        replace(art_config, collection=replace(art_config.collection, guidance=1.5))
+def test_training_config_rejects_invalid_collection_and_anchor(training_config):
     with pytest.raises(ValueError, match="two update windows"):
         replace(
-            art_config,
+            training_config,
             collection=replace(
-                art_config.collection, prompts_per_round=3, draws_per_prompt=3
+                training_config.collection, prompts_per_round=3, draws_per_prompt=3
             ),
         )
     with pytest.raises(ValueError, match="two draws"):
         replace(
-            art_config,
-            collection=replace(art_config.collection, draws_per_prompt=1),
+            training_config,
+            collection=replace(training_config.collection, draws_per_prompt=1),
         )
     with pytest.raises(ValueError, match="length/seed/EMA"):
-        replace(art_config, training=replace(art_config.training, rounds=0))
+        replace(training_config, training=replace(training_config.training, rounds=0))
     with pytest.raises(ValueError, match="reference coefficient"):
-        replace(art_config, art=ART(reference_coefficient=float("nan")))
-    with pytest.raises(ValueError, match="unknown training objective"):
-        replace(art_config, objective="dmd")
+        replace(training_config, art=ART(reference_coefficient=float("nan")))
+
+
+def test_training_schema_requires_art_and_rejects_unknown_fields(training_config):
+    raw = asdict(training_config)
+    raw["unknown"] = {}
+    with pytest.raises(ValueError, match="unknown"):
+        decode(TrainingConfig, raw)
+    del raw["unknown"]
+    del raw["art"]
+    with pytest.raises(ValueError, match="missing"):
+        decode(TrainingConfig, raw)
+
+
+def test_reference_penalty_value_gradient_and_detachment():
+    from src.posttrain.objectives.art import reference_losses
+
+    value = torch.tensor([[1.0, 3.0]], requires_grad=True)
+    reference = torch.tensor([[0.0, 1.0]], requires_grad=True)
+    penalty = reference_losses(value, reference)
+    penalty.sum().backward()
+    torch.testing.assert_close(penalty, torch.tensor([2.5]), rtol=0, atol=0)
+    torch.testing.assert_close(value.grad, torch.tensor([[1.0, 2.0]]), rtol=0, atol=0)
+    assert reference.grad is None
+
+
+def test_reward_weights_must_sum_to_one(training_config):
+    with pytest.raises(ValueError, match="sum to one"):
+        replace(
+            training_config,
+            rewards=replace(
+                training_config.rewards,
+                channels=(replace(training_config.rewards.channels[0], weight=0.4),),
+            ),
+        )

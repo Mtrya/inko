@@ -13,11 +13,26 @@ Constants are the paper's; they are not campaign factors.
 
 import torch
 
-from .nft import finite, mean_elements
-
 NOISE_LEVEL = 0.8
 KL_THRESHOLD = 1e-5
 EPS = 1e-5
+
+
+def mean_elements(value):
+    return value.float().flatten(1).mean(1)
+
+
+def finite(*values):
+    if any(not bool(torch.isfinite(value).all()) for value in values):
+        raise FloatingPointError("nonfinite ART input/loss")
+
+
+def reference_losses(new, reference):
+    if new.shape != reference.shape:
+        raise ValueError("reference prediction shapes differ")
+    result = mean_elements((new.float() - reference.detach().float()).square())
+    finite(result)
+    return result
 
 
 def losses(

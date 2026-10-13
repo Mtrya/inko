@@ -24,7 +24,7 @@ def test_noise_assignment_survives_reordering_and_sharding():
     assert torch.equal(batch.terminal[0], reordered.terminal[1])
     assert torch.equal(batch.terminal[:1], single.terminal)
     a = sample_noise([11], (1, 2, 2), stream="initial")
-    b = sample_noise([11], (1, 2, 2), stream="nft_noise")
+    b = sample_noise([11], (1, 2, 2), stream="independent")
     assert not torch.equal(a, b)
 
 
@@ -62,3 +62,21 @@ def test_inko_model_boundary_accepts_fp32_time_with_bf16_weights():
         torch.zeros(1, 16, 4, 4), torch.tensor([0.25]), conditioning
     )
     assert output.shape == (1, 16, 4, 4) and output.dtype == torch.bfloat16
+
+
+def test_tensor_hash_canonicalizes_scalar_expanded_and_bfloat_storage():
+    from src.posttrain.rollout import tensor_digest
+
+    for dtype in (torch.float32, torch.bfloat16):
+        scalar = torch.tensor(1.0, dtype=dtype)
+        assert (
+            tensor_digest(scalar)
+            == tensor_digest(scalar.expand(1, 1))
+            == tensor_digest(torch.ones(1, dtype=dtype))
+        )
+        assert tensor_digest(scalar.expand(2, 2)) == tensor_digest(
+            torch.ones(4, dtype=dtype)
+        )
+        assert tensor_digest(
+            torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=dtype).t()
+        ) == tensor_digest(torch.tensor([1.0, 3.0, 2.0, 4.0], dtype=dtype))

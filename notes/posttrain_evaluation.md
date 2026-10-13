@@ -1,10 +1,9 @@
 # Posttraining evaluation protocol
 
-Status: the protocol is being applied to single-stage DiffusionNFT and DiffusionART runs on the
-600k pretrain EMA at 896p. The sampling/scoring harness, the prompt suites and
-the two scorer services were exercised at 640p with the 480k EMA; the current
-envelope is heavier and its own bounded qualification is still required. See
-the [contract](posttrain_contract.md) and [recipe](posttrain_recipe.md).
+Status: the protocol qualified the 600k pretrain EMA at 896p and was applied
+through both 1000-round algorithm-comparison runs. DiffusionART carries into
+the remaining recipe comparisons. The confirmation suite remains held out.
+See the [contract](posttrain_contract.md) and [recipe](posttrain_recipe.md).
 
 ## Evaluation ownership
 

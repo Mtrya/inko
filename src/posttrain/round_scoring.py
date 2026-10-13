@@ -46,17 +46,9 @@ def publish_collection(
             image.save(temporary, format="PNG")
             temporary.replace(image_path)
             latent_path = image_path.with_suffix(".pt")
-            # The ART rollout is the live student at guidance 1: it carries no
-            # unconditional conditioning, and its collecting version is the round.
-            unconditional = (
-                None
-                if config.objective == "art" or rollout.unconditional is None
-                else tuple(t[index].cpu() for t in rollout.unconditional)
-            )
             latent = {
                 "terminal": rollout.terminal[index].cpu(),
                 "conditioning": tuple(t[index].cpu() for t in rollout.conditioning),
-                "unconditional": unconditional,
             }
             torch.save(latent, latent_path)
             records.append(
@@ -74,11 +66,6 @@ def publish_collection(
                     "conditioning": [
                         tensor_digest(t[index]) for t in rollout.conditioning
                     ],
-                    "unconditional": (
-                        None
-                        if unconditional is None
-                        else [tensor_digest(t) for t in unconditional]
-                    ),
                 }
             )
     atomic_json(
@@ -90,7 +77,7 @@ def publish_collection(
 
 def acquire_round(config, clients, records, *, on_scored=None):
     """Complete each required request before admitting any optimizer update."""
-    from .rewards import combine_round, group_advantages
+    from .rewards import combine_round
 
     require(
         len({r["sample_id"] for r in records}) == len(records),
@@ -122,21 +109,8 @@ def acquire_round(config, clients, records, *, on_scored=None):
                 on_scored(counts)
     ids = sorted(r["sample_id"] for r in records)
     combined = combine_round(ids, scores, config)
-    # ART guidance regresses on the combined reward itself; the NFT optimality
-    # probability is not part of its loss.
-    result = (
-        combined
-        if config.objective == "art"
-        else group_advantages(
-            combined,
-            {r["sample_id"]: r["prompt"]["id"] for r in records},
-            scale=config.nft.advantage_scale,
-            clip=config.nft.advantage_clip,
-            epsilon=config.rewards.epsilon,
-        )
-    )
     return {
-        "reward": result,
+        "reward": combined,
         "scores": scores,
         "acquisition_seconds": time.monotonic() - start,
     }
@@ -195,11 +169,7 @@ def score_ready_round(config, services, output, attempt, step, *, on_scored=None
 
 
 def wait_for_rewards(config, output, attempt, step, rank, records):
-    """Wait for the round's reward packet and select its per-sample update input.
-
-    An NFT update consumes the admitted optimality probabilities; ART guidance
-    consumes the combined rewards. Both maps are keyed by sample ID.
-    """
+    """Wait for the round's complete combined-reward map, keyed by sample ID."""
     path = reward_path(output, attempt, step)
     deadline = time.monotonic() + config.execution.round_timeout
     while not path.exists():
@@ -215,8 +185,7 @@ def wait_for_rewards(config, output, attempt, step, rank, records):
         "reward/collection identity mismatch",
     )
     reward = packet["reward"]
-    key = "combined" if config.objective == "art" else "probabilities"
-    values = dict(zip(reward["sample_ids"], reward[key], strict=True))
+    values = dict(zip(reward["sample_ids"], reward["combined"], strict=True))
     require(
         {r["sample_id"] for r in records} <= values.keys(),
         "missing local reward",

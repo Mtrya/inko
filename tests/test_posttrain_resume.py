@@ -4,7 +4,6 @@ from pathlib import Path
 import pytest
 import torch
 from PIL import Image
-from test_posttrain_nft import new_roles, probabilities, round_rollouts
 from test_posttrain_scoring import Backend, Endpoint
 
 from src.evaluation.benchmarks import run as benchmark
@@ -19,7 +18,7 @@ from src.posttrain.checkpoint import (
     rng_state,
 )
 from src.posttrain.clock import Clock
-from src.posttrain.engine import update_art, update_round
+from src.posttrain.engine import update_art
 from src.posttrain.guidance import round_guidance
 from src.posttrain.records import file_hash
 from src.posttrain.rollout import PromptCursor, art_window, collect_art
@@ -28,7 +27,7 @@ from src.posttrain.session import TrainingState
 
 
 def test_committed_round_state_round_trips_through_a_checkpoint(
-    tmp_path, training_config, small_model
+    new_roles, tmp_path, training_config, small_model
 ):
     torch.set_num_threads(1)
     torch.manual_seed(21)
@@ -36,37 +35,56 @@ def test_committed_round_state_round_trips_through_a_checkpoint(
     base = small_model()
     roles = new_roles(config, base)
     state = TrainingState(config, roles, None, Clock())
-    rollouts = round_rollouts(config, roles, base)
-    state.last_reward = update_round(
-        config,
-        roles,
-        roles.student_field,
-        rollouts,
-        probabilities(rollouts),
-        state.student_optimizer,
-        0,
-        state.clock.old_policy_version,
-    )
-    state.clock.update(config)
-    with pytest.raises(ValueError, match="clocks differ"):
-        state.state_dict()
+    cond = (torch.zeros(1, 2, 1024), torch.zeros(1, 1024), torch.ones(1, 2))
+    rollouts = [
+        collect_art(
+            roles.student_field,
+            config,
+            [{"id": f"p{slot}"}],
+            [f"0:{slot}:{draw}"],
+            [slot * 2 + draw],
+            0,
+            0,
+            cond,
+            "cpu",
+        )
+        for slot in range(2)
+        for draw in range(2)
+    ]
+    values = {r.sample_ids[0]: float(i) for i, r in enumerate(rollouts)}
+    guidance = round_guidance(config, rollouts, values)
+    state.last_reward = values
+    for window in (0, 1):
+        update_art(
+            config,
+            roles,
+            roles.student_field,
+            rollouts,
+            guidance,
+            state.student_optimizer,
+            0,
+            window,
+        )
+        state.clock.update(config)
+        with pytest.raises(ValueError, match="clocks differ"):
+            state.state_dict()
     state.commit_round()
     point = publish(
         tmp_path / "checkpoints",
         state.clock.step,
-        {"case": "nft"},
+        {"case": "art"},
         state.state_dict(),
         {"cursor": 7},
         0,
         torch.device("cpu"),
     )
-    committed, rank_state = load(point, {"case": "nft"}, 0)
-    assert rank_state["cursor"] == 7 and inspect(point)["step"] == 1
+    committed, rank_state = load(point, {"case": "art"}, 0)
+    assert rank_state["cursor"] == 7 and inspect(point)["step"] == 2
     recovered = TrainingState(config, new_roles(config, base), None, Clock())
     recovered.load_state_dict(committed)
     assert_exact(state.state_dict(), recovered.state_dict())
     with pytest.raises(ValueError, match="clocks differ"):
-        recovered.load_state_dict(dict(committed, old_policy_version=9))
+        recovered.load_state_dict(dict(committed, skipped_rounds=9))
 
 
 def test_checkpoint_publication_is_all_or_nothing(tmp_path, monkeypatch):
@@ -139,7 +157,7 @@ def test_prompt_cursor_and_rank_rng_restore_exactly(tmp_path):
     "mode,view", [("full", "live"), ("full", "ema"), ("lora", "live"), ("lora", "ema")]
 )
 def test_export_materializes_the_requested_weight_view(
-    tmp_path, training_config, small_model, mode, view
+    new_roles, tmp_path, training_config, small_model, mode, view
 ):
     from dataclasses import asdict as to_dict
 
@@ -182,17 +200,17 @@ def test_export_materializes_the_requested_weight_view(
 
 @pytest.mark.parametrize("optimizer", ["adamw", "muon_adamw"])
 def test_art_skip_preserves_momentum_ema_and_update_schedule_across_resume(
-    tmp_path, art_config, small_model, optimizer
+    new_roles, tmp_path, training_config, small_model, optimizer
 ):
     torch.set_num_threads(1)
     torch.manual_seed(31)
     config = replace(
-        art_config,
-        art=replace(art_config.art, reference_coefficient=0.0),
+        training_config,
+        art=replace(training_config.art, reference_coefficient=0.0),
         student_optimizer=replace(
-            art_config.student_optimizer, kind=optimizer, schedule="cosine"
+            training_config.student_optimizer, kind=optimizer, schedule="cosine"
         ),
-        training=replace(art_config.training, rounds=4),
+        training=replace(training_config.training, rounds=4),
     )
     base = small_model()
     state = TrainingState(config, new_roles(config, base), None, Clock())
@@ -292,12 +310,12 @@ def test_art_skip_preserves_momentum_ema_and_update_schedule_across_resume(
 
 
 def test_art_reference_penalty_remains_active_without_reward_guidance(
-    art_config, small_model
+    new_roles, training_config, small_model
 ):
     from src.posttrain.guidance import GroupGuidance
 
     state = TrainingState(
-        art_config, new_roles(art_config, small_model()), None, Clock()
+        training_config, new_roles(training_config, small_model()), None, Clock()
     )
     before = cpu_state(state.state_dict())
     guidance = GroupGuidance(

@@ -2,9 +2,7 @@
 
 from . import checkpoint
 from .clock import Clock
-from .distributed import unanimous_finite
-from .optim import RoleOptimizer, finite
-from .schedules import refresh_decay
+from .optim import RoleOptimizer
 from .schema import require
 
 
@@ -24,17 +22,7 @@ class TrainingState:
         )
 
     def commit_round(self):
-        self.clock.check_round(self.config)
-        decay = None
-        if self.config.objective == "nft":
-            decay = refresh_decay(self.config.old_policy, self.clock.committed_rounds)
-            self.roles.refresh_old(decay)
-            unanimous_finite(
-                finite(list(self.roles.old.parameters())),
-                next(self.roles.student.parameters()).device,
-            )
-        self.clock.commit_round(self.config, decay)
-        return decay
+        self.clock.commit_round(self.config)
 
     def skip_inactive_art_round(self, guidance):
         """Consume a globally inactive collection without an optimizer/EMA step.
@@ -59,14 +47,6 @@ class TrainingState:
             "student_optimizer": self.student_optimizer.state_dict(),
             "last_reward": self.last_reward,
             "next_action": clock.next_action(c),
-            "old_schedule": (
-                {
-                    "clock": "committed_rounds",
-                    "next_decay": refresh_decay(c.old_policy, clock.committed_rounds),
-                }
-                if c.old_policy is not None
-                else None
-            ),
             "architecture": self.roles.student.get_config(),
             "ownership": self.roles.ownership(),
         }

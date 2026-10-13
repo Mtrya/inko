@@ -133,26 +133,14 @@ class Tracker:
     def log(self, metrics, step):
         self.sdk.log(metrics, step=step)
 
-    def collection(self, rows, reward, config, number):
+    def collection(self, rows, reward, number):
         metrics = {"runtime/collection_round": number}
         for channel, values in reward["raw"].items():
             metrics[f"train/reward/{channel}/mean"] = statistics.mean(values)
             metrics[f"train/reward/{channel}/std"] = statistics.pstdev(values)
-        if config.objective == "nft":
-            values = dict(zip(reward["sample_ids"], reward["combined"], strict=True))
-            groups = reward["groups"].values()
-            metrics["train/nft_constant_group_fraction"] = statistics.mean(
-                len({values[key] for key in group["sample_ids"]}) == 1
-                for group in groups
-            )
-        else:
-            metrics["train/art_active_group_fraction"] = rows[0][
-                "active_group_fraction"
-            ]
+        metrics["train/art_active_group_fraction"] = rows[0]["active_group_fraction"]
         self.log(metrics, number)
-        stages = ["collection", "scoring_wait", "round"]
-        if config.objective == "art":
-            stages.append("guidance")
+        stages = ["collection", "scoring_wait", "guidance", "round"]
         self.runtime(
             {
                 **{
@@ -160,11 +148,7 @@ class Tracker:
                     for stage in stages
                 },
                 "runtime/training_images_scored": rows[0]["clock"]["samples_scored"],
-                **(
-                    {"runtime/skipped_collections": rows[0]["clock"]["skipped_rounds"]}
-                    if config.objective == "art"
-                    else {}
-                ),
+                "runtime/skipped_collections": rows[0]["clock"]["skipped_rounds"],
                 "runtime/learner_process_peak_gib": max(
                     r["peak_allocated_bytes"] for r in rows
                 )
@@ -272,14 +256,11 @@ def update_metrics(rows):
         metrics[f"train/{term}_loss"] = statistics.mean(
             r["term_losses"][term] for r in rows
         )
-    if "art_items" in first:
-        items = sum(r["art_items"] for r in rows)
-        metrics["train/art_rejected_fraction"] = (
-            sum(r["art_masked"] for r in rows) / items
-        )
-        metrics["train/art_inactive_fraction"] = (
-            sum(r["art_items"] - r["art_kept"] - r["art_masked"] for r in rows) / items
-        )
+    items = sum(r["art_items"] for r in rows)
+    metrics["train/art_rejected_fraction"] = sum(r["art_masked"] for r in rows) / items
+    metrics["train/art_inactive_fraction"] = (
+        sum(r["art_items"] - r["art_kept"] - r["art_masked"] for r in rows) / items
+    )
     metrics.update(
         {f"train/lr/{key}": value for key, value in first["learning_rates"].items()}
     )
@@ -329,5 +310,5 @@ class TrainingMetrics:
             reward = json.loads(
                 reward_path(self.output, self.attempt, self.round).read_text()
             )["reward"]
-            self.tracker.collection(rounds, reward, self.config, self.round + 1)
+            self.tracker.collection(rounds, reward, self.round + 1)
             self.round += 1

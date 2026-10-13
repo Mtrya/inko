@@ -1,4 +1,4 @@
-"""Resident student, soft-refreshed old policy, frozen reference and EMA views."""
+"""Resident student, frozen reference and EMA views."""
 
 import copy
 
@@ -13,15 +13,10 @@ class Velocity(nn.Module):
         super().__init__()
         self.model, self.precision = model, precision
 
-    def forward(self, x, t, conditioning, unconditional=None, guidance=1.0):
+    def forward(self, x, t, conditioning):
         dtype = getattr(torch, self.precision)
         with torch.autocast(x.device.type, dtype=dtype, enabled=dtype != torch.float32):
             output = self.model(x, t.float(), *conditioning).float()
-            if guidance != 1:
-                if unconditional is None:
-                    raise ValueError("CFG requires empty-prompt conditioning")
-                empty = self.model(x, t.float(), *unconditional).float()
-                output = empty + guidance * (output - empty)
         return output
 
 
@@ -41,10 +36,6 @@ class Roles:
             config.execution.activation_checkpointing
         )
         self.student_field = Velocity(self.student, config.execution.precision)
-        self.old = self.old_field = None
-        if config.objective == "nft":
-            self.old = self.frozen_policy()
-            self.old_field = Velocity(self.old, config.execution.precision)
         self.reference = self.reference_field = None
         if config.reference_coefficient > 0:
             self.reference = self.frozen_policy()
@@ -59,24 +50,6 @@ class Roles:
             memo = {id(p): p for p in self.student.parameters() if not p.requires_grad}
             memo.update({id(b): b for b in self.student.buffers()})
         return copy.deepcopy(self.student, memo).eval().requires_grad_(False)
-
-    @torch.no_grad()
-    def refresh_old(self, decay):
-        if self.old is None or not 0 <= decay < 1:
-            raise ValueError("old refresh requires an active policy and valid decay")
-        current, old = (
-            dict(self.student.named_parameters()),
-            dict(self.old.named_parameters()),
-        )
-        if current.keys() != old.keys() or any(
-            current[n].shape != old[n].shape for n in current
-        ):
-            raise ValueError("old/student parameter inventory differs")
-        for name, parameter in current.items():
-            if self.config.student.mode == "full" or parameter.requires_grad:
-                if parameter is old[name]:
-                    raise ValueError("old policy aliases a trainable student parameter")
-                old[name].mul_(decay).add_(parameter, alpha=1 - decay)
 
     def reset_ema(self):
         self.ema = {
@@ -103,7 +76,6 @@ class Roles:
     def state_dict(self):
         return {
             "student": self.student.state_dict(),
-            "old": None if self.old is None else self.old.state_dict(),
             "reference": (
                 None if self.reference is None else self.reference.state_dict()
             ),
@@ -115,19 +87,16 @@ class Roles:
         frozen.update(n for n, _ in self.student.named_buffers())
         for name, model in (
             ("student", self.student),
-            ("old", self.old),
             ("reference", self.reference),
         ):
             if (model is None) != (saved[name] is None):
                 raise ValueError("saved role presence differs")
             if model is None:
                 continue
-            if name in {"old", "reference"}:
+            if name == "reference":
                 for key in frozen:
                     if not torch.equal(saved["student"][key], saved[name][key]):
-                        raise ValueError(
-                            "frozen old/reference base differs from student"
-                        )
+                        raise ValueError("frozen reference base differs from student")
             model.load_state_dict(saved[name])
         if self.ema.keys() != saved["ema"].keys():
             raise ValueError("evaluation EMA names differ")
@@ -142,7 +111,6 @@ class Roles:
             role: [name for name, p in model.named_parameters() if p.requires_grad]
             for role, model in (
                 ("student", self.student),
-                ("old", self.old),
                 ("reference", self.reference),
             )
             if model is not None

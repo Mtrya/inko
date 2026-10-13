@@ -16,50 +16,51 @@ from src.posttrain.evaluation_config import (
 )
 from src.posttrain.provenance import training_contract
 from src.posttrain.records import atomic_json
-from src.posttrain.rollout import collect_art, collect_nft
+from src.posttrain.rollout import collect_art
 
 
-@pytest.mark.parametrize(
-    "round_index,nft_step,art_step", [(0, 0, 0), (5, 5, 10), (5, 5, 4)]
-)
-def test_collection_noise_is_shared_across_algorithms_and_optimizer_clocks(
-    training_config, art_config, round_index, nft_step, art_step
+@pytest.mark.parametrize("round_index,optimizer_step", [(0, 0), (5, 10), (5, 4)])
+def test_collection_noise_is_shared_across_comparison_arms_and_optimizer_clocks(
+    training_config, round_index, optimizer_step
 ):
     prompts = [{"id": "p0"}, {"id": "p1"}]
     ids = [f"{round_index}:0:0", f"{round_index}:1:0"]
-    nft = collect_nft(
+    first = collect_art(
         lambda x, *args: torch.zeros_like(x),
         training_config,
         prompts,
         ids,
+        [0, 2],
         round_index,
-        round_index,
-        nft_step,
+        0,
         (),
-        None,
         "cpu",
     )
-    art = collect_art(
+    second = collect_art(
         lambda x, *args: torch.zeros_like(x),
-        art_config,
+        training_config,
         prompts[::-1],
         ids[::-1],
-        [1, 0],
+        [2, 0],
         round_index,
-        art_step,
+        optimizer_step,
         (),
         "cpu",
     )
-    assert nft.seeds == art.seeds[::-1]
-    assert nft.seeds[0] != nft.seeds[1]
-    torch.testing.assert_close(nft.terminal, art.states.flip(0)[:, 0], rtol=0, atol=0)
-    assert nft.generator_step == nft_step and art.generator_step == art_step
+    assert first.seeds == second.seeds[::-1]
+    assert first.seeds[0] != first.seeds[1]
+    torch.testing.assert_close(
+        first.terminal, second.states.flip(0)[:, 0], rtol=0, atol=0
+    )
+    assert first.generator_step == 0 and second.generator_step == optimizer_step
 
 
 def test_skipped_rounds_reach_budget_and_publish_distinct_recovery_points(
-    tmp_path, art_config
+    tmp_path, training_config
 ):
-    config = replace(art_config, training=replace(art_config.training, rounds=3))
+    config = replace(
+        training_config, training=replace(training_config.training, rounds=3)
+    )
     clock = Clock()
     device = torch.device("cpu")
     points = []
@@ -89,38 +90,52 @@ def test_skipped_rounds_reach_budget_and_publish_distinct_recovery_points(
     assert all(inspect(p)["step"] == 0 for p in points)
 
 
-@pytest.mark.parametrize("objective", ["nft", "art"])
-def test_collection_budget_does_not_require_equal_optimizer_steps(
-    training_config, art_config, objective
-):
-    config = training_config if objective == "nft" else art_config
-    config = replace(config, training=replace(config.training, rounds=3))
+def test_collection_budget_does_not_require_equal_optimizer_steps(training_config):
+    config = replace(
+        training_config, training=replace(training_config.training, rounds=3)
+    )
     clock = Clock()
     for round_number in range(3):
-        if objective == "art" and round_number == 1:
+        if round_number == 1:
             clock.skip_round(config)
         else:
-            for _ in range(config.updates_per_round):
+            for _ in range(2):
                 clock.update(config)
-            clock.commit_round(config, 0.0 if objective == "nft" else None)
+            clock.commit_round(config)
         clock.validate(config)
     assert clock.committed_rounds == 3 and clock.samples_scored == 12
-    assert clock.step == (3 if objective == "nft" else 4)
+    assert clock.step == 4
     assert clock.next_action(config) == "done"
     with pytest.raises(ValueError, match="beyond the training horizon"):
         clock.update(config)
 
 
-def test_interval_boundaries_count_rounds_for_both_objectives(
-    training_config, art_config
-):
+def test_interval_boundaries_count_rounds(training_config):
     interval = IntervalEvaluation(
         "sampling.json", 2, ("development",), ("ema",), True, 7
     )
-    for original in (training_config, art_config):
-        config = replace(original, training=replace(original.training, rounds=5))
-        assert list(boundaries(config, interval)) == [2, 4, 5]
-        assert [r for r in range(6) if evaluation_due(config, interval, r)] == [2, 4, 5]
+    config = replace(
+        training_config, training=replace(training_config.training, rounds=5)
+    )
+    assert list(boundaries(config, interval)) == [2, 4, 5]
+    assert [r for r in range(6) if evaluation_due(config, interval, r)] == [2, 4, 5]
+
+
+def test_clock_requires_complete_rounds(training_config):
+    clock = Clock()
+    with pytest.raises(ValueError, match="complete uncommitted collection round"):
+        clock.commit_round(training_config)
+    clock.update(training_config)
+    with pytest.raises(ValueError, match="complete uncommitted collection round"):
+        clock.commit_round(training_config)
+    clock.update(training_config)
+    clock.commit_round(training_config)
+    assert (clock.step, clock.committed_rounds) == (2, 1)
+    assert clock.samples_used == 8 and clock.samples_scored == 4
+    clock.validate(training_config)
+    corrupt = dict(clock.state_dict(), skipped_rounds=2)
+    with pytest.raises(ValueError, match="clocks differ"):
+        Clock.from_state(corrupt).validate(training_config)
 
 
 def test_diversity_validation_applies_only_to_declared_suites(sampling_config):
@@ -158,9 +173,9 @@ def test_recovery_keeps_complete_evaluations_and_finishes_interrupted_before_tra
     def checkpoint(number):
         return publish(
             checkpoints,
-            number,
+            2 * number,
             contract,
-            {"step": number, "committed_rounds": number},
+            {"step": 2 * number, "committed_rounds": number},
             {},
             0,
             torch.device("cpu"),
@@ -199,5 +214,5 @@ def test_recovery_keeps_complete_evaluations_and_finishes_interrupted_before_tra
     assert events == [("evaluate", 2), ("train", 2, 3), ("evaluate", 3)]
     assert json.loads((output / "complete.json").read_text()) == {
         "committed_rounds": 3,
-        "step": 3,
+        "step": 6,
     }

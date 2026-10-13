@@ -1,7 +1,6 @@
 # Posttrain campaign execution
 
-The trainer runs one stage on a fixed base model, with DiffusionNFT or
-DiffusionART selected by the run config. A configuration defines the experiment;
+The trainer runs one DiffusionART stage on a fixed base model. A configuration defines the experiment;
 the [contract](posttrain_contract.md) defines the loss and the
 [recipe](posttrain_recipe.md) records the objective mechanisms and open values.
 The runner never reduces image size, sample counts, update counts, model
@@ -15,13 +14,10 @@ override. `configs/posttrain.toml` is the reference run.
 
 | Section | Meaning |
 |---|---|
-| `objective` | Top-level objective selector, `"nft"` or `"art"`. Each value requires exactly its own section and forbids the other. |
 | `initialization` | Asset ID and weight view (`live` or `ema`) of the base model. The asset ID resolves through the local `--assets` map. |
 | `student` | `full` tuning, or weight LoRA with rank, alpha and target set (`attention` or `attention_mlp`). |
-| `collection` | Prompt suite, prompts per round, draws per prompt, resolution, sampler rule, step count, guidance, shift and text exit layer. |
-| `nft` | NFT branch parameterization, advantage scaling and clip, `beta`, reduction epsilon, reference coefficient, inner updates per round, time-draw count, time distribution and bounds. Required under `objective = "nft"`. |
-| `art` | The ART reference coefficient and nothing else: guidance, two update windows, mask and time weights are the paper's constants. Required under `objective = "art"`. |
-| `old_policy` | NFT refresh strategy (`copy`, `constant`, `linear_ramp`), decay values, and the horizon counted in committed rounds. Required under `objective = "nft"` and rejected under `objective = "art"`. |
+| `collection` | Prompt suite, prompts per round, draws per prompt, resolution, sampler step count, shift and text exit layer. |
+| `art` | The ART reference coefficient and nothing else: guidance, two update windows, mask and time weights are the paper's constants. Required for every run. |
 | `student_optimizer` | `adamw` or `muon_adamw` with learning rates, betas, weight decay, clip limit and LR schedule. |
 | `execution` | Learner devices, microbatch, timeouts, precision, activation checkpointing, RoCE and deterministic-kernel policy. |
 | `training` | Seed, total collected rounds, checkpoint interval in rounds, and named EMA shadows with decay and storage device. |
@@ -30,16 +26,14 @@ override. `configs/posttrain.toml` is the reference run.
 A round is `prompts_per_round * draws_per_prompt` samples that must divide
 evenly across learner devices and microbatches. `training.rounds` and
 `training.checkpoint_every` count collections, including skipped ART rounds.
-Successful rounds perform `nft.updates_per_round` updates for NFT, two for ART.
-An ART run additionally requires `collection.guidance = 1` (it trains against the rollout's own cached
-prediction, so the rollout cannot use CFG) and a round that divides evenly into
-the two windows across learners
+Active rounds perform two optimizer updates.
+ART collection is conditional-only because training uses the rollout's cached
+predictions. The round must divide evenly into two windows across learners
 (`prompts_per_round * draws_per_prompt % (2 * learners) == 0`). Validate before
 launch:
 
 ```bash
 python -m src.posttrain.train --config configs/posttrain.toml --validate-only
-python -m src.posttrain.train --config configs/posttrain_art.toml --validate-only
 ```
 
 ## Launch, stop and resume
@@ -61,7 +55,7 @@ run after the requested number of collected rounds without changing the
 configured horizon, so a long horizon can be reached in segments. `--track` logs to the `inko-posttrain`
 SwanLab project; a recovered run keeps its experiment identity.
 
-`--resume` requires a byte-identical training contract (config plus prompt
+`--resume` requires an unchanged parsed training contract (config plus prompt
 suite) and restores the last complete round: roles, optimizer state, clock,
 prompt cursor, per-rank RNG and last reward. Work inside an uncommitted round is
 discarded and recollected. A run with committed checkpoints refuses to start
@@ -72,16 +66,12 @@ optimizer step. Skipped collections can publish checkpoints at the same
 optimizer step without overwriting earlier recovery points. `--stop-after`
 and the horizon always publish a checkpoint.
 
-## ART arm
-
-`configs/posttrain_art.toml` mirrors `configs/posttrain.toml` with
-`objective = "art"`, an `[art]` section, and no `[nft]` or `[old_policy]`. Its
-round mechanics differ as follows:
+## ART round mechanics
 
 - Collection rolls out the live student and caches the visited latent and the
   velocity the rollout produced at every sampler step. The cache is fp32,
   host-resident and sharded per learner rank, and a rank's shard is released
-  when the round's updates end. The NFT arm never allocates it.
+  when the round's updates end.
 - Guidance is a per-prompt reward-endpoint covariance over the round. Learners
   reduce reward sums and counts, reward extrema, then centered covariance
   products and absolute deviations before any direction exists. A prompt
@@ -89,8 +79,7 @@ round mechanics differ as follows:
 - Two optimizer updates follow each active round. Each learner shuffles its
   draws with a private round-keyed RNG and splits them into equal disjoint
   windows. Both windows train all of their trajectory sites against the same
-  frozen targets. No old-policy refresh happens, so `old_policy_version` stays 0
-  and a checkpoint carries no old role.
+  frozen targets.
 - With no active guidance and `reference_coefficient = 0`, the collection is
   recorded as skipped. Collection IDs and seeds advance, while optimizer, LR
   and student EMA state stay fixed. An enabled reference penalty still trains.
@@ -98,12 +87,10 @@ round mechanics differ as follows:
   tracking publishes inactive and trust-region-rejected fractions over all
   trajectory items in each update. Their remainder is the accepted fraction.
 
-`execution.microbatch` counts items per student forward under both objectives,
-so under ART it chunks the trajectory sites of one draw rather than a draw
-group. Update cost scales with the trained sites: a round runs two windows of
-`draws/2 * steps` forwards per learner, so the ART arm's student forward count
-is `steps` times the NFT arm's at the same round workload, while rollout and
-scoring costs are identical.
+`execution.microbatch` counts trajectory sites per student forward. Update cost
+scales with the trained sites: each learner runs two windows of
+`local_draws/2 * steps` items. Collection and scoring still process one terminal
+image per draw.
 
 ## Evaluation cadence
 
@@ -188,7 +175,7 @@ SwanLab uses four groups:
 |---|---|
 | `monitor` | One labeled grid per scene, with language/length variants as rows and declared arms as columns; separate images for each seed draw. Within-prompt LPIPS is labeled by suite and arm. |
 | `evaluation` | Complete benchmark means and paired deltas with confidence bounds. Deltas are oriented so positive means improvement. Each suite's fixed baseline is logged once. Full blind panels and per-prompt statistics stay in the evaluation artifacts. |
-| `train` | Objective loss, weighted reference contribution when enabled, pre-clipping gradient norm, and one applied LR per optimizer component. ART updates also report inactive and rejected item fractions. Collection readouts carry raw channel mean/std and NFT constant-reward or ART active-guidance group fractions. |
+| `train` | Objective loss, weighted reference contribution when enabled, pre-clipping gradient norm, and one applied LR per optimizer component. ART updates also report inactive and rejected item fractions. Collection readouts carry raw channel mean/std and active-guidance group fractions. |
 | `runtime` | Collection, scoring-wait, guidance (ART), round and update durations; scored-image and skipped-collection counts; scoring retries/failures; maximum learner process peak in GiB. |
 
 Update metrics and evaluation images use optimizer step. Collection reward and
