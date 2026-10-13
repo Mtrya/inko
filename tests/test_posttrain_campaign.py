@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 
 import pytest
@@ -13,6 +14,8 @@ from src.posttrain.evaluation_config import (
     boundaries,
     evaluation_due,
 )
+from src.posttrain.provenance import training_contract
+from src.posttrain.records import atomic_json
 from src.posttrain.rollout import collect_art, collect_nft
 
 
@@ -134,3 +137,67 @@ def test_diversity_validation_applies_only_to_declared_suites(sampling_config):
     with pytest.raises(ValueError, match="at least two seeds"):
         validate_panel(config, [prompt], "development")
     validate_panel(config, [prompt, dict(prompt, id="q", seed=2)], "development")
+
+
+def test_recovery_keeps_complete_evaluations_and_finishes_interrupted_before_training(
+    tmp_path, monkeypatch, training_config
+):
+    from scripts.posttrain import run_campaign
+
+    config = replace(
+        training_config, training=replace(training_config.training, rounds=3)
+    )
+    interval = IntervalEvaluation(
+        "sampling.json", 1, ("development",), ("live",), True, 7
+    )
+    prompts = []
+    contract = training_contract(config, prompts)
+    output = tmp_path / "run"
+    checkpoints = output / "training/checkpoints"
+
+    def checkpoint(number):
+        return publish(
+            checkpoints,
+            number,
+            contract,
+            {"step": number, "committed_rounds": number},
+            {},
+            0,
+            torch.device("cpu"),
+        )
+
+    checkpoint(1)
+    checkpoint(2)
+    atomic_json(output / "evaluation/round-000001/evaluation.json", {"step": 1})
+    events = []
+
+    def evaluate(path, training, interval, assets, destination, **kwargs):
+        number = inspect(path)["committed_rounds"]
+        events.append(("evaluate", number))
+        atomic_json(destination / "evaluation.json", {"step": number})
+
+    def train(argv, **kwargs):
+        events.append(
+            (
+                "train",
+                inspect(argv[argv.index("--resume") + 1])["committed_rounds"],
+                int(argv[argv.index("--stop-after") + 1]),
+            )
+        )
+        checkpoint(3)
+
+    monkeypatch.setattr(run_campaign, "load_training_config", lambda path: config)
+    monkeypatch.setattr(run_campaign, "load_interval_config", lambda path: interval)
+    monkeypatch.setattr(run_campaign, "load_prompts", lambda *args: prompts)
+    monkeypatch.setattr(run_campaign, "evaluate_checkpoint", evaluate)
+    monkeypatch.setattr(run_campaign.subprocess, "run", train)
+    assets = tmp_path / "assets.json"
+    atomic_json(assets, {})
+    run_campaign.execute(
+        tmp_path / "training.toml", tmp_path / "interval.toml", assets, output
+    )
+    assert events == [("evaluate", 2), ("train", 2, 3), ("evaluate", 3)]
+    assert json.loads((output / "complete.json").read_text()) == {
+        "committed_rounds": 3,
+        "step": 3,
+    }

@@ -168,12 +168,15 @@ def execute(config_path, interval_path, assets_path, output, *, track=False):
         # resuming training. An interrupted evaluation never becomes a skip.
         for round_number, path in checkpoints:
             if evaluation_due(training, interval, round_number):
+                destination = output / "evaluation" / path.name
+                if (destination / "evaluation.json").exists():
+                    continue
                 evaluate_checkpoint(
                     path,
                     training,
                     interval,
                     assets,
-                    output / "evaluation" / path.name,
+                    destination,
                     track=track,
                 )
         last = checkpoints[-1][1] if checkpoints else None
