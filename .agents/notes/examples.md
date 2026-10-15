@@ -2,7 +2,7 @@
 
 Dated incidents that calibrated the behavioral rules and skills in this repository. Evidence, not authority: the rule or skill text is the authority; these entries record what happened and the lesson drawn, so a future revision can check the rule against the incident that produced it.
 
-## 2026-10-08 — grid-laziness (calibrates: experiment-design)
+## 2026-10-08 — grid-laziness (calibrates: experiment-lifecycle)
 
 Context: designing the posttrain experiment campaign. The design drifted toward enumerating toggle/config combinations (eight combinators) without naming what each cell was for.
 
@@ -10,7 +10,7 @@ User: "We need experiments to answer our certain questions, not to pursue comple
 
 Lesson: every arm names its question and the decision it changes; analysis reads trajectories and internals, not headline numbers; a run yielding no insight is a failed run.
 
-## 2026-10-09 — arm-minimization (calibrates: experiment-design)
+## 2026-10-09 — arm-minimization (calibrates: experiment-lifecycle)
 
 Context: same campaign, redesigned after the grid-laziness rule landed. The agent over-corrected into avoiding experiments: it offered to "accept ratio 5 purely on prior, skip Phase 2 entirely" although DMD2's own text says to tune the update ratio per model/dataset (a non-portable prior), and proposed dissolving the DMD2-components question "into two audit checks rather than a funded training arm."
 
