@@ -4,7 +4,7 @@ from dataclasses import replace
 import pytest
 import torch
 
-from src.posttrain.config import (
+from src.evaluation.benchmarks.config import (
     Arm,
     Checkpoint,
     Config,
@@ -12,14 +12,12 @@ from src.posttrain.config import (
     Evaluation,
     Execution,
     Sampling,
-    Scorer,
 )
-from src.posttrain.evaluation_config import IntervalEvaluation
-from src.posttrain.scoring.contracts import Channel
-from src.posttrain.training_config import (
+from src.posttrain.config import (
     ART,
     Collection,
     Initialization,
+    IntervalEvaluation,
     Optimizer,
     RewardChannel,
     Rewards,
@@ -28,6 +26,8 @@ from src.posttrain.training_config import (
     TrainingConfig,
     TrainingExecution,
 )
+from src.posttrain.scoring.config import Scorer
+from src.posttrain.scoring.contracts import Channel
 
 
 @pytest.fixture

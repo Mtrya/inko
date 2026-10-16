@@ -1,182 +1,282 @@
-"""Complete, typed sampling recipes; backend semantics belong to services."""
+"""Complete single-stage ART training configuration, separate from benchmark arms."""
 
 import json
+import math
 import tomllib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .schema import decode, name, require
-from .scoring.contracts import Channel
+from .scoring.config import Scorer
+
+ART_UPDATES_PER_ROUND = 2
+REPO = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
-class Checkpoint:
-    asset: str
-    weights: str
-
-
-@dataclass(frozen=True)
-class Arm:
-    name: str
-    checkpoint: Checkpoint
+class IntervalEvaluation:
+    every: int
+    suite: str
+    monitor_suite: str
+    prompt_limit: int
+    draws_per_prompt: int
     steps: int
     guidance: float
     shift: str
-
-
-@dataclass(frozen=True)
-class Sampling:
-    precision: str
-    batch_size: int
-    text_exit_layer: int
     shapes: dict[str, tuple[int, int]]
-
-
-@dataclass(frozen=True)
-class Execution:
-    learner_devices: tuple[int, ...]
-    max_inflight_batches: int
-    startup_timeout: int
-    task_timeout: int
-    cpu_threads: int
-
-
-@dataclass(frozen=True)
-class Diversity:
-    suites: tuple[str, ...]
-    asset: str
-    pair_batch_size: int
-    cpu_threads: int
-
-    def __post_init__(self):
-        require(
-            min(self.pair_batch_size, self.cpu_threads) > 0,
-            "invalid LPIPS batch/thread count",
-        )
-        require(
-            len(set(self.suites)) == len(self.suites),
-            "invalid diversity suites",
-        )
-        for suite in self.suites:
-            name(suite)
-        if self.suites:
-            name(self.asset)
-        else:
-            require(not self.asset, "disabled diversity must not claim metric assets")
-
-
-@dataclass(frozen=True)
-class Evaluation:
-    suite: str
-    monitor_suite: str
     channels: tuple[str, ...]
-    bootstrap_seed: int
-    bootstrap_repeats: int
-    confidence: float
-    diversity: Diversity
-    prompt_limit: int = 0
-    draws_per_prompt: int = 1
-
-
-@dataclass(frozen=True)
-class Scorer:
-    id: str
-    outputs: tuple[Channel, ...]
-    attempts: int
-    timeout: float
-    concurrency: int
-    batch_size: int
-    transport: str
+    diversity_asset: str
+    suites: tuple[str, ...] = ("development", "monitor")
+    weights: tuple[str, ...] = ("ema",)
+    bootstrap_seed: int = 7
+    bootstrap_repeats: int = 2000
+    confidence: float = 0.95
 
     def __post_init__(self):
-        name(self.id)
-        require(self.id != "learner", "learner is reserved for the generation role")
         require(
-            bool(self.outputs)
-            and len({c.name for c in self.outputs}) == len(self.outputs),
-            "unique scorer outputs required",
+            self.every > 0 and self.prompt_limit >= 0 and self.draws_per_prompt > 0,
+            "invalid evaluation cadence/prompt selection",
         )
         require(
-            min(self.attempts, self.concurrency, self.batch_size, self.timeout) > 0,
-            "acquisition limits must be positive",
+            bool(self.suites)
+            and len(set(self.suites)) == len(self.suites)
+            and set(self.suites) <= {"development", "monitor"},
+            "invalid evaluation suites",
         )
         require(
-            self.transport in {"shared_file", "png_base64"}, "unknown image transport"
+            bool(self.weights)
+            and len(set(self.weights)) == len(self.weights)
+            and set(self.weights) <= {"live", "ema"},
+            "evaluation weights must be live or ema",
+        )
+        require(0 <= self.bootstrap_seed < 2**63, "invalid evaluation seed")
+
+
+@dataclass(frozen=True)
+class Initialization:
+    asset: str
+
+
+@dataclass(frozen=True)
+class Student:
+    mode: str
+    rank: int
+    alpha: float
+    targets: str
+
+
+@dataclass(frozen=True)
+class Collection:
+    prompts: str
+    prompts_per_round: int
+    draws_per_prompt: int
+    height: int
+    width: int
+    steps: int
+    shift: str
+    text_exit_layer: int
+
+
+@dataclass(frozen=True)
+class ART:
+    reference_coefficient: float
+
+
+@dataclass(frozen=True)
+class Optimizer:
+    kind: str
+    lr: float
+    muon_lr: float
+    betas: tuple[float, float] = (0.9, 0.999)
+    epsilon: float = 1e-8
+    weight_decay: float = 0.0
+    conditioning_weight_decay: float = 0.0
+    max_grad_norm: float = 1.0
+    muon_weight_decay: float = 0.0
+    muon_momentum: float = 0.95
+
+    def __post_init__(self):
+        require(self.kind in {"adamw", "muon_adamw"}, "unsupported optimizer")
+        require(
+            min(self.lr, self.epsilon, self.max_grad_norm) > 0
+            and (self.muon_lr > 0 if self.kind == "muon_adamw" else self.muon_lr >= 0),
+            "optimizer rates/epsilon/clip must be positive",
+        )
+        require(
+            min(
+                self.weight_decay,
+                self.conditioning_weight_decay,
+                self.muon_weight_decay,
+            )
+            >= 0,
+            "negative decay",
+        )
+        require(
+            all(0 <= b < 1 for b in self.betas) and 0 <= self.muon_momentum < 1,
+            "invalid momentum",
         )
 
 
 @dataclass(frozen=True)
-class Config:
-    sampling: Sampling
-    execution: Execution
-    evaluation: Evaluation
-    arms: tuple[Arm, ...]
+class TrainingExecution:
+    learner_devices: tuple[int, ...]
+    microbatch: int
+    cpu_threads: int
+    collective_timeout: int
+    startup_timeout: int
+    round_timeout: int
+    precision: str
+    activation_checkpointing: bool
+    intra_host_roce: bool
+    deterministic_algorithms: bool
+
+
+@dataclass(frozen=True)
+class Training:
+    seed: int
+    rounds: int
+    checkpoint_every: int
+    checkpoint_keep_last: int
+    ema_decay: float
+
+
+@dataclass(frozen=True)
+class RewardChannel:
+    channel: str
+    weight: float
+    standardization: str
+
+
+@dataclass(frozen=True)
+class Rewards:
+    channels: tuple[RewardChannel, ...]
+    epsilon: float = 1e-4
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    initialization: Initialization
+    student: Student
+    collection: Collection
+    art: ART
+    student_optimizer: Optimizer
+    execution: TrainingExecution
+    training: Training
     scorers: tuple[Scorer, ...]
+    rewards: Rewards
+    evaluation: IntervalEvaluation
+
+    @property
+    def updates_per_round(self):
+        return ART_UPDATES_PER_ROUND
+
+    @property
+    def reference_coefficient(self):
+        return self.art.reference_coefficient
 
     def __post_init__(self):
-        s, e, v = self.sampling, self.execution, self.evaluation
+        s, c, e, t = (
+            self.student,
+            self.collection,
+            self.execution,
+            self.training,
+        )
+        name(self.initialization.asset)
         require(
-            s.precision in {"bfloat16", "float32"}, "unsupported sampling precision"
+            s.mode in {"full", "lora"}
+            and s.rank > 0
+            and s.alpha > 0
+            and s.targets in {"attention", "attention_mlp"},
+            "invalid student mode/targets",
         )
         require(
-            s.batch_size > 0 and s.text_exit_layer > 0 and bool(s.shapes),
-            "invalid sampling dimensions",
+            c.steps > 0 and c.shift in {"shape", "none"},
+            "invalid collection sampler",
         )
         require(
-            all(
-                all(n > 0 and n % 16 == 0 for n in shape) for shape in s.shapes.values()
-            ),
-            "image dimensions must be multiples of 16",
+            min(c.prompts_per_round, c.draws_per_prompt, c.text_exit_layer) > 0
+            and all(n > 0 and n % 16 == 0 for n in (c.height, c.width)),
+            "invalid collection sizes",
         )
+        require(c.draws_per_prompt >= 2, "at least two draws per prompt are required")
         require(
             bool(e.learner_devices)
             and min(e.learner_devices) >= 0
             and len(set(e.learner_devices)) == len(e.learner_devices),
-            "invalid learner devices",
+            "invalid learner role map",
         )
         require(
             min(
-                e.max_inflight_batches, e.startup_timeout, e.task_timeout, e.cpu_threads
+                e.microbatch,
+                e.cpu_threads,
+                e.collective_timeout,
+                e.startup_timeout,
+                e.round_timeout,
             )
-            > 0,
-            "execution limits must be positive",
+            > 0
+            and e.precision in {"float32", "bfloat16"},
+            "invalid training execution",
         )
         require(
-            v.bootstrap_repeats > 0
-            and 0 < v.confidence < 1
-            and v.prompt_limit >= 0
-            and v.draws_per_prompt > 0,
-            "invalid bootstrap settings",
+            c.prompts_per_round
+            * c.draws_per_prompt
+            % (len(e.learner_devices) * e.microbatch)
+            == 0,
+            "round must divide evenly across learners and microbatches",
         )
         require(
-            bool(self.arms) and len({a.name for a in self.arms}) == len(self.arms),
-            "unique nonempty arms required",
+            0 <= t.seed < 2**63
+            and t.rounds > 0
+            and t.checkpoint_every > 0
+            and t.checkpoint_keep_last >= 0
+            and 0 <= t.ema_decay < 1,
+            "invalid training length/seed/EMA",
         )
-        for a in self.arms:
-            name(a.name)
-            name(a.checkpoint.asset)
-            name(a.checkpoint.weights)
-            require(a.steps > 0, "invalid sampler")
-            require(
-                a.guidance >= 0 and a.shift in {"shape", "none"},
-                "invalid guidance/shift",
-            )
+        require(
+            c.prompts_per_round * c.draws_per_prompt % (2 * len(e.learner_devices))
+            == 0,
+            "ART round must split evenly into two update windows",
+        )
+        require(
+            math.isfinite(self.art.reference_coefficient)
+            and self.art.reference_coefficient >= 0,
+            "invalid ART reference coefficient",
+        )
+        available = {f"{s.id}.{ch.name}": ch for s in self.scorers for ch in s.outputs}
+        channels = self.rewards.channels
         require(
             bool(self.scorers)
-            and len({s.id for s in self.scorers}) == len(self.scorers),
-            "unique nonempty scorers required",
+            and len({s.id for s in self.scorers}) == len(self.scorers)
+            and len({ch.channel for ch in channels}) == len(channels),
+            "unique nonempty scorers/reward channels required",
         )
-        channels = {f"{s.id}.{c.name}" for s in self.scorers for c in s.outputs}
         require(
-            bool(v.channels)
-            and len(set(v.channels)) == len(v.channels)
-            and set(v.channels) <= channels,
-            "evaluation requires declared unique channels",
+            bool(channels)
+            and math.isclose(sum(ch.weight for ch in channels), 1, abs_tol=1e-7),
+            "reward weights must sum to one",
+        )
+        require(
+            {ch.channel.split(".")[0] for ch in channels}
+            == {s.id for s in self.scorers},
+            "reward/scorer service set differs",
+        )
+        for channel in channels:
+            require(channel.channel in available, "reward channel is undeclared")
+            require(
+                channel.weight >= 0 and channel.standardization in {"none", "round"},
+                "invalid reward orientation/weight/standardization",
+            )
+        require(
+            self.rewards.epsilon > 0, "reward normalization epsilon must be positive"
         )
 
 
-def load_config(path: str | Path) -> Config:
+def load_training_config(path):
     if Path(path).suffix == ".json":
-        return decode(Config, json.loads(Path(path).read_text()))
+        return decode(TrainingConfig, json.loads(Path(path).read_text()))
     with Path(path).open("rb") as stream:
-        return decode(Config, tomllib.load(stream))
+        return decode(TrainingConfig, tomllib.load(stream))
+
+
+def training_contract(config, prompts):
+    return json.loads(json.dumps({"config": asdict(config), "prompts": prompts}))

@@ -1,13 +1,40 @@
-"""Scorer-owned source, model and output contracts."""
+"""Scorer client acquisition settings and service model configuration."""
 
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..schema import decode, require
+from ..schema import decode, name, require
 from .backends.hpsv3 import OUTPUTS as HPS_OUTPUTS
 from .backends.vqascore import OUTPUTS as VQA_OUTPUTS
-from .contracts import Capabilities
+from .contracts import Capabilities, Channel
+
+
+@dataclass(frozen=True)
+class Scorer:
+    id: str
+    outputs: tuple[Channel, ...]
+    attempts: int
+    timeout: float
+    concurrency: int
+    batch_size: int
+    transport: str
+
+    def __post_init__(self):
+        name(self.id)
+        require(self.id != "learner", "learner is reserved for the generation role")
+        require(
+            bool(self.outputs)
+            and len({c.name for c in self.outputs}) == len(self.outputs),
+            "unique scorer outputs required",
+        )
+        require(
+            min(self.attempts, self.concurrency, self.batch_size, self.timeout) > 0,
+            "acquisition limits must be positive",
+        )
+        require(
+            self.transport in {"shared_file", "png_base64"}, "unknown image transport"
+        )
 
 
 @dataclass(frozen=True)

@@ -220,7 +220,7 @@ def test_duplicate_and_wrong_envelopes_rejected(sampling_config, image_input):
 def test_round_acquisition_returns_combined_rewards(
     tmp_path, training_config, image_input
 ):
-    from src.posttrain.round_scoring import acquire_round
+    from src.posttrain.rewards import acquire_round
 
     spec = training_config.scorers[0]
     endpoint = Endpoint(tmp_path, spec, Backend())
@@ -251,10 +251,10 @@ def test_mixed_pairwise_and_continuous_reward_channels(training_config):
 
     import torch
 
-    from src.posttrain.config import Scorer
+    from src.posttrain.config import RewardChannel, Rewards
     from src.posttrain.rewards import combine_round
+    from src.posttrain.scoring.config import Scorer
     from src.posttrain.scoring.contracts import Channel
-    from src.posttrain.training_config import RewardChannel, Rewards
 
     rubric = {
         "content": [1, 0.5, 0.5, 0],
@@ -310,32 +310,28 @@ def test_mixed_pairwise_and_continuous_reward_channels(training_config):
 
 def test_round_barrier_joins_the_published_reward_packet(tmp_path, training_config):
     from src.posttrain.records import atomic_json
-    from src.posttrain.round_scoring import (
-        collection_path,
+    from src.posttrain.rewards import (
         reward_path,
         wait_for_rewards,
     )
 
     output, attempt, step = tmp_path, "a", 3
     local = [{"sample_id": "3:0:0"}]
-    collection = collection_path(output, attempt, step, 0)
-    atomic_json(collection, {"step": step, "rank": 0, "records": local})
     packet = {
         "step": step,
         "policy_version": step,
-        "collections": [file_hash(collection)],
         "reward": {"sample_ids": ["3:0:0", "3:0:1"], "combined": [1.0, -1.0]},
     }
     atomic_json(reward_path(output, attempt, step), packet)
-    values, reward = wait_for_rewards(training_config, output, attempt, step, 0, local)
+    values, reward = wait_for_rewards(training_config, output, attempt, step, local)
     assert values == {"3:0:0": 1.0, "3:0:1": -1.0} and reward == packet["reward"]
     with pytest.raises(ValueError, match="missing local reward"):
         wait_for_rewards(
-            training_config, output, attempt, step, 0, [{"sample_id": "3:9:9"}]
+            training_config, output, attempt, step, [{"sample_id": "3:9:9"}]
         )
-    with pytest.raises(ValueError, match="identity mismatch"):
-        collection.write_text("changed")
-        wait_for_rewards(training_config, output, attempt, step, 0, local)
+    atomic_json(reward_path(output, attempt, step), dict(packet, step=4))
+    with pytest.raises(ValueError, match="round mismatch"):
+        wait_for_rewards(training_config, output, attempt, step, local)
 
 
 @pytest.mark.parametrize("resume", [False, True])
@@ -345,9 +341,9 @@ def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
     import os
     import time
 
-    from src.posttrain import round_scoring, train
+    from src.posttrain import rewards, train
     from src.posttrain.records import atomic_json
-    from src.posttrain.round_scoring import collection_path, reward_path
+    from src.posttrain.rewards import collection_path, reward_path
     from src.posttrain.scoring import lifecycle
 
     output = tmp_path / "training"
@@ -443,7 +439,7 @@ def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
     monkeypatch.setattr(lifecycle, "Services", Services)
     monkeypatch.setattr(train.subprocess, "Popen", Learner)
     monkeypatch.setattr(train.time, "sleep", lambda seconds: None)
-    monkeypatch.setattr(round_scoring, "acquire_round", acquire)
+    monkeypatch.setattr(rewards, "acquire_round", acquire)
     result = train.launch(
         replace(training_config, training=replace(training_config.training, rounds=4)),
         {"learner": {"python_paths": []}, "device_type": "cpu"},
@@ -518,8 +514,8 @@ def test_vqa_backend_uses_fixed_yes_probability_contract():
 def test_production_orchestration_config_only_substitution(
     tmp_path, sampling_config, image_input
 ):
+    from src.evaluation.benchmarks.workers import ResidentWorkers, run_pipeline
     from src.posttrain.scoring.contracts import Channel
-    from src.posttrain.workers import ResidentWorkers, run_pipeline
 
     class RubricEngine(ScoringEngine):
         def _score(self, requests, deadline, enqueued):

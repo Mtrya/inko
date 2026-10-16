@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from src.posttrain.art import group_guidance
 from src.posttrain.distributed import (
     all_reduce,
     global_loss,
@@ -13,7 +14,6 @@ from src.posttrain.distributed import (
     prime_buckets,
     wrap,
 )
-from src.posttrain.guidance import group_guidance
 
 
 def worker(rank, path, destination, microbatch, weighted):

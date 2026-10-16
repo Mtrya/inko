@@ -26,18 +26,16 @@ def learner(
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from src.models.inko import Inko
+    from src.utils.device import peak_memory, set_device, synchronize
     from src.utils.encode_text import encode_text
 
     from . import checkpoint
-    from .clock import Clock
+    from .art import round_guidance, update_art
     from .distributed import all_reduce, initialize, prime_buckets, wrap
-    from .engine import update_art
-    from .guidance import round_guidance
-    from .models import peak_memory, set_device, synchronize
+    from .rewards import publish_collection, wait_for_rewards
     from .roles import Roles
     from .rollout import PromptCursor, collect_art
-    from .round_scoring import publish_collection, wait_for_rewards
-    from .session import TrainingState
+    from .state import Clock, TrainingState
     from .tracking import optimizer_rates
 
     device = set_device(
@@ -235,7 +233,7 @@ def learner(
             synchronize(device)
             collected = time.monotonic()
             values, state.last_reward = wait_for_rewards(
-                config, output, attempt, r, rank, records
+                config, output, attempt, r, records
             )
             rewarded = time.monotonic()
             guidance = round_guidance(config, batches, values, reduce=all_reduce)

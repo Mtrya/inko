@@ -10,6 +10,7 @@ from test_scoring import Backend, Endpoint
 from scripts.posttrain.run_campaign import committed_checkpoints
 from src.evaluation.benchmarks import run as benchmark
 from src.models.inko import Inko
+from src.posttrain.art import round_guidance, update_art
 from src.posttrain.checkpoint import (
     assert_exact,
     cpu_state,
@@ -19,13 +20,10 @@ from src.posttrain.checkpoint import (
     restore_rng,
     rng_state,
 )
-from src.posttrain.clock import Clock
-from src.posttrain.engine import update_art
-from src.posttrain.guidance import round_guidance
 from src.posttrain.records import file_hash
 from src.posttrain.rollout import PromptCursor, art_window, collect_art
 from src.posttrain.scoring.client import ScoreClient, request_for_record
-from src.posttrain.session import TrainingState
+from src.posttrain.state import Clock, TrainingState
 
 
 def test_committed_round_state_round_trips_through_a_checkpoint(
@@ -370,7 +368,7 @@ def test_art_skip_preserves_momentum_ema_and_updates_across_resume(
 def test_art_reference_penalty_remains_active_without_reward_guidance(
     new_roles, training_config, small_model
 ):
-    from src.posttrain.guidance import GroupGuidance
+    from src.posttrain.art import GroupGuidance
 
     state = TrainingState(
         training_config, new_roles(training_config, small_model()), None, Clock()
@@ -492,9 +490,9 @@ def test_config_only_external_service_collection_join_report_and_resume(
 def test_arm_checkpoint_is_loaded_and_cached(tmp_path, monkeypatch):
     import torch
 
+    from src.evaluation.benchmarks.config import Checkpoint
+    from src.evaluation.benchmarks.generation import Generator
     from src.models.inko import Inko
-    from src.posttrain.config import Checkpoint
-    from src.posttrain.models import Generator
 
     calls = []
 
@@ -532,7 +530,7 @@ def test_arm_checkpoint_is_loaded_and_cached(tmp_path, monkeypatch):
 
 
 def test_strict_typed_configs_reject_unknown_and_invalid_fields(sampling_config):
-    from src.posttrain.config import Config
+    from src.evaluation.benchmarks.config import Config
     from src.posttrain.schema import decode
 
     raw = asdict(sampling_config)

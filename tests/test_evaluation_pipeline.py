@@ -3,7 +3,7 @@ from dataclasses import replace
 import pytest
 
 from src.evaluation.benchmarks.report import build_report, paired_interval
-from src.posttrain.workers import run_pipeline
+from src.evaluation.benchmarks.workers import run_pipeline
 
 
 def _shutdown_worker(incoming, ready, path):
@@ -18,7 +18,7 @@ def test_completed_workers_exit_normally(tmp_path):
     import multiprocessing as mp
     from types import SimpleNamespace
 
-    from src.posttrain.workers import ResidentWorkers
+    from src.evaluation.benchmarks.workers import ResidentWorkers
 
     ctx = mp.get_context("spawn")
     incoming, outgoing, ready = ctx.Queue(2), ctx.Queue(2), ctx.Event()

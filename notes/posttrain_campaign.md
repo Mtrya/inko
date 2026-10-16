@@ -10,7 +10,7 @@ capacity or precision after a failure.
 
 A training config is TOML or JSON with one schema. Missing required fields or
 unknown fields fail validation. Optimizer defaults and reward epsilon live in
-`src/posttrain/training_config.py`; explicit overrides are allowed. Parsed
+`src/posttrain/config.py`; explicit overrides are allowed. Parsed
 configs contain the effective values for resume. There is no config inheritance or environment
 override. `configs/posttrain.toml` is the reference run.
 

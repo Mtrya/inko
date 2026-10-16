@@ -11,9 +11,9 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
+from .config import load_training_config
 from .records import atomic_json
 from .schema import require
-from .training_config import load_training_config
 
 
 def launch(
@@ -27,7 +27,7 @@ def launch(
     assets_path,
     track=False,
 ):
-    from .round_scoring import score_ready_round
+    from .rewards import score_ready_round
     from .scoring.lifecycle import Services, isolated_environment
     from .tracking import Tracker, TrainingMetrics
 
@@ -235,7 +235,7 @@ def main():
     config = load_training_config(args.config)
     from src.evaluation.benchmarks.prompts import load_prompts
 
-    from .provenance import REPO, training_contract
+    from .config import REPO, training_contract
 
     prompts = load_prompts(
         REPO / config.collection.prompts,

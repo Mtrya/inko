@@ -36,8 +36,8 @@ def test_shift_has_explicit_endpoints_and_is_applied_once():
 
 
 def test_inko_model_boundary_accepts_fp32_time_with_bf16_weights():
+    from src.evaluation.benchmarks.generation import Generator
     from src.models.inko import Inko
-    from src.posttrain.models import Generator
 
     worker = Generator.__new__(Generator)
     worker.device = torch.device("cpu")

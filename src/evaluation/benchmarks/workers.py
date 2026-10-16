@@ -8,9 +8,9 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
-from .artifacts import package_versions
-from .scoring.client import request_for_record
-from .scoring.lifecycle import Services, isolated_environment
+from src.posttrain.artifacts import package_versions
+from src.posttrain.scoring.client import request_for_record
+from src.posttrain.scoring.lifecycle import Services, isolated_environment
 
 
 def _worker(index, config, assets, incoming, outgoing):
@@ -27,7 +27,9 @@ def _worker(index, config, assets, incoming, outgoing):
     ):
         os.environ.pop(key, None)
     try:
-        from .models import Generator, peak_memory, set_device, synchronize
+        from src.utils.device import peak_memory, set_device, synchronize
+
+        from .generation import Generator
 
         started = time.perf_counter()
         device = set_device(assets["device_type"], index, config.execution.cpu_threads)

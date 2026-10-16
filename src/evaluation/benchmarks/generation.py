@@ -1,4 +1,4 @@
-"""Resident Inko rollout worker; model assets are always supplied explicitly."""
+"""Resident benchmark generation from exported model weights."""
 
 import time
 from dataclasses import asdict
@@ -6,34 +6,9 @@ from pathlib import Path
 
 import torch
 
-from .records import file_hash
-from .sampling import sample, time_grid
-
-
-def set_device(kind: str, index: int, cpu_threads: int):
-    torch.set_num_threads(cpu_threads)
-    if kind == "npu":
-        import torch_npu  # noqa: F401
-
-        torch.npu.set_device(index)
-    elif kind == "cuda":
-        torch.cuda.set_device(index)
-    elif kind != "cpu":
-        raise ValueError(f"unsupported device {kind}")
-    return torch.device(kind if kind == "cpu" else f"{kind}:{index}")
-
-
-def synchronize(device):
-    if device.type != "cpu":
-        getattr(torch, device.type).synchronize(device)
-
-
-def peak_memory(device):
-    return (
-        0
-        if device.type == "cpu"
-        else getattr(torch, device.type).max_memory_allocated(device)
-    )
+from src.posttrain.records import file_hash
+from src.posttrain.sampling import sample, time_grid
+from src.utils.device import peak_memory, synchronize
 
 
 class Generator:

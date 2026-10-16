@@ -11,9 +11,9 @@ import torch
 from src.models.inko import Inko
 from src.posttrain.adapters import install_adapters, merge_student
 from src.posttrain.checkpoint import assert_exact, inspect, save_tensor_file
+from src.posttrain.config import TrainingConfig
 from src.posttrain.records import atomic_json
 from src.posttrain.schema import decode, require
-from src.posttrain.training_config import TrainingConfig
 
 
 def export(checkpoint, weights, output):

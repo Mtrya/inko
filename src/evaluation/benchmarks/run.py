@@ -8,12 +8,12 @@ from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
-from src.posttrain.config import load_config
+from src.evaluation.benchmarks.config import load_config
+from src.evaluation.benchmarks.workers import ResidentWorkers, run_pipeline
 from src.posttrain.records import atomic_json, file_hash, identity
 from src.posttrain.schema import decode, require
 from src.posttrain.scoring.client import request_for_record
 from src.posttrain.scoring.contracts import ScoreResult, validate_results
-from src.posttrain.workers import ResidentWorkers, run_pipeline
 from src.utils import prompt_contract
 
 from .diversity import validate_panel

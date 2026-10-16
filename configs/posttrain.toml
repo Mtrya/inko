@@ -1,4 +1,4 @@
-# Single-stage DiffusionART recipe; optimizer defaults live in training_config.py.
+# Single-stage DiffusionART recipe; optimizer defaults live in src/posttrain/config.py.
 # Model, service, endpoint and storage paths live in the --assets JSON.
 # The base is the 600k pretrain EMA; see notes/posttrain_recipe.md.
 

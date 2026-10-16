@@ -305,7 +305,7 @@ class TrainingMetrics:
                             )
                         }
                     )
-            from .round_scoring import reward_path
+            from .rewards import reward_path
 
             reward = json.loads(
                 reward_path(self.output, self.attempt, self.round).read_text()

@@ -8,7 +8,7 @@ from ...artifacts import package_versions, verify_model
 def load_backend(config, assets, index):
     import torch
 
-    from ...models import peak_memory, set_device, synchronize
+    from src.utils.device import peak_memory, set_device, synchronize
 
     semantics = config.semantics
     provenance = {

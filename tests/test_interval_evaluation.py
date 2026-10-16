@@ -4,12 +4,12 @@ from dataclasses import replace
 import pytest
 import torch
 
+from scripts.posttrain.run_campaign import boundaries, evaluation_due
+from src.evaluation.benchmarks.config import Arm, Checkpoint, Diversity
 from src.evaluation.benchmarks.diversity import validate_panel
 from src.evaluation.benchmarks.prompts import load_evaluation_prompts
 from src.posttrain.checkpoint import inspect, publish
-from src.posttrain.config import Arm, Checkpoint, Diversity
-from src.posttrain.evaluation_config import boundaries, evaluation_due
-from src.posttrain.provenance import training_contract
+from src.posttrain.config import training_contract
 from src.posttrain.records import atomic_json
 
 

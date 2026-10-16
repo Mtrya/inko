@@ -3,7 +3,7 @@
 The trainer optimizes the 600k base model with
 [DiffusionART](https://arxiv.org/abs/2610.12572) in one stage.
 `configs/posttrain.toml` declares the training recipe; optimizer defaults are
-defined in `src/posttrain/training_config.py`. This note defines their meaning. See the
+defined in `src/posttrain/config.py`. This note defines their meaning. See the
 [recipe](posttrain_recipe.md) and [evaluation protocol](posttrain_evaluation.md).
 
 ## Flow convention

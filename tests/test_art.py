@@ -7,16 +7,21 @@ from dataclasses import asdict, replace
 import pytest
 import torch
 
-from src.posttrain.art import KL_THRESHOLD, NOISE_LEVEL, losses
+from src.posttrain.art import (
+    KL_THRESHOLD,
+    NOISE_LEVEL,
+    GroupGuidance,
+    group_guidance,
+    losses,
+    round_guidance,
+    update_art,
+)
 from src.posttrain.checkpoint import assert_exact
-from src.posttrain.clock import Clock
-from src.posttrain.engine import update_art
-from src.posttrain.guidance import GroupGuidance, group_guidance, round_guidance
+from src.posttrain.config import ART, TrainingConfig
 from src.posttrain.rollout import ARTRollout, art_window, collect_art
 from src.posttrain.sampling import sample
 from src.posttrain.schema import decode
-from src.posttrain.session import TrainingState
-from src.posttrain.training_config import ART, TrainingConfig
+from src.posttrain.state import Clock, TrainingState
 
 
 def test_group_guidance_matches_the_hand_computed_direction():
@@ -454,7 +459,7 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
     frozen = copy.deepcopy(roles.reference.state_dict())
     student = copy.deepcopy(roles.student.state_dict())
     cached = rollouts[0].predictions.clone()
-    from src.posttrain import engine
+    from src.posttrain import art
 
     forwards, loss_inputs = [], []
     roles.student_field.register_forward_pre_hook(
@@ -462,13 +467,13 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
             tuple(x.detach().clone() for x in args[:2])
         )
     )
-    original_losses = engine.art_losses
+    original_losses = art.losses
 
     def observe(new, cached, times, *args):
         loss_inputs.append((cached.detach().clone(), times.detach().clone()))
         return original_losses(new, cached, times, *args)
 
-    monkeypatch.setattr(engine, "art_losses", observe)
+    monkeypatch.setattr(art, "losses", observe)
     for window in (0, 1):
         forwards.clear()
         loss_inputs.clear()
@@ -532,33 +537,29 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
 
 
 def test_art_reward_barrier_returns_the_combined_rewards(tmp_path, training_config):
-    from src.posttrain.records import atomic_json, file_hash
-    from src.posttrain.round_scoring import (
-        collection_path,
+    from src.posttrain.records import atomic_json
+    from src.posttrain.rewards import (
         reward_path,
         wait_for_rewards,
     )
 
     output, attempt, step = tmp_path, "a", 0
     local = [{"sample_id": "0:0:0"}, {"sample_id": "0:0:1"}]
-    collection = collection_path(output, attempt, step, 0)
-    atomic_json(collection, {"step": step, "rank": 0, "records": local})
     packet = {
         "step": step,
         "policy_version": step,
-        "collections": [file_hash(collection)],
         "reward": {
             "sample_ids": ["0:0:0", "0:0:1", "0:1:0", "0:1:1"],
             "combined": [1.0, -1.0, 0.5, -0.5],
         },
     }
     atomic_json(reward_path(output, attempt, step), packet)
-    values, reward = wait_for_rewards(training_config, output, attempt, step, 0, local)
+    values, reward = wait_for_rewards(training_config, output, attempt, step, local)
     assert values == {"0:0:0": 1.0, "0:0:1": -1.0, "0:1:0": 0.5, "0:1:1": -0.5}
     assert reward == packet["reward"]
     with pytest.raises(ValueError, match="missing local reward"):
         wait_for_rewards(
-            training_config, output, attempt, step, 0, [{"sample_id": "0:9:9"}]
+            training_config, output, attempt, step, [{"sample_id": "0:9:9"}]
         )
 
 

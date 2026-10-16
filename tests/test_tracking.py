@@ -215,7 +215,7 @@ def record(loss=2):
 
 
 def publish_round(output, attempt, number, rank=0, *, skipped=False, skips=0):
-    from src.posttrain.round_scoring import reward_path
+    from src.posttrain.rewards import reward_path
 
     atomic_json(
         output / "rounds" / f"{attempt}-round-{number:06d}-rank-{rank:03d}.json",
@@ -766,7 +766,7 @@ def test_failed_scoring_publishes_retries_and_failures_before_round_aborts(
     from PIL import Image
 
     from src.posttrain.records import file_hash
-    from src.posttrain.round_scoring import acquire_round
+    from src.posttrain.rewards import acquire_round
 
     path = tmp_path / "image.png"
     Image.new("RGB", (8, 8)).save(path)

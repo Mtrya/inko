@@ -8,10 +8,10 @@ from pathlib import Path
 
 from scripts.eval.blind_panel import cmd_panel, tally_votes
 from src.evaluation.benchmarks.run import parse_score
-from src.posttrain.config import Scorer
 from src.posttrain.records import atomic_json, file_hash
 from src.posttrain.schema import decode, require
 from src.posttrain.scoring.client import request_for_record
+from src.posttrain.scoring.config import Scorer
 from src.posttrain.scoring.contracts import validate_results
 
 

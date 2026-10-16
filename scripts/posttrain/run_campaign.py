@@ -9,21 +9,30 @@ from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from src.evaluation.benchmarks.config import Checkpoint, benchmark_config
 from src.evaluation.benchmarks.prompts import load_evaluation_prompts, load_prompts
 from src.evaluation.benchmarks.run import REPO, run
 from src.posttrain.checkpoint import inspect
-from src.posttrain.config import Checkpoint
-from src.posttrain.evaluation_config import (
-    benchmark_config,
-    boundaries,
-    evaluation_due,
-)
+from src.posttrain.config import load_training_config
 from src.posttrain.records import atomic_json
 from src.posttrain.schema import require
-from src.posttrain.training_config import load_training_config
 
 from .export import export
 from .readouts import panel
+
+
+def boundaries(config):
+    every = config.evaluation.every
+    rounds = set(range(every, config.training.rounds + 1, every))
+    rounds.add(config.training.rounds)
+    yield from sorted(rounds)
+
+
+def evaluation_due(config, round_number):
+    return round_number > 0 and (
+        round_number % config.evaluation.every == 0
+        or round_number == config.training.rounds
+    )
 
 
 def committed_checkpoints(root):
@@ -125,7 +134,7 @@ def execute(config_path, assets_path, output, *, track=False):
         training_root = output / "training"
         checkpoints = committed_checkpoints(training_root / "checkpoints")
         if checkpoints:
-            from src.posttrain.provenance import training_contract
+            from src.posttrain.config import training_contract
 
             prompts = load_prompts(
                 REPO / training.collection.prompts,
