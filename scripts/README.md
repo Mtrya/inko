@@ -9,10 +9,9 @@ where the data is mounted. Platform setup and credentials are in the local
 
 | Command | Purpose |
 |---|---|
-| `posttrain.prepare_prompts` | Rebuild the fixed rollout/development/monitor/confirmation suites from the pinned reference prompt source. |
 | `posttrain.prepare_assets` | Download or verify one scorer's source and weights, record checksum inventories, and write local service assets. |
 | `posttrain.prepare_metric` | Produce the LPIPS diversity metric asset on a machine with download access. |
-| `posttrain.export` | Materialize live or named-EMA student weights from a complete checkpoint, merge weight LoRA, and verify reload. |
+| `posttrain.export` | Materialize live or EMA student weights from a complete checkpoint, merge weight LoRA, and verify reload. |
 | `posttrain.run_campaign` | Drive one training run with interval evaluations: resume committed segments, export weight views, benchmark suites and assemble blind panels. |
 | `posttrain.readouts` | Join a completed blind ballot to benchmark scores; report comparable pairs and scorer/human disagreement. |
 

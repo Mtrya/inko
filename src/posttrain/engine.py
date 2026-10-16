@@ -4,10 +4,10 @@ from contextlib import nullcontext
 
 import torch
 
+from .art import losses as art_losses
+from .art import reference_losses
 from .distributed import global_loss
-from .objectives.art import losses as art_losses
-from .objectives.art import reference_losses
-from .rollout import ARTRollout, art_window, tensor_digest
+from .rollout import ARTRollout, art_window
 
 
 def accumulation(model, last):
@@ -48,24 +48,6 @@ def finish_student(roles, optimizer, loss_total):
     return norm
 
 
-def art_record(rollout, index, start, stop, times, *, kept, items, **extra):
-    return {
-        "id": rollout.sample_ids[index],
-        "prompt_id": rollout.prompt_ids[index],
-        "generator_step": rollout.generator_step,
-        "collection_round": rollout.collection_round,
-        "collection_seed": rollout.seeds[index],
-        "conditioning": [tensor_digest(t) for t in rollout.conditioning],
-        "steps": [start, stop],
-        "time": tensor_digest(times),
-        "state": tensor_digest(rollout.states[index, start:stop]),
-        "cached": tensor_digest(rollout.predictions[index, start:stop]),
-        "items": items,
-        "kept": kept,
-        **extra,
-    }
-
-
 def update_art(
     config, roles, student, rollouts, guidance, optimizer, round_index, window
 ):
@@ -95,7 +77,7 @@ def update_art(
     optimizer.zero_grad()
     loss_total = torch.zeros((), device=device)
     terms = {key: 0.0 for key in ("art", "reference")}
-    inputs, items, kept, masked_items = [], 0, 0, 0
+    items, kept, masked_items = 0, 0, 0
     for position, (rollout, index, start) in enumerate(chunks):
         stop = min(start + config.execution.microbatch, steps)
         size = stop - start
@@ -141,27 +123,10 @@ def update_art(
             items += keep.numel()
             kept += int(keep.sum())
             masked_items += int(blocked.sum())
-            inputs.append(
-                art_record(
-                    rollout,
-                    index,
-                    start,
-                    stop,
-                    times,
-                    kept=int(keep.sum()),
-                    items=keep.numel(),
-                    window=window,
-                    masked=int(blocked.sum()),
-                    reference_prediction=(
-                        None if anchor is None else tensor_digest(anchor)
-                    ),
-                )
-            )
             loss = global_loss(loss, total_items)
             loss.backward()
             loss_total += loss.detach()
     return {
-        "inputs": inputs,
         "student_loss": float(loss_total),
         "student_grad_norm": finish_student(roles, optimizer, loss_total),
         "term_losses": terms,

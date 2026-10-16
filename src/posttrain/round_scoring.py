@@ -29,8 +29,6 @@ def publish_collection(
 
     from src.utils.vae_codec import decode_latents
 
-    from .rollout import tensor_digest
-
     directory = Path(output) / "images" / attempt / f"round-{step:06d}"
     directory.mkdir(parents=True, exist_ok=True)
     records = []
@@ -62,10 +60,6 @@ def publish_collection(
                     "image_path": str(image_path),
                     "image_sha256": file_hash(image_path),
                     "latent_path": str(latent_path),
-                    "latent_sha256": file_hash(latent_path),
-                    "conditioning": [
-                        tensor_digest(t[index]) for t in rollout.conditioning
-                    ],
                 }
             )
     atomic_json(

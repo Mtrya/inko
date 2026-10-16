@@ -57,3 +57,30 @@ def test_student_lora_targets_are_zero_initialized_and_merge(
     assert all(
         ".a." in n or ".b." in n for n, p in model.named_parameters() if p.requires_grad
     )
+
+
+@pytest.mark.parametrize("mode", ["full", "lora"])
+def test_one_ema_tracks_only_trainable_parameters(
+    new_roles, training_config, small_model, mode
+):
+    config = replace(
+        training_config,
+        student=replace(training_config.student, mode=mode),
+        training=replace(training_config.training, ema_decay=0.25),
+    )
+    roles = new_roles(config, small_model())
+    initial = {name: value.clone() for name, value in roles.ema.items()}
+    trainable = {
+        name for name, p in roles.student.named_parameters() if p.requires_grad
+    }
+    assert roles.ema.keys() == trainable
+    with torch.no_grad():
+        for name, parameter in roles.student.named_parameters():
+            if name in trainable:
+                parameter.copy_(initial[name] + 4)
+    roles.update_ema()
+    for name in trainable:
+        torch.testing.assert_close(roles.ema[name], initial[name] + 3)
+    roles.update_ema()
+    for name in trainable:
+        torch.testing.assert_close(roles.ema[name], initial[name] + 3.75)

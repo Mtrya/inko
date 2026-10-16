@@ -246,6 +246,68 @@ def test_round_acquisition_returns_combined_rewards(
         endpoint.close()
 
 
+def test_mixed_pairwise_and_continuous_reward_channels(training_config):
+    import math
+
+    import torch
+
+    from src.posttrain.config import Scorer
+    from src.posttrain.rewards import combine_round
+    from src.posttrain.scoring.contracts import Channel
+    from src.posttrain.training_config import RewardChannel, Rewards
+
+    rubric = {
+        "content": [1, 0.5, 0.5, 0],
+        "form": [0.5, 0.5, 0.5, 0.5],
+        "composition": [0, 1, 0.5, 0.5],
+        "style": [1, 0, 1, 0],
+        "defect_cost": [0, 0.5, 0.5, 1],
+    }
+    scorers = (
+        Scorer(
+            "judge",
+            tuple(
+                Channel(k, "lower" if k == "defect_cost" else "higher") for k in rubric
+            ),
+            1,
+            1.0,
+            1,
+            4,
+            "shared_file",
+        ),
+        Scorer("hps", (Channel("mu", "higher"),), 1, 1.0, 1, 4, "shared_file"),
+        Scorer("vqa", (Channel("probability", "higher"),), 1, 1.0, 1, 4, "shared_file"),
+    )
+    channels = tuple(
+        RewardChannel(f"judge.{k}", 0.4 if k == "content" else 0.1, "none")
+        for k in rubric
+    ) + (
+        RewardChannel("hps.mu", 0.1, "round"),
+        RewardChannel("vqa.probability", 0.1, "round"),
+    )
+    config = replace(training_config, scorers=scorers, rewards=Rewards(channels, 0.5))
+    ids = [str(i) for i in range(4)]
+    scores = []
+    for i, key in enumerate(ids):
+        for scorer, values in (
+            ("judge", {k: v[i] for k, v in rubric.items()}),
+            ("hps", {"mu": 2 + 2 * i}),
+            ("vqa", {"probability": i / 4}),
+        ):
+            scores.append(
+                {"sample_id": key, "scorer": scorer, "status": "ok", "values": values}
+            )
+    result = combine_round(ids, scores[::-1], config)
+    expected = torch.tensor([0.55, 0.30, 0.35, 0])
+    expected += 0.1 * torch.tensor([-3, -1, 1, 3]) / (math.sqrt(5) + 0.5)
+    expected += (
+        0.1 * torch.tensor([-0.375, -0.125, 0.125, 0.375]) / (math.sqrt(5) / 8 + 0.5)
+    )
+    torch.testing.assert_close(torch.tensor(result["combined"]), expected)
+    assert result["statistics"]["judge.content"]["transformed"] == [1, 0.5, 0.5, 0]
+    assert result["statistics"]["judge.defect_cost"]["direction"] == "lower"
+
+
 def test_round_barrier_joins_the_published_reward_packet(tmp_path, training_config):
     from src.posttrain.records import atomic_json
     from src.posttrain.round_scoring import (
@@ -349,9 +411,9 @@ def test_coordinator_scores_additional_art_collections_and_resumes_after_skips(
 
         def poll(self):
             self.calls += 1
-            assert (
-                self.calls < 30
-            ), "coordinator stopped scoring before the update horizon"
+            assert self.calls < 30, (
+                "coordinator stopped scoring before the update horizon"
+            )
             if reward_path(output, self.attempt, first_round + 1).exists():
                 self.returncode = 0
             elif (
@@ -419,6 +481,38 @@ def test_hps_head_boundary_preserves_fp32_projection():
         head(hidden)
     head.register_forward_pre_hook(float32_head_inputs)
     assert head(hidden).item() == 23.0
+
+
+def test_vqa_backend_uses_fixed_yes_probability_contract():
+    from types import SimpleNamespace
+
+    import torch
+
+    from src.posttrain.scoring.backends.vqascore import VQAScore
+
+    calls = []
+
+    def forward(**kwargs):
+        calls.append(kwargs)
+        return torch.tensor([0.25, 0.75])
+
+    backend = VQAScore.__new__(VQAScore)
+    backend.scorer = SimpleNamespace(forward=forward)
+    rows = [
+        SimpleNamespace(image_path="a.png", prompt="a cat"),
+        SimpleNamespace(image_path="b.png", prompt="a dog"),
+    ]
+    assert backend.score(rows) == [{"probability": 0.25}, {"probability": 0.75}]
+    assert calls == [
+        {
+            "images": ["a.png", "b.png"],
+            "texts": ["a cat", "a dog"],
+            "question_template": 'Does this figure show "{}"? Please answer Yes or No.',
+            "answer_template": "Yes",
+            "max_new_tokens": 1,
+            "temperature": 1.0,
+        }
+    ]
 
 
 def test_production_orchestration_config_only_substitution(

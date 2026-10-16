@@ -3,56 +3,36 @@
 import argparse
 import fcntl
 import json
-import subprocess
-import sys
 import time
 from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
-from src.posttrain.artifacts import tree_identity
 from src.posttrain.config import load_config
 from src.posttrain.records import atomic_json, file_hash, identity
 from src.posttrain.schema import decode, require
 from src.posttrain.scoring.client import request_for_record
 from src.posttrain.scoring.contracts import ScoreResult, validate_results
-from src.posttrain.scoring.lifecycle import isolated_environment
 from src.posttrain.workers import ResidentWorkers, run_pipeline
 from src.utils import prompt_contract
 
 from .diversity import validate_panel
-from .prompts import load_prompts
+from .prompts import load_evaluation_prompts
 from .report import build_report
 
 REPO = Path(__file__).resolve().parents[3]
 
 
 def verify_assets(config, assets):
-    native_files = assets["learner"].get("runtime_files", {})
-    require(
-        assets["device_type"] != "npu" or bool(native_files),
-        "NPU generation requires an explicit native runtime inventory",
-    )
     checkpoints = {}
     for arm in config.arms:
         path = Path(assets["checkpoints"][arm.checkpoint.asset])
         require(path.suffix in {".pt", ".safetensors"}, "unsupported checkpoint format")
-        checkpoints[arm.name] = asdict(arm.checkpoint)
-    probe = subprocess.run(
-        [sys.executable, "-m", "src.posttrain.runtime"],
-        env=isolated_environment(assets["learner"]["python_paths"]),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+        checkpoints[arm.name] = str(path.resolve())
     return {
         "checkpoints": checkpoints,
-        "generation_runtime": json.loads(probe.stdout),
-        "generation_native_runtime": {
-            name: file_hash(path) for name, path in sorted(native_files.items())
-        },
-        "text_encoder": tree_identity(assets["text_encoder"]),
-        "vae": tree_identity(assets["vae"]),
+        "text_encoder": str(Path(assets["text_encoder"]).resolve()),
+        "vae": str(Path(assets["vae"]).resolve()),
     }
 
 
@@ -115,10 +95,6 @@ def _run(config, assets, prompts, output, *, visual_only, suite):
         "conditioning_identity": conditioning,
         "visual_only": visual_only,
         "suite": suite,
-        "code": {
-            str(p.relative_to(REPO)): file_hash(p)
-            for p in sorted((REPO / "src").rglob("*.py"))
-        },
     }
     # Normalize tuples to their JSON wire representation before restart comparison.
     manifest = json.loads(json.dumps(manifest, allow_nan=False))
@@ -271,11 +247,7 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument(
-        "--suite",
-        choices=["development", "bringup", "monitor", "confirmation"],
-        default="bringup",
-    )
+    parser.add_argument("--suite", default="development")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument(
         "--track",
@@ -284,15 +256,7 @@ def main():
     )
     args = parser.parse_args()
     config = load_config(args.config)
-    key = {
-        "development": "suite",
-        "bringup": "bringup_suite",
-        "monitor": "monitor_suite",
-        "confirmation": "confirmation_suite",
-    }[args.suite]
-    prompts = load_prompts(
-        REPO / getattr(config.evaluation, key), config.sampling.shapes
-    )
+    prompts = load_evaluation_prompts(config, args.suite)
     validate_panel(config, prompts, args.suite)
     if args.validate_only:
         print(

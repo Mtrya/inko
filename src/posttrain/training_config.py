@@ -6,10 +6,16 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Checkpoint, Scorer
+from .config import Scorer
+from .evaluation_config import IntervalEvaluation
 from .schema import decode, name, require
 
 ART_UPDATES_PER_ROUND = 2
+
+
+@dataclass(frozen=True)
+class Initialization:
+    asset: str
 
 
 @dataclass(frozen=True)
@@ -41,17 +47,14 @@ class ART:
 class Optimizer:
     kind: str
     lr: float
-    betas: tuple[float, float]
-    epsilon: float
-    weight_decay: float
-    conditioning_weight_decay: float
-    max_grad_norm: float
     muon_lr: float
-    muon_weight_decay: float
-    muon_momentum: float
-    schedule: str
-    warmup_steps: int
-    minimum_ratio: float
+    betas: tuple[float, float] = (0.9, 0.999)
+    epsilon: float = 1e-8
+    weight_decay: float = 0.0
+    conditioning_weight_decay: float = 0.0
+    max_grad_norm: float = 1.0
+    muon_weight_decay: float = 0.0
+    muon_momentum: float = 0.95
 
     def __post_init__(self):
         require(self.kind in {"adamw", "muon_adamw"}, "unsupported optimizer")
@@ -73,12 +76,6 @@ class Optimizer:
             all(0 <= b < 1 for b in self.betas) and 0 <= self.muon_momentum < 1,
             "invalid momentum",
         )
-        require(
-            self.schedule in {"constant", "cosine"}
-            and self.warmup_steps >= 0
-            and 0 <= self.minimum_ratio <= 1,
-            "invalid LR schedule",
-        )
 
 
 @dataclass(frozen=True)
@@ -96,31 +93,17 @@ class TrainingExecution:
 
 
 @dataclass(frozen=True)
-class StudentEMA:
-    name: str
-    decay: float
-    device: str
-
-    def __post_init__(self):
-        name(self.name)
-        require(self.name != "live", "live is reserved for the current student")
-        require(0 <= self.decay < 1, "invalid evaluation EMA decay")
-        require(self.device in {"learner", "cpu"}, "invalid EMA storage device")
-
-
-@dataclass(frozen=True)
 class Training:
     seed: int
     rounds: int
     checkpoint_every: int
     checkpoint_keep_last: int
-    ema: tuple[StudentEMA, ...]
+    ema_decay: float
 
 
 @dataclass(frozen=True)
 class RewardChannel:
     channel: str
-    direction: str
     weight: float
     standardization: str
 
@@ -128,12 +111,12 @@ class RewardChannel:
 @dataclass(frozen=True)
 class Rewards:
     channels: tuple[RewardChannel, ...]
-    epsilon: float
+    epsilon: float = 1e-4
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    initialization: Checkpoint
+    initialization: Initialization
     student: Student
     collection: Collection
     art: ART
@@ -142,6 +125,7 @@ class TrainingConfig:
     training: Training
     scorers: tuple[Scorer, ...]
     rewards: Rewards
+    evaluation: IntervalEvaluation
 
     @property
     def updates_per_round(self):
@@ -158,10 +142,7 @@ class TrainingConfig:
             self.execution,
             self.training,
         )
-        require(
-            self.initialization.weights in {"live", "ema"},
-            "invalid initialization weight view",
-        )
+        name(self.initialization.asset)
         require(
             s.mode in {"full", "lora"}
             and s.rank > 0
@@ -209,12 +190,8 @@ class TrainingConfig:
             and t.rounds > 0
             and t.checkpoint_every > 0
             and t.checkpoint_keep_last >= 0
-            and len({ema.name for ema in t.ema}) == len(t.ema),
+            and 0 <= t.ema_decay < 1,
             "invalid training length/seed/EMA",
-        )
-        require(
-            self.student_optimizer.warmup_steps <= t.rounds * self.updates_per_round,
-            "student warmup exceeds the training horizon",
         )
         require(
             c.prompts_per_round * c.draws_per_prompt % (2 * len(e.learner_devices))
@@ -247,9 +224,7 @@ class TrainingConfig:
         for channel in channels:
             require(channel.channel in available, "reward channel is undeclared")
             require(
-                channel.direction == available[channel.channel].direction
-                and channel.weight >= 0
-                and channel.standardization in {"none", "round"},
+                channel.weight >= 0 and channel.standardization in {"none", "round"},
                 "invalid reward orientation/weight/standardization",
             )
         require(

@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 import torch
 from PIL import Image
-from test_posttrain_scoring import Backend, Endpoint
+from test_scoring import Backend, Endpoint
 
+from scripts.posttrain.run_campaign import committed_checkpoints
 from src.evaluation.benchmarks import run as benchmark
 from src.models.inko import Inko
 from src.posttrain.checkpoint import (
@@ -251,13 +252,13 @@ def test_export_materializes_the_requested_weight_view(
     if view == "ema":
         with torch.no_grad():
             for name, parameter in roles.student.named_parameters():
-                if name in roles.ema["ema"]:
-                    parameter.copy_(roles.ema["ema"][name])
+                if name in roles.ema:
+                    parameter.copy_(roles.ema[name])
     assert_exact(merge_student(roles.student).state_dict(), model.state_dict())
 
 
 @pytest.mark.parametrize("optimizer", ["adamw", "muon_adamw"])
-def test_art_skip_preserves_momentum_ema_and_update_schedule_across_resume(
+def test_art_skip_preserves_momentum_ema_and_updates_across_resume(
     new_roles, tmp_path, training_config, small_model, optimizer
 ):
     torch.set_num_threads(1)
@@ -265,9 +266,7 @@ def test_art_skip_preserves_momentum_ema_and_update_schedule_across_resume(
     config = replace(
         training_config,
         art=replace(training_config.art, reference_coefficient=0.0),
-        student_optimizer=replace(
-            training_config.student_optimizer, kind=optimizer, schedule="cosine"
-        ),
+        student_optimizer=replace(training_config.student_optimizer, kind=optimizer),
         training=replace(training_config.training, rounds=4),
     )
     base = small_model()
@@ -479,10 +478,10 @@ def test_config_only_external_service_collection_join_report_and_resume(
             benchmark.run(
                 config, assets, [dict(prompts[0], text="another")], tmp_path / "run"
             )
-        artifacts["generation_runtime"] = {"example": "changed runtime"}
+        artifacts["checkpoints"] = {"candidate": "/another/model.pt"}
         with pytest.raises(ValueError, match="identity changed"):
             benchmark.run(config, assets, prompts, tmp_path / "run")
-        del artifacts["generation_runtime"]
+        artifacts["checkpoints"] = {}
         (tmp_path / "reference/image.png").write_bytes(b"changed bytes")
         with pytest.raises(ValueError, match="image bytes changed"):
             benchmark.run(config, assets, prompts, tmp_path / "run")
@@ -546,41 +545,7 @@ def test_strict_typed_configs_reject_unknown_and_invalid_fields(sampling_config)
         decode(Config, raw)
 
 
-def test_generation_runtime_uses_content_not_location(tmp_path, monkeypatch):
-    from src.posttrain import runtime
-
-    class Distribution:
-        version = "1.2"
-        files = (Path("module.py"),)
-
-        def locate_file(self, entry):
-            return root[0] / entry
-
-    first, second = tmp_path / "first", tmp_path / "second"
-    for path in (first, second):
-        path.mkdir()
-        (path / "module.py").write_text("original implementation")
-    root = [first]
-    monkeypatch.setattr(runtime, "GENERATION_PACKAGES", ("example",))
-    monkeypatch.setattr(
-        runtime.importlib.metadata, "distribution", lambda _: Distribution()
-    )
-    before = runtime.generation_runtime()
-    root[0] = second
-    assert runtime.generation_runtime() == before
-    (second / "module.py").write_text("changed implementation")
-    assert runtime.generation_runtime() != before
-    (second / "module.py").write_text("original implementation")
-    Distribution.version = "1.3"
-    assert runtime.generation_runtime() != before
-
-
-def test_native_generation_runtime_is_required_and_content_addressed(
-    tmp_path, monkeypatch, sampling_config
-):
-    import json
-    from types import SimpleNamespace
-
+def test_evaluation_identity_uses_resolved_model_assets(tmp_path, sampling_config):
     weights = tmp_path / "model.pt"
     weights.write_bytes(b"checkpoint fixture")
     checkpoint = sampling_config.arms[0].checkpoint
@@ -594,20 +559,69 @@ def test_native_generation_runtime_is_required_and_content_addressed(
         "text_encoder": str(tmp_path),
         "vae": str(tmp_path),
     }
-    monkeypatch.setattr(
-        benchmark.subprocess,
-        "run",
-        lambda *a, **kw: SimpleNamespace(stdout=json.dumps({"example": "runtime"})),
-    )
-    monkeypatch.setattr(benchmark, "tree_identity", lambda _: "fixed model contents")
-    with pytest.raises(ValueError, match="native runtime inventory"):
-        benchmark.verify_assets(config, assets)
-    first, second = tmp_path / "version.info", tmp_path / "relocated.info"
-    first.write_text("native 1")
-    second.write_text("native 1")
-    assets["learner"]["runtime_files"] = {"compiler": str(first)}
     before = benchmark.verify_assets(config, assets)
-    assets["learner"]["runtime_files"]["compiler"] = str(second)
-    assert benchmark.verify_assets(config, assets) == before
-    second.write_text("native 2")
+    assert before == {
+        "checkpoints": {"reference": str(weights)},
+        "text_encoder": str(tmp_path),
+        "vae": str(tmp_path),
+    }
+    assets["checkpoints"][checkpoint.asset] = str(tmp_path / "other.pt")
     assert benchmark.verify_assets(config, assets) != before
+
+
+def test_typed_config_defaults_and_explicit_overrides():
+    from dataclasses import dataclass
+
+    from src.posttrain.schema import decode
+
+    @dataclass
+    class Settings:
+        required: int
+        scale: float = 0.25
+
+    assert asdict(decode(Settings, {"required": 7})) == {"required": 7, "scale": 0.25}
+    assert asdict(decode(Settings, {"required": 7, "scale": 0.75})) == {
+        "required": 7,
+        "scale": 0.75,
+    }
+    with pytest.raises(ValueError, match="missing"):
+        decode(Settings, {"scale": 0.75})
+    with pytest.raises(ValueError, match="unknown"):
+        decode(Settings, {"required": 7, "typo": 0.75})
+
+
+def test_skipped_rounds_reach_budget_and_publish_distinct_recovery_points(
+    tmp_path, training_config
+):
+    config = replace(
+        training_config, training=replace(training_config.training, rounds=3)
+    )
+    clock = Clock()
+    device = torch.device("cpu")
+    points = []
+    for round_number in range(4):
+        if round_number:
+            clock.skip_round(config)
+        clock.validate(config)
+        points.append(
+            publish(
+                tmp_path, clock.step, {}, clock.state_dict(), {}, 0, device, keep_last=0
+            )
+        )
+    assert [p.name for p in points] == [
+        "round-000000",
+        "round-000001",
+        "round-000002",
+        "round-000003",
+    ]
+    assert clock.next_action(config) == "done"
+    assert clock.step == 0 and clock.skipped_rounds == 3
+    assert clock.samples_scored == 12 and clock.samples_used == 0
+    saved, _ = load(points[-1], {}, 0)
+    recovered = Clock.from_state(saved)
+    recovered.validate(config)
+    assert recovered.next_action(config) == "done"
+    with pytest.raises(ValueError, match="unfinished ART"):
+        recovered.skip_round(config)
+    assert committed_checkpoints(tmp_path) == list(enumerate(points))
+    assert all(inspect(p)["step"] == 0 for p in points)

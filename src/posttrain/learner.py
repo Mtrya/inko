@@ -35,7 +35,7 @@ def learner(
     from .guidance import round_guidance
     from .models import peak_memory, set_device, synchronize
     from .roles import Roles
-    from .rollout import PromptCursor, collect_art, tensor_digest
+    from .rollout import PromptCursor, collect_art
     from .round_scoring import publish_collection, wait_for_rewards
     from .session import TrainingState
     from .tracking import optimizer_rates
@@ -171,34 +171,14 @@ def learner(
         )
         prompt_map = {p["id"]: p for p in contract["prompts"]}
 
-        def frozen():
-            return {
-                name: {
-                    n: tensor_digest(p)
-                    for n, p in model.named_parameters()
-                    if name == "reference" or not p.requires_grad
-                }
-                for name, model in (
-                    ("student_base", roles.student),
-                    ("reference", roles.reference),
-                )
-                if model is not None
-            }
-
-        frozen_base = frozen()
-
-        def record_roles():
-            if rank == 0:
-                atomic_json(
-                    output / "roles.json",
-                    {
-                        "ownership": roles.ownership(),
-                        "student_targets": roles.student_targets,
-                        "frozen": frozen_base,
-                    },
-                )
-
-        record_roles()
+        if rank == 0:
+            atomic_json(
+                output / "roles.json",
+                {
+                    "ownership": roles.ownership(),
+                    "student_targets": roles.student_targets,
+                },
+            )
         atomic_json(
             output / "ready" / f"{attempt}-rank-{rank:03d}.json",
             {"ready_at": time.time(), "pid": os.getpid()},
@@ -293,10 +273,7 @@ def learner(
                     evidence,
                 )
                 if rank == 0:
-                    print(
-                        {k: v for k, v in evidence.items() if k != "inputs"},
-                        flush=True,
-                    )
+                    print(evidence, flush=True)
             if not skipped:
                 state.commit_round()
             synchronize(device)
@@ -334,13 +311,11 @@ def learner(
                     tracking,
                     keep_last=config.training.checkpoint_keep_last,
                 )
-        require(frozen_base == frozen(), "frozen training role changed")
         atomic_json(
             output / "completion" / f"{attempt}-rank-{rank:03d}.json",
             {
                 **clock.state_dict(),
                 "rank": rank,
-                "frozen_unchanged": True,
                 "attempted_rounds": len(list((output / "attempts").glob("*.json"))),
                 "peak_allocated_bytes": peak_memory(device),
             },

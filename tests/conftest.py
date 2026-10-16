@@ -14,15 +14,16 @@ from src.posttrain.config import (
     Sampling,
     Scorer,
 )
+from src.posttrain.evaluation_config import IntervalEvaluation
 from src.posttrain.scoring.contracts import Channel
 from src.posttrain.training_config import (
     ART,
     Collection,
+    Initialization,
     Optimizer,
     RewardChannel,
     Rewards,
     Student,
-    StudentEMA,
     Training,
     TrainingConfig,
     TrainingExecution,
@@ -48,8 +49,6 @@ def sampling_config():
         Sampling("float32", 1, 2, {"1:1": (32, 32)}),
         Execution((0,), 2, 10, 10, 1),
         Evaluation(
-            "unused",
-            "unused",
             "unused",
             "unused",
             ("unfamiliar.fit",),
@@ -91,7 +90,7 @@ def small_model():
 def training_config(sampling_config):
     """Explicit single-stage ART inputs; recipes never source these contracts."""
     return TrainingConfig(
-        initialization=Checkpoint("initial", "ema"),
+        initialization=Initialization("initial"),
         student=Student("full", 2, 2.0, "attention_mlp"),
         collection=Collection(
             prompts="fixture.jsonl",
@@ -115,9 +114,6 @@ def training_config(sampling_config):
             muon_lr=1e-3,
             muon_weight_decay=0,
             muon_momentum=0.95,
-            schedule="constant",
-            warmup_steps=0,
-            minimum_ratio=0.1,
         ),
         execution=TrainingExecution(
             learner_devices=(0,),
@@ -131,10 +127,21 @@ def training_config(sampling_config):
             intra_host_roce=False,
             deterministic_algorithms=True,
         ),
-        training=Training(7, 3, 1, 0, (StudentEMA("ema", 0.9, "learner"),)),
+        training=Training(7, 3, 1, 0, 0.9),
         scorers=sampling_config.scorers,
-        rewards=Rewards(
-            (RewardChannel("unfamiliar.fit", "higher", 1.0, "none"),), 1e-4
+        rewards=Rewards((RewardChannel("unfamiliar.fit", 1.0, "none"),), 1e-4),
+        evaluation=IntervalEvaluation(
+            every=1,
+            suite="unused",
+            monitor_suite="unused",
+            prompt_limit=0,
+            draws_per_prompt=2,
+            steps=2,
+            guidance=1.0,
+            shift="none",
+            shapes={"1:1": (32, 32)},
+            channels=("unfamiliar.fit",),
+            diversity_asset="lpips",
         ),
     )
 

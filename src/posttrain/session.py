@@ -18,7 +18,6 @@ class TrainingState:
         self.student_optimizer = RoleOptimizer(
             self.roles.student,
             config.student_optimizer,
-            config.training.rounds * config.updates_per_round,
         )
 
     def commit_round(self):

@@ -8,20 +8,35 @@ capacity or precision after a failure.
 
 ## Training controls
 
-A training config is TOML or JSON with one exact schema. Missing or unknown
-fields fail validation; there is no config inheritance and no environment
+A training config is TOML or JSON with one schema. Missing required fields or
+unknown fields fail validation. Optimizer defaults and reward epsilon live in
+`src/posttrain/training_config.py`; explicit overrides are allowed. Parsed
+configs contain the effective values for resume. There is no config inheritance or environment
 override. `configs/posttrain.toml` is the reference run.
 
 | Section | Meaning |
 |---|---|
-| `initialization` | Asset ID and weight view (`live` or `ema`) of the base model. The asset ID resolves through the local `--assets` map. |
+| `initialization` | Base-model asset ID, resolving to the exact weight file through the local `--assets` map. |
 | `student` | `full` tuning, or weight LoRA with rank, alpha and target set (`attention` or `attention_mlp`). |
 | `collection` | Prompt suite, prompts per round, draws per prompt, resolution, sampler step count, shift and text exit layer. |
 | `art` | The ART reference coefficient and nothing else: guidance, two update windows, mask and time weights are the paper's constants. Required for every run. |
-| `student_optimizer` | `adamw` or `muon_adamw` with learning rates, betas, weight decay, clip limit and LR schedule. |
+| `student_optimizer` | `adamw` or `muon_adamw` with constant learning rates and optional overrides for betas, epsilon, weight decay, momentum and clipping. |
 | `execution` | Learner devices, microbatch, timeouts, precision, activation checkpointing, RoCE and deterministic-kernel policy. |
-| `training` | Seed, total collected rounds, checkpoint interval and recent-copy count, and named EMA shadows with decay and storage device. |
-| `scorers`, `rewards` | Declared score services with acquisition limits, and the reward channels with direction, weight and standardization. |
+| `training` | Seed, total collected rounds, checkpoint interval, recent-copy count and one `ema_decay`. The EMA stays on each learner device. |
+| `evaluation` | Interval, suites, exported weight views, sampler, shapes, prompt selection, scoring channels and bootstrap controls. |
+| `scorers`, `rewards` | Client output contracts and acquisition limits; reward channels with weight and `none`/`round` standardization. Reward direction comes from the client's output contract. |
+
+Scorer backends define their output schemas and fixed scoring behavior in code.
+Service configs select model/source assets and execution limits; HPS also
+selects its backbone. Client output declarations describe the expected external
+response and are checked at service startup.
+
+For the planned five-channel pairwise rubric judge, encode win/tie/loss as
+`1/.5/0` after merging both presentation orders, and start with `none`
+standardization. HPSv3 and VQAScore retain `round` standardization. This mixed
+policy keeps rubric ties from increasing that channel's effective weight through
+variance normalization. Channel weights remain explicit; this new reward stack
+has not been assessed by the completed campaign.
 
 A round is `prompts_per_round * draws_per_prompt` samples that must divide
 evenly across learner devices and microbatches. `training.rounds` and
@@ -101,64 +116,47 @@ image per draw.
 
 ## Evaluation cadence
 
-Interval evaluation is declared by a separate config with one exact schema.
-`sampling_config` names the benchmark's own arm declaration (schema:
-`sampling`/`execution`/`evaluation`/`scorers` blocks plus an `arms` list, each
-arm declaring `name`, `checkpoint`, `steps`, `guidance`, `shift`), and `weights` selects the
-checkpoint views the driver exports and adds as arms.
+The training config's `evaluation` section controls interval evaluation.
+`every` counts collected rounds, including skipped ART rounds; the final
+round is always evaluated. `suites` defaults to development and monitor, and
+`weights` defaults to EMA. Select `live`, `ema`, or both.
 
-Each exported view uses the reference arm's declared steps, guidance and shift.
-These evaluation controls are independent of the training rollout.
+`steps`, `guidance`, `shift` and `shapes` describe evaluation generation,
+independently of the training rollout. The base and each exported student use
+these same settings. Precision, batch size, text exit layer, learner devices and
+timeouts come from training. Evaluation uses two in-flight batches per learner
+and LPIPS pair batches of two. `channels` selects metrics from the training
+scorer declarations; `diversity_asset` resolves the LPIPS model in the assets map.
+Bootstrap repeats and confidence are configurable; `bootstrap_seed` also
+controls blind-panel ordering.
 
-```json
-{
-  "sampling_config": "/external/evaluation-sampling.json",
-  "every": 50,
-  "suites": ["development", "monitor"],
-  "weights": ["live", "slow"],
-  "include_final": true,
-  "blind_seed": 7
-}
-```
-
-`weights` names `live` or a `training.ema` shadow. `every` counts collected
-rounds, including skipped ART rounds. The driver validates the interval
-together with the training config:
+`suite` points to `configs/prompts/drawbench.jsonl`. The reference run selects
+the first 100 scenes with `prompt_limit` and expands four fixed seeds per scene
+with `draws_per_prompt`. A limit of zero uses all rows; one draw preserves the
+manifest's original seed. `monitor_suite` points to `monitor.jsonl`; its 48
+entries are used unchanged for visual comparisons. Development evaluation
+includes within-prompt LPIPS, so it needs at least two seeds per caption.
 
 ```bash
+python -m scripts.posttrain.run_campaign --config configs/posttrain.toml --validate-only
 python -m scripts.posttrain.run_campaign --config configs/posttrain.toml \
-  --interval /external/interval.json --validate-only
-python -m scripts.posttrain.run_campaign --config configs/posttrain.toml \
-  --interval /external/interval.json --assets /external/posttrain-assets.json \
-  --output /external/campaign
+  --assets /external/posttrain-assets.json --output /external/campaign --track
 ```
 
-The driver trains one segment per declared stop, then lets every learner and
-owned scorer process exit before it exports weight views and runs the benchmark
-suites. Exports and reports are reconciled from already committed checkpoints
-on restart, so an interrupted evaluation is retried rather than skipped; a
-failed evaluation blocks further training. `complete.json` appears only after
-the final required work succeeds.
+The driver trains one segment per stop, then lets every learner and owned
+scorer process exit before exporting and evaluating. It reuses complete exports
+and reports on restart and retries interrupted evaluation before training
+continues. Each checkpoint produces `exports/<view>`, a directory per suite,
+a `<suite>-blind` panel and `evaluation.json`.
 
-Each evaluated checkpoint produces exports under `exports/<view>`, one directory
-per benchmark suite, a blind panel under `<suite>-blind`, and an
-`evaluation.json` receipt naming the exported views and suites. The benchmark
-itself runs standalone with `python -m src.evaluation.benchmarks.run --config
-<sampling config>`; `--suite monitor` is visual-only and skips automatic
-reporting.
-
-Suites and their prompt files come from `configs/prompts/`. Sampling configs
-select each suite's manifest. The recurring development manifest has 100
-DrawBench scenes with four seeds each; the single-seed 200-prompt manifest
-provides breadth. `bringup` uses 16 scenes with four seeds each,
-`monitor` the 48-entry visual panel, and `confirmation` the held-out final
-suite. `scripts.posttrain.prepare_prompts` rebuilds them from the pinned
-reference prompt source and keeps rollout, development and monitor texts
-disjoint under Unicode, case and whitespace normalization. That check is exact
-text overlap, not semantic paraphrase detection. `evaluation.diversity.suites`
-lists the suites that compute LPIPS. Every exact caption in those suites must
-have at least two seeds. Omit single-seed monitor, breadth and confirmation
-reads from this list.
+Standalone preparation and final assessments use local sampling configs under
+`data/` with `python -m src.evaluation.benchmarks.run --config <sampling config>`.
+These declare `sampling`, `execution`, `evaluation`, `scorers` and `arms`.
+Each arm names its checkpoint asset, weight view, steps, guidance and shift.
+`evaluation.suite` supplies the prompt manifest for the chosen `--suite`
+label; `--suite monitor` uses `monitor_suite` and skips automatic scoring.
+`evaluation.diversity.suites` selects labels that compute LPIPS. Each caption
+in those suites needs at least two seeds.
 
 ## Blind readouts
 

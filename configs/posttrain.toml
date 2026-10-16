@@ -1,10 +1,9 @@
-# Complete single-stage DiffusionART run. Every tunable is required.
+# Single-stage DiffusionART recipe; optimizer defaults live in training_config.py.
 # Model, service, endpoint and storage paths live in the --assets JSON.
 # The base is the 600k pretrain EMA; see notes/posttrain_recipe.md.
 
 [initialization]
 asset = "initial"
-weights = "ema"
 
 [student]
 mode = "lora"
@@ -13,7 +12,7 @@ alpha = 64.0
 targets = "attention"
 
 [collection]
-prompts = "configs/prompts/posttrain_rollout.jsonl"
+prompts = "configs/prompts/rollout.jsonl"
 prompts_per_round = 12
 draws_per_prompt = 8
 height = 896
@@ -33,17 +32,7 @@ reference_coefficient = 0.0
 [student_optimizer]
 kind = "muon_adamw"
 lr = 1e-05
-betas = [0.9, 0.999]
-epsilon = 1e-08
-weight_decay = 0.0
-conditioning_weight_decay = 0.0
-max_grad_norm = 1.0
 muon_lr = 0.001
-muon_weight_decay = 0.0
-muon_momentum = 0.95
-schedule = "constant"
-warmup_steps = 0
-minimum_ratio = 0.1
 
 [execution]
 learner_devices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
@@ -62,16 +51,26 @@ seed = 1729
 rounds = 500
 checkpoint_every = 50
 checkpoint_keep_last = 2
+ema_decay = 0.999
 
-[[training.ema]]
-name = "fast"
-decay = 0.9
-device = "learner"
+[evaluation]
+every = 50
+suite = "configs/prompts/drawbench.jsonl"
+monitor_suite = "configs/prompts/monitor.jsonl"
+prompt_limit = 100
+draws_per_prompt = 4
+steps = 20
+guidance = 1.0
+shift = "shape"
+channels = ["hpsv3.mu", "vqascore.probability"]
+diversity_asset = "lpips_alex"
 
-[[training.ema]]
-name = "slow"
-decay = 0.999
-device = "learner"
+[evaluation.shapes]
+"1:1" = [896, 896]
+"16:9" = [672, 1184]
+"9:16" = [1184, 672]
+"4:3" = [768, 1024]
+"3:4" = [1024, 768]
 
 [[scorers]]
 id = "hpsv3"
@@ -98,19 +97,14 @@ transport = "shared_file"
 name = "probability"
 direction = "higher"
 
-[rewards]
-epsilon = 1e-4
-
 # Round standardization puts both raw channel scales on one mixture scale;
 # the group advantage then normalizes within each prompt.
 [[rewards.channels]]
 channel = "hpsv3.mu"
-direction = "higher"
 weight = 0.5
 standardization = "round"
 
 [[rewards.channels]]
 channel = "vqascore.probability"
-direction = "higher"
 weight = 0.5
 standardization = "round"

@@ -1,7 +1,5 @@
 """Per-role optimizers, finite transaction admission and explicit step clocks."""
 
-import math
-
 import torch
 
 from src.optim.muon import CONDITIONING_WEIGHTS, build_param_groups
@@ -30,8 +28,8 @@ def finite(values):
 
 
 class RoleOptimizer:
-    def __init__(self, model, config, total_steps):
-        self.config, self.total_steps, self.steps = config, total_steps, 0
+    def __init__(self, model, config):
+        self.config, self.steps = config, 0
         self.parameters = [p for p in model.parameters() if p.requires_grad]
         if config.kind == "adamw":
             ordinary = [
@@ -80,19 +78,6 @@ class RoleOptimizer:
         for optimizer in self.optimizers:
             optimizer.zero_grad(set_to_none=True)
 
-    def rate_factor(self):
-        c, step = self.config, self.steps
-        if step < c.warmup_steps:
-            return (step + 1) / c.warmup_steps
-        if c.schedule == "constant":
-            return 1.0
-        progress = (step - c.warmup_steps) / max(
-            1, self.total_steps - c.warmup_steps - 1
-        )
-        return c.minimum_ratio + (1 - c.minimum_ratio) * 0.5 * (
-            1 + math.cos(math.pi * min(progress, 1))
-        )
-
     def step(self, loss):
         device = self.parameters[0].device
         gradients = [p.grad for p in self.parameters if p.grad is not None]
@@ -109,11 +94,8 @@ class RoleOptimizer:
             self.parameters, self.config.max_grad_norm, foreach=False
         )
         unanimous_finite(bool(torch.isfinite(norm)), device)
-        factor = self.rate_factor()
         # Every optimizer in this role has passed admission before any mutates.
-        for optimizer, rates in zip(self.optimizers, self.base_rates, strict=True):
-            for group, rate in zip(optimizer.param_groups, rates, strict=True):
-                group["lr"] = rate * factor
+        for optimizer in self.optimizers:
             optimizer.step()
         unanimous_finite(
             finite([*self.parameters, *tensors([o.state for o in self.optimizers])]),

@@ -1,4 +1,4 @@
-"""Content inventories and prepared-asset verification."""
+"""Package versions and downloaded-model verification."""
 
 import hashlib
 import importlib.metadata
@@ -17,23 +17,6 @@ def package_versions():
         if d.metadata["Name"]
     }
     return {name: importlib.metadata.version(name) for name in sorted(names)}
-
-
-def tree_identity(path):
-    path = Path(path)
-    if path.is_file():
-        return file_hash(path)
-    files = sorted(
-        p
-        for p in path.rglob("*")
-        if p.is_file()
-        and not any(
-            x.startswith(".") or x == "__pycache__" for x in p.relative_to(path).parts
-        )
-        and p.suffix != ".pyc"
-    )
-    require(bool(files), f"empty or missing artifact {path}")
-    return {str(p.relative_to(path)): file_hash(p) for p in files}
 
 
 def verify_model(path, manifest_path):

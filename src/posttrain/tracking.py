@@ -168,15 +168,15 @@ class Tracker:
                         name: getattr(config.evaluation, field)
                         for name, field in (
                             ("development", "suite"),
-                            ("bringup", "bringup_suite"),
                             ("monitor", "monitor_suite"),
-                            ("confirmation", "confirmation_suite"),
                         )
                     },
                     "arms": [asdict(arm) for arm in config.arms],
                     "channels": config.evaluation.channels,
                     "scorers": [asdict(scorer) for scorer in config.scorers],
                     "confidence": config.evaluation.confidence,
+                    "prompt_limit": config.evaluation.prompt_limit,
+                    "draws_per_prompt": config.evaluation.draws_per_prompt,
                     "diversity": asdict(config.evaluation.diversity),
                 }
             )

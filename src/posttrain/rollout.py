@@ -1,6 +1,5 @@
 """Round-keyed ART collection, prompt permutation and cached trajectory inputs."""
 
-import hashlib
 from dataclasses import dataclass
 
 import torch
@@ -72,15 +71,6 @@ class PromptCursor:
         ):
             raise ValueError("invalid prompt permutation/cursor")
         self.permutation = state["permutation"]
-
-
-def tensor_digest(value):
-    # A size-one expanded tensor can be "contiguous" with stride zero. Allocate
-    # canonical storage before reinterpreting bytes; flatten also admits scalars.
-    value = (
-        value.detach().cpu().reshape(-1).clone(memory_format=torch.contiguous_format)
-    )
-    return hashlib.sha256(value.view(torch.uint8).numpy().tobytes()).hexdigest()
 
 
 @dataclass

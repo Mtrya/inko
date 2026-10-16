@@ -54,11 +54,11 @@ class Diversity:
             "invalid LPIPS batch/thread count",
         )
         require(
-            len(set(self.suites)) == len(self.suites)
-            and set(self.suites)
-            <= {"development", "bringup", "monitor", "confirmation"},
+            len(set(self.suites)) == len(self.suites),
             "invalid diversity suites",
         )
+        for suite in self.suites:
+            name(suite)
         if self.suites:
             name(self.asset)
         else:
@@ -68,14 +68,14 @@ class Diversity:
 @dataclass(frozen=True)
 class Evaluation:
     suite: str
-    bringup_suite: str
     monitor_suite: str
-    confirmation_suite: str
     channels: tuple[str, ...]
     bootstrap_seed: int
     bootstrap_repeats: int
     confidence: float
     diversity: Diversity
+    prompt_limit: int = 0
+    draws_per_prompt: int = 1
 
 
 @dataclass(frozen=True)
@@ -142,7 +142,10 @@ class Config:
             "execution limits must be positive",
         )
         require(
-            v.bootstrap_repeats > 0 and 0 < v.confidence < 1,
+            v.bootstrap_repeats > 0
+            and 0 < v.confidence < 1
+            and v.prompt_limit >= 0
+            and v.draws_per_prompt > 0,
             "invalid bootstrap settings",
         )
         require(

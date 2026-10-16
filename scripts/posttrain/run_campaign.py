@@ -9,14 +9,14 @@ from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from src.evaluation.benchmarks.prompts import load_prompts
+from src.evaluation.benchmarks.prompts import load_evaluation_prompts, load_prompts
 from src.evaluation.benchmarks.run import REPO, run
 from src.posttrain.checkpoint import inspect
-from src.posttrain.config import Checkpoint, load_config
+from src.posttrain.config import Checkpoint
 from src.posttrain.evaluation_config import (
+    benchmark_config,
     boundaries,
     evaluation_due,
-    load_interval_config,
 )
 from src.posttrain.records import atomic_json
 from src.posttrain.schema import require
@@ -24,13 +24,6 @@ from src.posttrain.training_config import load_training_config
 
 from .export import export
 from .readouts import panel
-
-SUITES = {
-    "development": "suite",
-    "bringup": "bringup_suite",
-    "monitor": "monitor_suite",
-    "confirmation": "confirmation_suite",
-}
 
 
 def committed_checkpoints(root):
@@ -45,7 +38,7 @@ def committed_checkpoints(root):
     return sorted(found)
 
 
-def evaluate_checkpoint(checkpoint, training, interval, assets, output, *, track=False):
+def evaluate_checkpoint(checkpoint, training, assets, output, *, track=False):
     from src.posttrain.tracking import Tracker
 
     checkpoint = Path(checkpoint)
@@ -55,19 +48,18 @@ def evaluate_checkpoint(checkpoint, training, interval, assets, output, *, track
         else nullcontext()
     )
     with context as tracker:
-        return _evaluate_checkpoint(
-            checkpoint, training, interval, assets, output, tracker
-        )
+        return _evaluate_checkpoint(checkpoint, training, assets, output, tracker)
 
 
-def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker):
+def _evaluate_checkpoint(checkpoint, training, assets, output, tracker):
     checkpoint, output = Path(checkpoint), Path(output)
     manifest = inspect(checkpoint)
     require(
         manifest["contract"]["config"] == json.loads(json.dumps(asdict(training))),
         "evaluation checkpoint training config differs",
     )
-    base = load_config(REPO / interval.sampling_config)
+    interval = training.evaluation
+    base = benchmark_config(training)
     exports, arms = [], list(base.arms)
     mapped = dict(assets["checkpoints"])
     for view in interval.weights:
@@ -85,9 +77,7 @@ def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker
         exports.append(record)
     config = replace(base, arms=tuple(arms))
     for suite in interval.suites:
-        rows = load_prompts(
-            REPO / getattr(config.evaluation, SUITES[suite]), config.sampling.shapes
-        )
+        rows = load_evaluation_prompts(config, suite)
         target = output / suite
         report = run(
             config,
@@ -106,7 +96,7 @@ def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker
             ),
             "incomplete interval scoring; checkpoint evaluation failed",
         )
-        panel(target, output / f"{suite}-blind", interval.blind_seed)
+        panel(target, output / f"{suite}-blind", interval.bootstrap_seed)
         if tracker is not None:
             tracker.evaluation(
                 report,
@@ -119,30 +109,19 @@ def _evaluate_checkpoint(checkpoint, training, interval, assets, output, tracker
         "committed_rounds": manifest["committed_rounds"],
         "exports": exports,
         "suites": interval.suites,
-        "scope": "Completed generation/scoring paths; human ballots remain separate evidence.",
     }
     atomic_json(output / "evaluation.json", receipt)
     return receipt
 
 
-def execute(config_path, interval_path, assets_path, output, *, track=False):
+def execute(config_path, assets_path, output, *, track=False):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     training = load_training_config(config_path)
-    interval = load_interval_config(interval_path)
     assets = json.loads(Path(assets_path).read_text())
-    stops = list(boundaries(training, interval))
-    identity = json.loads(
-        json.dumps({"training": asdict(training), "interval": asdict(interval)})
-    )
+    stops = list(boundaries(training))
     with (output / ".campaign.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        marker = output / "campaign.json"
-        require(
-            not marker.exists() or json.loads(marker.read_text()) == identity,
-            "campaign driver identity changed",
-        )
-        atomic_json(marker, identity)
         training_root = output / "training"
         checkpoints = committed_checkpoints(training_root / "checkpoints")
         if checkpoints:
@@ -160,14 +139,13 @@ def execute(config_path, interval_path, assets_path, output, *, track=False):
         # Reconcile evaluations from already committed checkpoints before
         # resuming training. An interrupted evaluation never becomes a skip.
         for round_number, path in checkpoints:
-            if evaluation_due(training, interval, round_number):
+            if evaluation_due(training, round_number):
                 destination = output / "evaluation" / path.name
                 if (destination / "evaluation.json").exists():
                     continue
                 evaluate_checkpoint(
                     path,
                     training,
-                    interval,
                     assets,
                     destination,
                     track=track,
@@ -201,11 +179,10 @@ def execute(config_path, interval_path, assets_path, output, *, track=False):
                 inspect(last)["committed_rounds"] == stop,
                 "training segment lacks its committed endpoint",
             )
-            if evaluation_due(training, interval, stop):
+            if evaluation_due(training, stop):
                 evaluate_checkpoint(
                     last,
                     training,
-                    interval,
                     assets,
                     output / "evaluation" / last.name,
                     track=track,
@@ -222,7 +199,6 @@ def execute(config_path, interval_path, assets_path, output, *, track=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--interval", type=Path, required=True)
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--validate-only", action="store_true")
@@ -233,21 +209,19 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     if args.validate_only:
-        c, interval = (
-            load_training_config(args.config),
-            load_interval_config(args.interval),
-        )
-        stops = list(boundaries(c, interval))
+        c = load_training_config(args.config)
+        benchmark_config(c)
+        stops = list(boundaries(c))
         print(
             json.dumps(
                 {
                     "valid": True,
                     "committed_stops": stops,
-                    "evaluations": [s for s in stops if evaluation_due(c, interval, s)],
+                    "evaluations": [s for s in stops if evaluation_due(c, s)],
                 }
             )
         )
     else:
         if args.assets is None or args.output is None:
             parser.error("--assets and --output are required")
-        execute(args.config, args.interval, args.assets, args.output, track=args.track)
+        execute(args.config, args.assets, args.output, track=args.track)

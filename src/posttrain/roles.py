@@ -1,4 +1,4 @@
-"""Resident student, frozen reference and EMA views."""
+"""Resident student, frozen reference and one evaluation EMA."""
 
 import copy
 
@@ -53,25 +53,17 @@ class Roles:
 
     def reset_ema(self):
         self.ema = {
-            view.name: {
-                name: p.detach().to("cpu" if view.device == "cpu" else p.device).clone()
-                for name, p in self.student.named_parameters()
-                if p.requires_grad
-            }
-            for view in self.config.training.ema
+            name: p.detach().clone()
+            for name, p in self.student.named_parameters()
+            if p.requires_grad
         }
 
     @torch.no_grad()
     def update_ema(self):
         actual = {n: p for n, p in self.student.named_parameters() if p.requires_grad}
-        for view in self.config.training.ema:
-            parameters = self.ema[view.name]
-            if actual.keys() != parameters.keys():
-                raise ValueError("EMA parameter names changed")
-            for name, value in parameters.items():
-                value.mul_(view.decay).add_(
-                    actual[name].to(value.device), alpha=1 - view.decay
-                )
+        decay = self.config.training.ema_decay
+        for name, value in self.ema.items():
+            value.mul_(decay).add_(actual[name], alpha=1 - decay)
 
     def state_dict(self):
         return {
@@ -99,12 +91,9 @@ class Roles:
                         raise ValueError("frozen reference base differs from student")
             model.load_state_dict(saved[name])
         if self.ema.keys() != saved["ema"].keys():
-            raise ValueError("evaluation EMA names differ")
-        for view, parameters in self.ema.items():
-            if parameters.keys() != saved["ema"][view].keys():
-                raise ValueError("EMA parameter names differ")
-            for name, value in parameters.items():
-                value.copy_(saved["ema"][view][name].to(value.device))
+            raise ValueError("EMA parameter names differ")
+        for name, value in self.ema.items():
+            value.copy_(saved["ema"][name].to(value.device))
 
     def ownership(self):
         return {

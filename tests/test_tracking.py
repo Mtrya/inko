@@ -114,9 +114,7 @@ def test_tracking_mismatch_fails_startup(tmp_path, sdk, mismatch):
     atomic_json(
         checkpoint / "tracking.json",
         {
-            "swanlab_project": (
-                "another-project" if mismatch == "project" else "inko"
-            ),
+            "swanlab_project": ("another-project" if mismatch == "project" else "inko"),
             "swanlab_run_id": "saved-run",
         },
     )
@@ -365,7 +363,7 @@ def test_art_tracking_resumes_collection_count_and_passes_skipped_rounds(
     ] == [4, 5]
 
 
-def test_actual_optimizer_rates_are_read_after_schedule_step(training_config):
+def test_actual_optimizer_rates_are_read_after_step(training_config):
     from src.posttrain.optim import RoleOptimizer
 
     model = torch.nn.ModuleDict(
@@ -376,14 +374,13 @@ def test_actual_optimizer_rates_are_read_after_schedule_step(training_config):
     )
     optimizer = RoleOptimizer(
         model,
-        replace(training_config.student_optimizer, lr=0.1, warmup_steps=2),
-        3,
+        replace(training_config.student_optimizer, lr=0.1),
     )
     loss = sum(layer(torch.ones(1, 2)).square().sum() for layer in model.values())
     loss.backward()
     optimizer.step(loss)
     assert len(optimizer.optimizers[0].param_groups) == 2
-    assert optimizer_rates(optimizer) == {"adamw": 0.05}
+    assert optimizer_rates(optimizer) == {"adamw": 0.1}
 
 
 def test_interval_scores_gains_and_diversity_share_training_run(
@@ -450,7 +447,7 @@ def test_interval_scores_gains_and_diversity_share_training_run(
 def test_coordinator_delivers_final_update_before_finish(
     tmp_path, monkeypatch, sdk, sampling_config, training_config
 ):
-    from test_posttrain_scoring import Backend, Endpoint
+    from test_scoring import Backend, Endpoint
 
     from src.posttrain import train
 
@@ -536,7 +533,7 @@ def test_interval_runner_opens_checkpoint_tracker_before_evaluation(
 
     monkeypatch.setattr(run_campaign, "_evaluate_checkpoint", evaluate)
     assert run_campaign.evaluate_checkpoint(
-        checkpoint, None, None, {}, tmp_path / "eval"
+        checkpoint, None, {}, tmp_path / "eval"
     ) == {"step": 1}
     assert isinstance(received[0], Tracker)
     assert sdk.calls[0]["resume"] == "must"
@@ -555,7 +552,7 @@ def test_generation_only_cli_logs_panels_and_diversity(
     )
     atomic_json(source, asdict(sampling_config))
     atomic_json(assets, {})
-    monkeypatch.setattr(benchmark, "load_prompts", lambda *args: [])
+    monkeypatch.setattr(benchmark, "load_evaluation_prompts", lambda *args: [])
     monkeypatch.setattr(benchmark, "validate_panel", lambda *args: None)
 
     def generate(*args, **kwargs):

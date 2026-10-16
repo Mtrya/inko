@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from src.posttrain.rollout import collect_art
 from src.posttrain.sampling import sample, sample_noise, time_grid
 
 
@@ -64,19 +65,37 @@ def test_inko_model_boundary_accepts_fp32_time_with_bf16_weights():
     assert output.shape == (1, 16, 4, 4) and output.dtype == torch.bfloat16
 
 
-def test_tensor_hash_canonicalizes_scalar_expanded_and_bfloat_storage():
-    from src.posttrain.rollout import tensor_digest
-
-    for dtype in (torch.float32, torch.bfloat16):
-        scalar = torch.tensor(1.0, dtype=dtype)
-        assert (
-            tensor_digest(scalar)
-            == tensor_digest(scalar.expand(1, 1))
-            == tensor_digest(torch.ones(1, dtype=dtype))
-        )
-        assert tensor_digest(scalar.expand(2, 2)) == tensor_digest(
-            torch.ones(4, dtype=dtype)
-        )
-        assert tensor_digest(
-            torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=dtype).t()
-        ) == tensor_digest(torch.tensor([1.0, 3.0, 2.0, 4.0], dtype=dtype))
+@pytest.mark.parametrize("round_index,optimizer_step", [(0, 0), (5, 10), (5, 4)])
+def test_collection_noise_is_shared_across_comparison_arms_and_optimizer_clocks(
+    training_config, round_index, optimizer_step
+):
+    prompts = [{"id": "p0"}, {"id": "p1"}]
+    ids = [f"{round_index}:0:0", f"{round_index}:1:0"]
+    first = collect_art(
+        lambda x, *args: torch.zeros_like(x),
+        training_config,
+        prompts,
+        ids,
+        [0, 2],
+        round_index,
+        0,
+        (),
+        "cpu",
+    )
+    second = collect_art(
+        lambda x, *args: torch.zeros_like(x),
+        training_config,
+        prompts[::-1],
+        ids[::-1],
+        [2, 0],
+        round_index,
+        optimizer_step,
+        (),
+        "cpu",
+    )
+    assert first.seeds == second.seeds[::-1]
+    assert first.seeds[0] != first.seeds[1]
+    torch.testing.assert_close(
+        first.terminal, second.states.flip(0)[:, 0], rtol=0, atol=0
+    )
+    assert first.generator_step == 0 and second.generator_step == optimizer_step

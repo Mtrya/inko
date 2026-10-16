@@ -20,8 +20,7 @@ def export(checkpoint, weights, output):
     checkpoint, output = Path(checkpoint), Path(output)
     manifest = inspect(checkpoint)
     config = decode(TrainingConfig, manifest["contract"]["config"])
-    views = {view.name: view for view in config.training.ema}
-    require(weights == "live" or weights in views, "unknown student weight view")
+    require(weights in {"live", "ema"}, "unknown student weight view")
     state = torch.load(checkpoint / "state.pt", map_location="cpu", weights_only=False)
     model = Inko(**state["architecture"]).float().eval()
     if config.student.mode == "lora":
@@ -33,7 +32,7 @@ def export(checkpoint, weights, output):
         )
     model.load_state_dict(state["student"])
     if weights != "live":
-        shadow = state["ema"][weights]
+        shadow = state["ema"]
         parameters = dict(model.named_parameters())
         expected = {n for n, p in model.named_parameters() if p.requires_grad}
         require(shadow.keys() == expected, "EMA parameter inventory differs")
@@ -70,20 +69,13 @@ def _publish_export(output, staging, weights, state, merged):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument(
-        "--weights", required=True, help="live or a configured student EMA name"
-    )
+    parser.add_argument("--weights", choices=("live", "ema"), default="ema")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
     if args.validate_only:
         record = inspect(args.checkpoint)
-        config = decode(TrainingConfig, record["contract"]["config"])
-        require(
-            args.weights == "live"
-            or args.weights in {v.name for v in config.training.ema},
-            "unknown student weight view",
-        )
+        decode(TrainingConfig, record["contract"]["config"])
         print(
             json.dumps(
                 {

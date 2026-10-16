@@ -2,8 +2,8 @@
 
 The trainer optimizes the 600k base model with
 [DiffusionART](https://arxiv.org/abs/2610.12572) in one stage.
-`configs/posttrain.toml` declares the complete training configuration. Numerical
-choices belong in that config; this note defines their meaning. See the
+`configs/posttrain.toml` declares the training recipe; optimizer defaults are
+defined in `src/posttrain/training_config.py`. This note defines their meaning. See the
 [recipe](posttrain_recipe.md) and [evaluation protocol](posttrain_evaluation.md).
 
 ## Flow convention
@@ -40,8 +40,8 @@ uses a separate keyed stream.
 
 ## Combined reward
 
-Scorers return raw channels; `combine_round` orients each declared channel by
-its direction, optionally standardizes it over the round, and mixes channels
+Scorers return raw channels; `combine_round` orients each reward channel by
+the scorer output's direction, optionally standardizes it over the round, and mixes channels
 with nonnegative weights that sum to one. Missing, failed or nonfinite required
 scores abort before any optimizer update; they never become zero rewards.
 The complete combined-reward map is admitted before guidance is constructed.
@@ -158,15 +158,14 @@ changes during a run.
 complete scored collections including skipped ART rounds, and `skipped_rounds`
 counts collections that produced no update. Thus
 `step = (committed_rounds - skipped_rounds) * updates_per_round` at a committed
-boundary. Named student EMA shadows advance on each successful student step.
-The LR schedule runs on the student's successful-step clock.
+boundary. One student EMA advances on each successful student step, with decay
+`training.ema_decay`. Learning rates are constant.
 The training horizon, checkpoint cadence and interval evaluation count
-committed collections, including skips. A cosine LR schedule uses the nominal
-maximum update count (`rounds * updates_per_round`); skipped rounds do not
-advance that schedule or the student EMA.
+committed collections, including skips. Skipped rounds do not advance the
+optimizer or student EMA.
 
 Complete-round checkpoints retain every role in use (student, optional
-reference, EMA shadows), the student optimizer and its clock,
+reference, EMA), the student optimizer and its clock,
 `last_reward`, both round counts, the prompt cursor and per-rank RNG. Files are
 fsynced before a manifest-bearing directory is atomically renamed; incomplete directories are
 never recovery points. Resume requires an unchanged training contract and
@@ -177,7 +176,7 @@ round is discarded and recollected.
 
 `tests/` covers operator values and gradients against independent oracles,
 group statistics both locally and through real learner collectives, clock and
-scheduling mechanics, role isolation, reward admission, the cache-to-item
+update mechanics, role isolation, reward admission, the cache-to-item
 trajectory round trip, and exact save/resume. Generation quality is established
 only by real samples and benchmarks under the
 [evaluation protocol](posttrain_evaluation.md).

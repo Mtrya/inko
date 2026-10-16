@@ -5,14 +5,6 @@ repository = "https://github.com/linzhiqiu/t2v_metrics"
 [semantics.weights]
 repository = "Qwen/Qwen3-VL-8B-Instruct"
 files = ["*.json", "*.safetensors", "*.txt", "*.jinja", "*.model"]
-[[semantics.outputs]]
-name = "probability"
-direction = "higher"
-[options]
-question_template = 'Does this figure show "{}"? Please answer Yes or No.'
-answer_template = "Yes"
-max_new_tokens = 1
-temperature = 1.0
 [limits]
 max_batch_size = 2
 queue_capacity = 24

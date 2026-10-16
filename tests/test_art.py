@@ -7,12 +7,12 @@ from dataclasses import asdict, replace
 import pytest
 import torch
 
+from src.posttrain.art import KL_THRESHOLD, NOISE_LEVEL, losses
 from src.posttrain.checkpoint import assert_exact
 from src.posttrain.clock import Clock
 from src.posttrain.engine import update_art
 from src.posttrain.guidance import GroupGuidance, group_guidance, round_guidance
-from src.posttrain.objectives.art import KL_THRESHOLD, NOISE_LEVEL, losses
-from src.posttrain.rollout import ARTRollout, art_window, collect_art, tensor_digest
+from src.posttrain.rollout import ARTRollout, art_window, collect_art
 from src.posttrain.sampling import sample
 from src.posttrain.schema import decode
 from src.posttrain.session import TrainingState
@@ -411,7 +411,7 @@ def test_collection_caches_aligned_trajectory(new_roles, training_config, small_
 
 @pytest.mark.parametrize("mode", ["full", "lora"])
 def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
-    new_roles, training_config, small_model, mode
+    new_roles, training_config, small_model, mode, monkeypatch
 ):
     torch.set_num_threads(1)
     torch.manual_seed(10)
@@ -454,9 +454,24 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
     frozen = copy.deepcopy(roles.reference.state_dict())
     student = copy.deepcopy(roles.student.state_dict())
     cached = rollouts[0].predictions.clone()
-    by_id = {key: rollout for rollout in rollouts for key in rollout.sample_ids}
-    windows = {0: set(), 1: set()}
+    from src.posttrain import engine
+
+    forwards, loss_inputs = [], []
+    roles.student_field.register_forward_pre_hook(
+        lambda module, args: forwards.append(
+            tuple(x.detach().clone() for x in args[:2])
+        )
+    )
+    original_losses = engine.art_losses
+
+    def observe(new, cached, times, *args):
+        loss_inputs.append((cached.detach().clone(), times.detach().clone()))
+        return original_losses(new, cached, times, *args)
+
+    monkeypatch.setattr(engine, "art_losses", observe)
     for window in (0, 1):
+        forwards.clear()
+        loss_inputs.clear()
         evidence = update_art(
             config,
             roles,
@@ -474,20 +489,24 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
             config.collection.draws_per_prompt * config.collection.steps
         )
         assert evidence["art_kept"] + evidence["art_masked"] <= evidence["art_items"]
-        for record in evidence["inputs"]:
-            assert record["window"] == window
-            rollout = by_id[record["id"]]
-            index = rollout.sample_ids.index(record["id"])
-            start, stop = record["steps"]
-            # The training inputs name the cached trajectory state it regresses.
-            assert record["state"] == tensor_digest(rollout.states[index, start:stop])
-            assert record["cached"] == tensor_digest(
-                rollout.predictions[index, start:stop]
+        expected = [
+            (rollout, index, step)
+            for rollout, index in art_window(config, rollouts, window)
+            for step in range(config.collection.steps)
+        ]
+        assert len(forwards) == len(loss_inputs) == len(expected)
+        for forward, loss_input, (rollout, index, step) in zip(
+            forwards, loss_inputs, expected, strict=True
+        ):
+            torch.testing.assert_close(
+                forward[0], rollout.states[index, step : step + 1]
             )
-            assert record["time"] == tensor_digest(
-                torch.tensor(rollout.grid[start:stop])
+            torch.testing.assert_close(
+                loss_input[0], rollout.predictions[index, step : step + 1]
             )
-            windows[window].add(record["id"])
+            times = torch.tensor(rollout.grid[step : step + 1])
+            torch.testing.assert_close(forward[1], times)
+            torch.testing.assert_close(loss_input[1], times)
     assert state.student_optimizer.steps == 2
     # Both windows regressed one frozen target: reference and cache never moved.
     assert_exact(frozen, roles.reference.state_dict())
@@ -497,9 +516,6 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
         for name, value in roles.student.named_parameters()
         if value.requires_grad
     )
-    # Every draw trains in exactly one window, and the two windows cover the round.
-    assert windows[0] & windows[1] == set()
-    assert windows[0] | windows[1] == set(by_id)
     state.commit_round()
     with pytest.raises(ValueError, match="stale or missing ART"):
         update_art(
@@ -582,7 +598,7 @@ def test_training_schema_requires_art_and_rejects_unknown_fields(training_config
 
 
 def test_reference_penalty_value_gradient_and_detachment():
-    from src.posttrain.objectives.art import reference_losses
+    from src.posttrain.art import reference_losses
 
     value = torch.tensor([[1.0, 3.0]], requires_grad=True)
     reference = torch.tensor([[0.0, 1.0]], requires_grad=True)
@@ -602,3 +618,40 @@ def test_reward_weights_must_sum_to_one(training_config):
                 channels=(replace(training_config.rewards.channels[0], weight=0.4),),
             ),
         )
+
+
+def test_collection_budget_does_not_require_equal_optimizer_steps(training_config):
+    config = replace(
+        training_config, training=replace(training_config.training, rounds=3)
+    )
+    clock = Clock()
+    for round_number in range(3):
+        if round_number == 1:
+            clock.skip_round(config)
+        else:
+            for _ in range(2):
+                clock.update(config)
+            clock.commit_round(config)
+        clock.validate(config)
+    assert clock.committed_rounds == 3 and clock.samples_scored == 12
+    assert clock.step == 4
+    assert clock.next_action(config) == "done"
+    with pytest.raises(ValueError, match="beyond the training horizon"):
+        clock.update(config)
+
+
+def test_clock_requires_complete_rounds(training_config):
+    clock = Clock()
+    with pytest.raises(ValueError, match="complete uncommitted collection round"):
+        clock.commit_round(training_config)
+    clock.update(training_config)
+    with pytest.raises(ValueError, match="complete uncommitted collection round"):
+        clock.commit_round(training_config)
+    clock.update(training_config)
+    clock.commit_round(training_config)
+    assert (clock.step, clock.committed_rounds) == (2, 1)
+    assert clock.samples_used == 8 and clock.samples_scored == 4
+    clock.validate(training_config)
+    corrupt = dict(clock.state_dict(), skipped_rounds=2)
+    with pytest.raises(ValueError, match="clocks differ"):
+        Clock.from_state(corrupt).validate(training_config)

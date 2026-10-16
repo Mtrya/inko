@@ -24,11 +24,11 @@ def load_backend(config, assets, index):
         provenance["backbone"] = verify_model(
             assets["backbone"], assets["backbone_manifest"]
         )
-        model = HPSv3(config.options, assets, device)
+        model = HPSv3(assets, device)
     else:
         from .vqascore import VQAScore
 
-        model = VQAScore(config.options, assets, device)
+        model = VQAScore(assets, device)
 
     class Backend:
         def score(self, requests):

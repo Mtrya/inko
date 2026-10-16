@@ -2,7 +2,7 @@
 
 Selected training recipe: DiffusionART on the 600k pretrain EMA at 896p,
 attention LoRA rank 64/alpha 64, Muon LR 1e-3, no reference anchor and
-500 collected rounds (1000 optimizer updates). Export the slow EMA (0.999).
+500 collected rounds (1000 optimizer updates). Export the EMA (0.999).
 `configs/posttrain.toml` contains the full configuration. The experiment
 campaign and final breadth/held-out confirmation are complete.
 
@@ -16,12 +16,12 @@ See the [mathematical contract](posttrain_contract.md),
 |---|---|
 | Base | 600k pretrain checkpoint, EMA weights, decoded at 896p |
 | Rollout | 20 Euler ODE steps, CFG 1.0, shift `shape`, 12 prompts x 8 draws per round |
-| Rollout prompts | 512-prompt pickscore subset in `configs/prompts/posttrain_rollout.jsonl` |
+| Campaign rollout prompts | 512-prompt PickScore subset |
 | Reward | HPSv3 `mu` and VQAScore v3.1 `probability`, equal weights, round-standardized |
 | Optimizer | Muon on LoRA A/B matrices; LR 1e-3, momentum 0.95, constant schedule, no weight decay, gradient-norm clip 1.0 |
 | Reference anchor | Disabled, coefficient 0 |
 | Student | Attention LoRA, rank 64, alpha 64 |
-| Student EMA views | Fast 0.9 and slow 0.999, updated per optimizer step; interval reads use slow |
+| Student EMA | One shadow, decay 0.999 per optimizer update; interval reads use `ema` |
 
 The pretrain CFG×steps sweep was flat between 20 and 50 steps at CFG 1,
 which supports the 20-step rollout choice. Confirmed inference uses the same
@@ -138,12 +138,13 @@ internal experiment ledger.
 |---|---|
 | `src/posttrain/` | ART trainer, sampling, reward transforms and score clients |
 | `src/evaluation/benchmarks/` | Independently runnable benchmark execution and reporting |
-| `configs/posttrain.toml` | Complete single-stage ART training config |
-| `configs/prompts/` | Rollout, development, monitor and confirmation suites |
-| `configs/scorers/` | Per-scorer source, weights and output declarations |
+| `configs/posttrain.toml` | ART training and interval evaluation settings |
+| `configs/prompts/` | Tracked DrawBench and monitor suites; local `rollout.jsonl` is ignored by Git |
+| `configs/scorers/` | Per-scorer source, weights and execution limits |
 
-Training configs accept TOML or JSON with one exact schema; unknown or missing
-fields fail. Machine-local paths, endpoints and credentials live in the
+Training configs accept TOML or JSON with one schema; unknown or missing
+required fields fail. Optimizer settings and reward epsilon have implementation
+defaults, which are included in the parsed resume contract. Machine-local paths, endpoints and credentials live in the
 `--assets` JSON, never in the config. The
 [campaign guide](posttrain_campaign.md) describes every config section, launch,
 resume and evaluation cadence.
@@ -166,13 +167,17 @@ python -m src.posttrain.train --config configs/posttrain.toml \
   --resume /external/run/checkpoints/round-000100
 python -m scripts.posttrain.export \
   --checkpoint /external/run/checkpoints/round-000500 \
-  --weights slow --output /external/export
+  --weights ema --output /external/export
 ```
 
 `--stop-after` ends a segment at a complete collection round without changing
 the configured horizon; `--track` logs the run to the `inko` SwanLab
-project. Export views are `live` or a named `training.ema` shadow; weight LoRA
+project. Export views are `live` or `ema`; `ema` is the default. Weight LoRA
 is merged and the reloaded weights are verified exactly.
+
+The completed campaign used named fast/slow shadows. Current checkpoints store
+one EMA, controlled by `training.ema_decay`; the retained campaign's selected
+merged export above remains directly loadable.
 
 Score services are config-declared independent processes
 (`configs/scorers/*.toml`), started by the coordinator when the assets name a

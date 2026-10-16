@@ -3,7 +3,7 @@
 import json
 import math
 import re
-from dataclasses import is_dataclass
+from dataclasses import MISSING, fields, is_dataclass
 from types import UnionType
 from typing import get_args, get_origin, get_type_hints
 
@@ -25,8 +25,13 @@ def decode(kind, value, location="config"):
         if not isinstance(value, dict):
             raise ValueError(f"{location}: expected table")
         hints = get_type_hints(kind)
+        required = {
+            field.name
+            for field in fields(kind)
+            if field.default is MISSING and field.default_factory is MISSING
+        }
         # TOML has no null, so an optional field may be omitted instead of absent.
-        missing = {k for k, t in hints.items() if k not in value and not optional(t)}
+        missing = {k for k in required if k not in value and not optional(hints[k])}
         if missing or value.keys() - hints.keys():
             raise ValueError(
                 f"{location}: missing={sorted(missing)}, unknown={sorted(value.keys() - hints.keys())}"
@@ -37,7 +42,7 @@ def decode(kind, value, location="config"):
                 for k, t in hints.items()
                 if k in value
             },
-            **{k: None for k, t in hints.items() if k not in value},
+            **{k: None for k in required if k not in value},
         )
     if origin is UnionType and type(None) in args:
         return (

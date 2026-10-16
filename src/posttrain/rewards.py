@@ -22,6 +22,11 @@ def combine_round(sample_ids, score_records, config):
     combined = torch.zeros(len(sample_ids), dtype=torch.float32)
     statistics = {}
     raw = {}
+    directions = {
+        f"{scorer.id}.{output.name}": output.direction
+        for scorer in config.scorers
+        for output in scorer.outputs
+    }
     for channel in config.rewards.channels:
         service, metric = channel.channel.split(".", 1)
         values = torch.tensor(
@@ -30,7 +35,8 @@ def combine_round(sample_ids, score_records, config):
         )
         require(bool(torch.isfinite(values).all()), "nonfinite required reward")
         raw[channel.channel] = values.tolist()
-        oriented = values if channel.direction == "higher" else -values
+        direction = directions[channel.channel]
+        oriented = values if direction == "higher" else -values
         mean, std = oriented.mean(), oriented.std(correction=0)
         require(
             bool(torch.isfinite(mean) & torch.isfinite(std)),
@@ -47,7 +53,7 @@ def combine_round(sample_ids, score_records, config):
         statistics[channel.channel] = {
             "mean": float(mean),
             "std": float(std),
-            "direction": channel.direction,
+            "direction": direction,
             "standardization": channel.standardization,
             "transformed": transformed.tolist(),
         }

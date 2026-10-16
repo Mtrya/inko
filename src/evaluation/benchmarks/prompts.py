@@ -1,9 +1,12 @@
 """Prompt manifests independent of training datasets and trainer state."""
 
+import hashlib
 import json
 import re
 import unicodedata
 from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[3]
 
 
 def normalized_text(text: str) -> str:
@@ -30,3 +33,30 @@ def load_prompts(path: str | Path, shapes: dict) -> list[dict]:
     if not records:
         raise ValueError("empty prompt suite")
     return records
+
+
+def load_evaluation_prompts(config, suite):
+    settings = config.evaluation
+    monitor = suite == "monitor"
+    path = settings.monitor_suite if monitor else settings.suite
+    rows = load_prompts(REPO / path, config.sampling.shapes)
+    if monitor:
+        return rows
+    if settings.prompt_limit:
+        rows = rows[: settings.prompt_limit]
+    if settings.draws_per_prompt == 1:
+        return rows
+    return [
+        {
+            **row,
+            "id": f"{row['id']}_seed{draw}",
+            "seed": int(
+                hashlib.sha256(
+                    f"eval-noise:{row['scene_id']}:{draw}".encode()
+                ).hexdigest()[:15],
+                16,
+            ),
+        }
+        for row in rows
+        for draw in range(settings.draws_per_prompt)
+    ]

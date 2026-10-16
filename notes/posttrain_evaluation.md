@@ -99,22 +99,23 @@ limits of the evidence actually collected. A tiny panel can detect failures and
 compare visible cases, but cannot establish broad superiority.
 
 Use one preserved checkpoint for a comparison, and record the weight view
-(`live` or a named EMA) with every result. Algorithm development can start
+(`live` or `ema`) with every result. Algorithm development can start
 before a particular pretraining endpoint exists; replace the reference only via
 an explicit comparison boundary.
 
 ## Suites and splits
 
-Keep prompt suites under `configs/prompts/` with stable prompt IDs, text, seed,
-language/variant labels and intended aspect/resolution metadata. The generator
-script verifies its pinned upstream revision and writes the suites.
-Record prompt bytes or their content hashes with every result.
+`configs/prompts/drawbench.jsonl` holds the canonical 200-prompt DrawBench suite;
+`monitor.jsonl` holds the fixed visual panel. Evaluation settings select scenes
+and expand fixed noise seeds at runtime. The local rollout pool is
+`configs/prompts/rollout.jsonl`, ignored by Git. One-off held-out manifests live
+under `data/`. Results retain the evaluated prompt records.
 
 | Split | Use |
 |---|---|
 | Rollout training | Online sample collection and reward optimization. |
 | Development evaluation | Repeated variant selection and diagnosis; disjoint from rollout training. |
-| Final evaluation | Held out from recipe selection and used for the final assessment. The confirmation suite (`configs/prompts/posttrain_confirmation.jsonl`, 200 prompts) is reserved for this split. |
+| Final evaluation | Held out from recipe selection and used once for the final assessment. |
 | Monitoring panel | Fixed visual comparisons during development; repeated use makes it a development signal. |
 
 Keep translations, paraphrases, and variants of the same underlying scene in the

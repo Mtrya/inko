@@ -5,12 +5,6 @@ repository = "https://github.com/MizzenAI/HPSv3"
 [semantics.weights]
 repository = "MizzenAI/HPSv3"
 files = ["HPSv3.safetensors"]
-[[semantics.outputs]]
-name = "mu"
-direction = "higher"
-[[semantics.outputs]]
-name = "log_sigma"
-direction = "lower"
 [options.backbone]
 repository = "Qwen/Qwen2-VL-7B-Instruct"
 files = ["*.json", "*.safetensors", "*.txt", "*.jinja", "*.model"]
