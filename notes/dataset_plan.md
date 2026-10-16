@@ -103,3 +103,6 @@ optimizer、scheduler 和训练 RNG 在全部 16 个 rank 上精确恢复。训�
 600k 完成后做最终 capability benchmark（形式待定），决定是否需要针对性 SFT。
 新增数据须有采集/caption/预计算对账、来源元数据和完整配置；接入训练遵守
 [recipe 的显式迁移契约](pretrain_recipe.md)。
+
+后训练 rollout 的 prompt 与 rubric 全部自产，生产管线、边际分布、rubric
+契约、验收去污与 pilot 设计见 [posttrain_data.md](posttrain_data.md)。

@@ -18,6 +18,8 @@ telemetry and generations establish training behavior under the mixture.
 - [Dataset plan](dataset_plan.md): domains, caption contract and eligible pools.
 - [Posttraining contract](posttrain_contract.md): mathematical conventions,
   objectives, model roles, update clocks, and recovery requirements.
+- [Posttraining data plan](posttrain_data.md): self-produced prompt/rubric
+  pipeline, marginal distributions, rubric contract, acceptance and pilot design.
 - [Posttraining evaluation](posttrain_evaluation.md): benchmark protocol,
   prompt splits, comparison evidence, and cost accounting.
 - [Posttraining recipe](posttrain_recipe.md): provisional two-stage baseline,
