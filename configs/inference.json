@@ -1,0 +1,9 @@
+{
+  "text_encoder": "Qwen/Qwen3-0.6B",
+  "vae": "REPA-E/e2e-qwenimage-vae",
+  "text_exit_layer": 20,
+  "height": 896,
+  "width": 896,
+  "num_inference_steps": 20,
+  "guidance_scale": 1.0
+}

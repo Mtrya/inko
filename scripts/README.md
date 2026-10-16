@@ -5,6 +5,13 @@ Each command documents its arguments through `--help`. Run corpus processing
 where the data is mounted. Platform setup and credentials are in the local
 `INSPIRE.md`; training settings come from one complete run TOML.
 
+## Model release
+
+`python -m scripts.export_model --checkpoint <weights> --output <directory>`
+exports pretrained EMA or merged posttraining weights to the public pipeline
+format and verifies an exact weight reload. Sampling defaults come from
+`configs/inference.json`. The Gradio app and Space metadata are in `demo/`.
+
 ## Pretraining (`scripts/pretrain/`)
 
 | Command | Purpose |
