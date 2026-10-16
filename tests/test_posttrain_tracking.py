@@ -71,7 +71,7 @@ def test_online_start_and_manifest_only_restart_keep_identity(tmp_path, sdk):
     assert sdk.calls[0]["mode"] == "online"
     assert sdk.calls[0]["resume"] == "never"
     assert sdk.calls[0]["settings"] == {"interactive": False}
-    assert sdk.calls[0]["project"] == "inko-posttrain"
+    assert sdk.calls[0]["project"] == "inko"
     assert sdk.calls[0]["name"] == "nft_reference"
     with Tracker(root, "nft_reference"):
         pass
@@ -93,9 +93,10 @@ def test_checkpoint_owns_tracking_identity_and_new_arm_does_not_inherit(tmp_path
             0,
             torch.device("cpu"),
             identity,
+            keep_last=0,
         )
     assert json.loads((checkpoint / "tracking.json").read_text()) == {
-        "swanlab_project": "inko-posttrain",
+        "swanlab_project": "inko",
         "swanlab_run_id": "generated-run",
     }
     with Tracker(tmp_path / "restored", None, resume=checkpoint):
@@ -114,7 +115,7 @@ def test_tracking_mismatch_fails_startup(tmp_path, sdk, mismatch):
         checkpoint / "tracking.json",
         {
             "swanlab_project": (
-                "another-project" if mismatch == "project" else "inko-posttrain"
+                "another-project" if mismatch == "project" else "inko"
             ),
             "swanlab_run_id": "saved-run",
         },
@@ -128,7 +129,7 @@ def test_tracking_mismatch_fails_startup(tmp_path, sdk, mismatch):
     if mismatch == "root":
         atomic_json(
             root / "tracking.json",
-            {"swanlab_project": "inko-posttrain", "swanlab_run_id": "another-run"},
+            {"swanlab_project": "inko", "swanlab_run_id": "another-run"},
         )
     with (
         pytest.raises(ValueError, match="project|experiment|online|identity"),
@@ -524,7 +525,7 @@ def test_interval_runner_opens_checkpoint_tracker_before_evaluation(
     checkpoint.mkdir(parents=True)
     atomic_json(
         checkpoint / "tracking.json",
-        {"swanlab_project": "inko-posttrain", "swanlab_run_id": "run"},
+        {"swanlab_project": "inko", "swanlab_run_id": "run"},
     )
     received = []
 
@@ -850,6 +851,7 @@ def test_checkpoint_carries_measured_time_to_a_new_output_directory(
             0,
             torch.device("cpu"),
             json.loads((root / "tracking.json").read_text()),
+            keep_last=0,
         )
     now[0] = 100
     with Tracker(tmp_path / "restored", None, resume=checkpoint) as tracker:

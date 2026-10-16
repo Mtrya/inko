@@ -11,7 +11,7 @@ from src.pretrain.tracking import read_tracking_record, validate_run_id
 from .records import atomic_json
 from .schema import require
 
-PROJECT = "inko-posttrain"
+PROJECT = "inko"
 
 
 class Tracker:

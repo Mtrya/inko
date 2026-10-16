@@ -113,6 +113,7 @@ class Training:
     seed: int
     rounds: int
     checkpoint_every: int
+    checkpoint_keep_last: int
     ema: tuple[StudentEMA, ...]
 
 
@@ -207,6 +208,7 @@ class TrainingConfig:
             0 <= t.seed < 2**63
             and t.rounds > 0
             and t.checkpoint_every > 0
+            and t.checkpoint_keep_last >= 0
             and len({ema.name for ema in t.ema}) == len(t.ema),
             "invalid training length/seed/EMA",
         )

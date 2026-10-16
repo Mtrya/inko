@@ -561,6 +561,11 @@ def test_training_config_rejects_invalid_collection_and_anchor(training_config):
         )
     with pytest.raises(ValueError, match="length/seed/EMA"):
         replace(training_config, training=replace(training_config.training, rounds=0))
+    with pytest.raises(ValueError, match="length/seed/EMA"):
+        replace(
+            training_config,
+            training=replace(training_config.training, checkpoint_keep_last=-1),
+        )
     with pytest.raises(ValueError, match="reference coefficient"):
         replace(training_config, art=ART(reference_coefficient=float("nan")))
 

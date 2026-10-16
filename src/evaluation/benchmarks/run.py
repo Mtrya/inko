@@ -280,7 +280,7 @@ def main():
     parser.add_argument(
         "--track",
         action="store_true",
-        help="Log this generation experiment online to inko-posttrain",
+        help="Log this generation experiment online to inko",
     )
     args = parser.parse_args()
     config = load_config(args.config)

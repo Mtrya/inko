@@ -163,6 +163,7 @@ def learner(
                 rank,
                 device,
                 tracking,
+                keep_last=config.training.checkpoint_keep_last,
             )
         require(
             clock.committed_rounds <= stop_after,
@@ -331,6 +332,7 @@ def learner(
                     rank,
                     device,
                     tracking,
+                    keep_last=config.training.checkpoint_keep_last,
                 )
         require(frozen_base == frozen(), "frozen training role changed")
         atomic_json(

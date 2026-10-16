@@ -69,7 +69,9 @@ def test_skipped_rounds_reach_budget_and_publish_distinct_recovery_points(
             clock.skip_round(config)
         clock.validate(config)
         points.append(
-            publish(tmp_path, clock.step, {}, clock.state_dict(), {}, 0, device)
+            publish(
+                tmp_path, clock.step, {}, clock.state_dict(), {}, 0, device, keep_last=0
+            )
         )
     assert [p.name for p in points] == [
         "round-000000",
@@ -167,6 +169,7 @@ def test_interval_sampling_uses_declared_benchmark_rule_and_reuses_export(
         {},
         0,
         torch.device("cpu"),
+        keep_last=0,
     )
     output = tmp_path / "evaluation"
     atomic_json(
@@ -233,6 +236,7 @@ def test_recovery_keeps_complete_evaluations_and_finishes_interrupted_before_tra
             {},
             0,
             torch.device("cpu"),
+            keep_last=0,
         )
 
     checkpoint(1)

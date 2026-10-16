@@ -8,8 +8,8 @@ weights = "ema"
 
 [student]
 mode = "lora"
-rank = 32
-alpha = 32.0
+rank = 64
+alpha = 64.0
 targets = "attention"
 
 [collection]
@@ -59,8 +59,9 @@ deterministic_algorithms = true
 
 [training]
 seed = 1729
-rounds = 1000
+rounds = 500
 checkpoint_every = 50
+checkpoint_keep_last = 2
 
 [[training.ema]]
 name = "fast"

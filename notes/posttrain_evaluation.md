@@ -1,8 +1,9 @@
 # Posttraining evaluation protocol
 
 Status: the protocol qualified the 600k pretrain EMA at 896p and was applied
-through both 1000-round algorithm-comparison runs. DiffusionART carries into
-the remaining recipe comparisons. The confirmation suite remains held out.
+through the completed algorithm and recipe comparisons. Final DrawBench
+breadth and held-out confirmation are complete; results and observed
+regressions are in the recipe. Confirmation was used once after selection.
 See the [contract](posttrain_contract.md) and [recipe](posttrain_recipe.md).
 
 ## Evaluation ownership

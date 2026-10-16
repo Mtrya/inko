@@ -226,7 +226,7 @@ def main():
     parser.add_argument(
         "--track",
         action="store_true",
-        help="Log this arm online to inko-posttrain; recovery keeps its identity",
+        help="Log this arm online to inko; recovery keeps its identity",
     )
     parser.add_argument("--learner-rank", type=int)
     parser.add_argument("--rendezvous")

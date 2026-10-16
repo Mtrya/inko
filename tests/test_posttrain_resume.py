@@ -1,3 +1,4 @@
+import shutil
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -77,6 +78,7 @@ def test_committed_round_state_round_trips_through_a_checkpoint(
         {"cursor": 7},
         0,
         torch.device("cpu"),
+        keep_last=0,
     )
     committed, rank_state = load(point, {"case": "art"}, 0)
     assert rank_state["cursor"] == 7 and inspect(point)["step"] == 2
@@ -89,6 +91,17 @@ def test_committed_round_state_round_trips_through_a_checkpoint(
 
 def test_checkpoint_publication_is_all_or_nothing(tmp_path, monkeypatch):
     import src.posttrain.checkpoint as module
+
+    previous = publish(
+        tmp_path,
+        0,
+        {},
+        {"step": 0, "committed_rounds": 0},
+        {},
+        0,
+        torch.device("cpu"),
+        keep_last=1,
+    )
 
     def fail(*args, **kwargs):
         raise OSError("publication fault")
@@ -103,8 +116,50 @@ def test_checkpoint_publication_is_all_or_nothing(tmp_path, monkeypatch):
             {},
             0,
             torch.device("cpu"),
+            keep_last=1,
         )
     assert not (tmp_path / "round-000001").exists()
+    assert load(previous, {}, 0)[0] == {"step": 0, "committed_rounds": 0}
+
+
+def test_retention_counts_collected_rounds_and_leaves_preserved_copies(tmp_path):
+    root = tmp_path / "run/checkpoints"
+    device = torch.device("cpu")
+    first = publish(
+        root,
+        0,
+        {},
+        {"step": 0, "committed_rounds": 1},
+        {},
+        0,
+        device,
+        keep_last=2,
+    )
+    preserved = tmp_path / "keep/selected"
+    shutil.copytree(first, preserved)
+    incomplete = root / ".incomplete-000004"
+    incomplete.mkdir()
+    for number in (2, 3):
+        publish(
+            root,
+            0,
+            {},
+            {"step": 0, "committed_rounds": number},
+            {},
+            0,
+            device,
+            keep_last=2,
+        )
+    assert sorted(p.name for p in root.glob("round-*")) == [
+        "round-000002",
+        "round-000003",
+    ]
+    assert load(preserved, {}, 0)[0] == {"step": 0, "committed_rounds": 1}
+    assert load(root / "round-000003", {}, 0)[0] == {
+        "step": 0,
+        "committed_rounds": 3,
+    }
+    assert incomplete.exists()
 
 
 def test_manifest_in_staging_is_not_a_published_checkpoint(tmp_path):
@@ -117,6 +172,7 @@ def test_manifest_in_staging_is_not_a_published_checkpoint(tmp_path):
         {},
         0,
         device,
+        keep_last=0,
     )
     with pytest.raises(ValueError, match="overwrite"):
         publish(
@@ -127,6 +183,7 @@ def test_manifest_in_staging_is_not_a_published_checkpoint(tmp_path):
             {},
             0,
             device,
+            keep_last=0,
         )
     staging = next(tmp_path.glob(".incomplete-*"))
     assert (staging / "manifest.json").exists()
@@ -187,6 +244,7 @@ def test_export_materializes_the_requested_weight_view(
         {},
         0,
         torch.device("cpu"),
+        keep_last=0,
     )
     export(path, view, tmp_path / "export")
     model = Inko.from_single_file(str(tmp_path / "export" / "weights.pt"))
@@ -283,6 +341,7 @@ def test_art_skip_preserves_momentum_ema_and_update_schedule_across_resume(
         {"cursor": cursor.state_dict()},
         0,
         torch.device("cpu"),
+        keep_last=0,
     )
     assert inspect(point)["committed_rounds"] == 3
     saved, rank_saved = load(point, {"case": "art-skip"}, 0)

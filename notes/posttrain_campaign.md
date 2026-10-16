@@ -20,7 +20,7 @@ override. `configs/posttrain.toml` is the reference run.
 | `art` | The ART reference coefficient and nothing else: guidance, two update windows, mask and time weights are the paper's constants. Required for every run. |
 | `student_optimizer` | `adamw` or `muon_adamw` with learning rates, betas, weight decay, clip limit and LR schedule. |
 | `execution` | Learner devices, microbatch, timeouts, precision, activation checkpointing, RoCE and deterministic-kernel policy. |
-| `training` | Seed, total collected rounds, checkpoint interval in rounds, and named EMA shadows with decay and storage device. |
+| `training` | Seed, total collected rounds, checkpoint interval and recent-copy count, and named EMA shadows with decay and storage device. |
 | `scorers`, `rewards` | Declared score services with acquisition limits, and the reward channels with direction, weight and standardization. |
 
 A round is `prompts_per_round * draws_per_prompt` samples that must divide
@@ -52,7 +52,7 @@ python -m src.posttrain.train --config configs/posttrain.toml \
 The coordinator writes the run manifest, starts the declared scorer services,
 and spawns one resident learner per configured device. `--stop-after` ends the
 run after the requested number of collected rounds without changing the
-configured horizon, so a long horizon can be reached in segments. `--track` logs to the `inko-posttrain`
+configured horizon, so a long horizon can be reached in segments. `--track` logs to the `inko`
 SwanLab project; a recovered run keeps its experiment identity.
 
 `--resume` requires an unchanged parsed training contract (config plus prompt
@@ -65,6 +65,13 @@ from the declared initialization. Checkpoints are named
 optimizer step. Skipped collections can publish checkpoints at the same
 optimizer step without overwriting earlier recovery points. `--stop-after`
 and the horizon always publish a checkpoint.
+
+`training.checkpoint_keep_last` keeps that many recent complete checkpoints
+after each successful publication; `0` keeps all. The reference config keeps
+two. Retention counts collected rounds, including skipped rounds with unchanged
+optimizer step. Copy selected recovery states outside the run's `checkpoints/`
+directory before they age out. Interval exports and evaluation artifacts stay
+available for final checkpoint selection.
 
 ## ART round mechanics
 

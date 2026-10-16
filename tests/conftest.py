@@ -131,7 +131,7 @@ def training_config(sampling_config):
             intra_host_roce=False,
             deterministic_algorithms=True,
         ),
-        training=Training(7, 3, 1, (StudentEMA("ema", 0.9, "learner"),)),
+        training=Training(7, 3, 1, 0, (StudentEMA("ema", 0.9, "learner"),)),
         scorers=sampling_config.scorers,
         rewards=Rewards(
             (RewardChannel("unfamiliar.fit", "higher", 1.0, "none"),), 1e-4

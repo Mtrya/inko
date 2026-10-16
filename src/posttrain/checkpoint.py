@@ -3,6 +3,7 @@
 import json
 import os
 import random
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -63,7 +64,9 @@ def restore_rng(state, device):
         getattr(torch, device.type).set_rng_state(state["accelerator"], device)
 
 
-def publish(root, step, contract, state, rank_state, rank, device, tracking=None):
+def publish(
+    root, step, contract, state, rank_state, rank, device, tracking=None, *, keep_last
+):
     """Only manifest-bearing directories are recovery points; staging is never reused."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -112,8 +115,28 @@ def publish(root, step, contract, state, rank_state, rank, device, tracking=None
             os.fsync(fd)
         finally:
             os.close(fd)
+        prune_checkpoints(destination, keep_last=keep_last)
     barrier()
     return destination
+
+
+def prune_checkpoints(checkpoint, *, keep_last):
+    if keep_last == 0:
+        return
+    checkpoint = Path(checkpoint)
+    current = inspect(checkpoint)
+    complete = []
+    for path in checkpoint.parent.glob("round-*"):
+        if not (path / "manifest.json").is_file():
+            continue
+        record = inspect(path)
+        if (
+            record["contract"] == current["contract"]
+            and record["committed_rounds"] <= current["committed_rounds"]
+        ):
+            complete.append((record["committed_rounds"], path))
+    for _, path in sorted(complete, reverse=True)[keep_last:]:
+        shutil.rmtree(path)
 
 
 def inspect(path, expected_contract=None):
