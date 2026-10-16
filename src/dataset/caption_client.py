@@ -307,12 +307,12 @@ class CaptionClient:
         return {"prompt": self.pricing.prompt, "completion": self.pricing.completion,
                 "currency": self.pricing.currency}
 
-    def request_key(self, image_bytes: bytes, prompt: str, prompt_version: str,
+    def request_key(self, images: List[bytes], prompt: str, prompt_version: str,
                     settings: Dict[str, Any]) -> str:
         payload = {
             "provider": self.provider.name,
             "model": self.model,
-            "image": image_fingerprint(image_bytes),
+            "image": image_fingerprint(b"".join(images)),
             "prompt": prompt,
             "prompt_version": prompt_version,
             "settings": settings,
@@ -325,24 +325,27 @@ class CaptionClient:
                             extra: Optional[Dict[str, Any]] = None) -> Response:
         """Text-only request (classification, prompt writing).  Same cache,
         retry and cost accounting as image calls, with an empty fingerprint."""
-        return await self._generate(client, image_bytes=b"", prompt=prompt,
+        return await self._generate(client, images=[], prompt=prompt,
                                     prompt_version=prompt_version, max_tokens=max_tokens,
                                     temperature=temperature, extra=extra)
 
-    async def generate(self, client: httpx.AsyncClient, *, image_bytes: bytes, prompt: str,
+    async def generate(self, client: httpx.AsyncClient, *,
+                       image_bytes: bytes | List[bytes], prompt: str,
                        prompt_version: str, max_tokens: int, temperature: float = 0.2,
                        extra: Optional[Dict[str, Any]] = None) -> Response:
-        return await self._generate(client, image_bytes=image_bytes, prompt=prompt,
+        images = [image_bytes] if isinstance(image_bytes, (bytes, bytearray)) else list(image_bytes)
+        return await self._generate(client, images=[b for b in images if b], prompt=prompt,
                                     prompt_version=prompt_version, max_tokens=max_tokens,
                                     temperature=temperature, extra=extra)
 
-    async def _generate(self, client: httpx.AsyncClient, *, image_bytes: bytes, prompt: str,
+    async def _generate(self, client: httpx.AsyncClient, *, images: List[bytes], prompt: str,
                         prompt_version: str, max_tokens: int, temperature: float = 0.2,
                         extra: Optional[Dict[str, Any]] = None) -> Response:
         settings: Dict[str, Any] = {"max_tokens": max_tokens, "temperature": temperature}
         if extra:
             settings.update(extra)
-        key = self.request_key(image_bytes, prompt, prompt_version, settings)
+        fingerprint = image_fingerprint(b"".join(images))
+        key = self.request_key(images, prompt, prompt_version, settings)
         cache_path = self.cache_dir / f"{key}.json"
         if cache_path.is_file():
             record = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -350,11 +353,12 @@ class CaptionClient:
                 record["cached"] = True
                 return Response.from_record(record)
 
-        if image_bytes:
+        if images:
             content: list = [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {
-                    "url": "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode()}},
+                *({"type": "image_url", "image_url": {
+                    "url": "data:image/jpeg;base64," + base64.b64encode(b).decode()}}
+                  for b in images),
             ]
         else:
             content = prompt
@@ -364,7 +368,7 @@ class CaptionClient:
             **settings,
         }
         response = Response(
-            request_key=key, image_fingerprint=image_fingerprint(image_bytes), model=self.model,
+            request_key=key, image_fingerprint=fingerprint, model=self.model,
             prompt_version=prompt_version, text="", usage={}, cost_usd=0.0,
             pricing=self.pricing_record(), settings=settings, latency_s=0.0,
         )
