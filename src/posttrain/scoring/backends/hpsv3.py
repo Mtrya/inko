@@ -5,10 +5,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ..contracts import Channel
-
-OUTPUTS = (Channel("mu", "higher"), Channel("log_sigma", "lower"))
-
 
 def float32_head_inputs(module, inputs):
     """HPSv3 specifies FP32 head weights after its BF16 transformer."""

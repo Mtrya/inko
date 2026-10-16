@@ -161,9 +161,9 @@ def test_missing_online_credentials_prevents_training_start(
             {
                 "learner": {"python_paths": []},
                 "device_type": "cpu",
-                "services": {"unfamiliar": {"endpoints": [], "launches": []}},
+                "scoring": {"endpoint": "http://fixture"},
             },
-            {"prompts": []},
+            {"prompts": [], "world_size": 1},
             tmp_path / "run",
             None,
             3,
@@ -225,6 +225,7 @@ def publish_round(output, attempt, number, rank=0, *, skipped=False, skips=0):
             "clock": {"samples_scored": 4 * (number + 1), "skipped_rounds": skips},
             "timings": {
                 "collection": 3.0,
+                "submission_wait": 0.5,
                 "scoring_wait": 5.0,
                 "guidance": 0.2,
                 "round": 10.0,
@@ -239,7 +240,7 @@ def publish_round(output, attempt, number, rank=0, *, skipped=False, skips=0):
             "reward": {
                 "sample_ids": ids,
                 "combined": [0, 1, 0, 0],
-                "raw": {"unfamiliar.fit": [1, 3, 2, 2]},
+                "raw": {"hpsv3.mu": [1, 3, 2, 2]},
             }
         },
     )
@@ -268,7 +269,7 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
         collection=replace(training_config.collection, prompts_per_round=2),
     )
     with Tracker(tmp_path, "art") as tracker:
-        delivery = TrainingMetrics(tracker, config, tmp_path, "attempt")
+        delivery = TrainingMetrics(tracker, config, tmp_path, "attempt", 1)
         for inner in range(2):
             for rank in range(1):
                 atomic_json(
@@ -290,11 +291,11 @@ def test_committed_multi_inner_round_logs_every_update_after_all_ranks(
     collections = [
         (step, values)
         for step, values in sdk.logs
-        if "train/reward/unfamiliar.fit/mean" in values
+        if "train/reward/hpsv3.mu/mean" in values
     ]
     assert len(collections) == 1
     assert collections[0][0] == 1
-    assert collections[0][1]["train/reward/unfamiliar.fit/mean"] == 2
+    assert collections[0][1]["train/reward/hpsv3.mu/mean"] == 2
     assert collections[0][1]["train/art_active_group_fraction"] == 0.75
     assert sdk.definitions["train/reward/*"]["x_axis"] == "runtime/collection_round"
 
@@ -307,7 +308,12 @@ def test_resume_delivers_only_new_attempt_records(tmp_path, sdk, training_config
     )
     with Tracker(tmp_path, "art") as tracker:
         delivery = TrainingMetrics(
-            tracker, config, tmp_path, "new", saved={"step": 0, "committed_rounds": 0}
+            tracker,
+            config,
+            tmp_path,
+            "new",
+            1,
+            saved={"step": 0, "committed_rounds": 0},
         )
         for attempt in ("old", "new"):
             for inner in (0, 1):
@@ -327,12 +333,16 @@ def test_art_tracking_resumes_collection_count_and_passes_skipped_rounds(
 ):
     config = replace(
         training_config,
-        execution=replace(training_config.execution, learner_devices=(0, 1)),
         training=replace(training_config.training, rounds=6),
     )
     with Tracker(tmp_path, "art") as tracker:
         delivery = TrainingMetrics(
-            tracker, config, tmp_path, "new", saved={"step": 2, "committed_rounds": 3}
+            tracker,
+            config,
+            tmp_path,
+            "new",
+            2,
+            saved={"step": 2, "committed_rounds": 3},
         )
         publish_round(tmp_path, "new", 3, skipped=True, skips=3)
         delivery.poll()
@@ -397,7 +407,7 @@ def test_interval_scores_gains_and_diversity_share_training_run(
                 "suite": "development",
                 "arms": {
                     "student_ema_slow": {
-                        "unfamiliar.fit": {
+                        "hpsv3.mu": {
                             "mean_on_successes": 2.5,
                             "population_stddev": 0.3,
                             "scored": 12,
@@ -408,7 +418,7 @@ def test_interval_scores_gains_and_diversity_share_training_run(
                 },
                 "paired": {
                     "student_ema_slow": {
-                        "unfamiliar.fit": {
+                        "hpsv3.mu": {
                             "coverage_complete": True,
                             "mean_delta": 0.5,
                             "interval": [0.2, 0.8],
@@ -425,21 +435,17 @@ def test_interval_scores_gains_and_diversity_share_training_run(
     step, metrics = next(
         (step, metrics)
         for step, metrics in sdk.logs
-        if "evaluation/development/student_ema_slow/unfamiliar.fit/mean" in metrics
+        if "evaluation/development/student_ema_slow/hpsv3.mu/mean" in metrics
     )
     assert step == 17
-    assert metrics["evaluation/development/student_ema_slow/unfamiliar.fit/mean"] == 2.5
+    assert metrics["evaluation/development/student_ema_slow/hpsv3.mu/mean"] == 2.5
     assert metrics["monitor/lpips/development/student_ema_slow"] == 0.4
+    assert metrics["evaluation/development/student_ema_slow/hpsv3.mu/delta"] == 0.5
     assert (
-        metrics["evaluation/development/student_ema_slow/unfamiliar.fit/delta"] == 0.5
+        metrics["evaluation/development/student_ema_slow/hpsv3.mu/delta_lower"] == 0.2
     )
     assert (
-        metrics["evaluation/development/student_ema_slow/unfamiliar.fit/delta_lower"]
-        == 0.2
-    )
-    assert (
-        metrics["evaluation/development/student_ema_slow/unfamiliar.fit/delta_upper"]
-        == 0.8
+        metrics["evaluation/development/student_ema_slow/hpsv3.mu/delta_upper"] == 0.8
     )
     assert all(not key.endswith("/panels") for key in metrics)
 
@@ -487,18 +493,16 @@ def test_coordinator_delivers_final_update_before_finish(
         return real_popen(argv, **kwargs)
 
     monkeypatch.setattr(train.subprocess, "Popen", popen)
-    endpoint = Endpoint(tmp_path, sampling_config.scorers[0], Backend())
+    endpoint = Endpoint(tmp_path, Backend())
     try:
         train.launch(
             config,
             {
                 "learner": {"python_paths": []},
                 "device_type": "cpu",
-                "services": {
-                    "unfamiliar": {"endpoints": [endpoint.url], "launches": []}
-                },
+                "scoring": {"endpoint": endpoint.url},
             },
-            {"prompts": []},
+            {"prompts": [], "world_size": 1},
             output,
             None,
             1,
@@ -693,19 +697,10 @@ def test_execution_time_excludes_resume_downtime_and_evaluation_is_separate(
     assert state["evaluation_seconds"] == 10
 
 
-def test_lower_is_better_gain_and_interval_are_oriented_and_baseline_is_logged_once(
-    tmp_path,
-    sdk,
-    sampling_config,
+def test_gain_and_interval_preserve_direction_and_log_baseline_once(
+    tmp_path, sdk, sampling_config
 ):
-    from src.posttrain.scoring.contracts import Channel
-
-    config = replace(
-        sampling_config,
-        scorers=(
-            replace(sampling_config.scorers[0], outputs=(Channel("fit", "lower"),)),
-        ),
-    )
+    config = sampling_config
     report = {
         "suite": "development",
         "diversity": {
@@ -716,7 +711,7 @@ def test_lower_is_better_gain_and_interval_are_oriented_and_baseline_is_logged_o
         },
         "arms": {
             arm: {
-                "unfamiliar.fit": {
+                "hpsv3.mu": {
                     "complete": True,
                     "scored": 2,
                     "expected": 2,
@@ -727,11 +722,21 @@ def test_lower_is_better_gain_and_interval_are_oriented_and_baseline_is_logged_o
         },
         "paired": {
             "candidate": {
-                "unfamiliar.fit": {
+                "hpsv3.mu": {
                     "coverage_complete": True,
                     "mean_delta": -2,
                     "interval": [-3, -1],
-                }
+                },
+                "rubric.content_alignment": {
+                    "coverage_complete": True,
+                    "mean_delta": 0,
+                    "interval": None,
+                    "win_credit": 0.5,
+                    "wins": 1,
+                    "ties": 2,
+                    "losses": 1,
+                    "order_disagreements": 1,
+                },
             }
         },
     }
@@ -742,75 +747,54 @@ def test_lower_is_better_gain_and_interval_are_oriented_and_baseline_is_logged_o
     evaluations = [
         metrics
         for _, metrics in sdk.logs
-        if "evaluation/development/candidate/unfamiliar.fit/mean" in metrics
+        if "evaluation/development/candidate/hpsv3.mu/mean" in metrics
     ]
-    assert evaluations[0]["evaluation/development/reference/unfamiliar.fit/mean"] == 5
-    assert "evaluation/development/reference/unfamiliar.fit/mean" not in evaluations[1]
+    assert evaluations[0]["evaluation/development/reference/hpsv3.mu/mean"] == 5
+    assert "evaluation/development/reference/hpsv3.mu/mean" not in evaluations[1]
     assert evaluations[0]["monitor/lpips/development/reference"] == 0.5
     assert "monitor/lpips/development/reference" not in evaluations[1]
     assert evaluations[1]["monitor/lpips/development/candidate"] == 0.4
-    assert evaluations[1]["evaluation/development/candidate/unfamiliar.fit/delta"] == 2
+    assert evaluations[1]["evaluation/development/candidate/hpsv3.mu/delta"] == -2
+    assert evaluations[1]["evaluation/development/candidate/hpsv3.mu/delta_lower"] == -3
+    assert evaluations[1]["evaluation/development/candidate/hpsv3.mu/delta_upper"] == -1
     assert (
-        evaluations[1]["evaluation/development/candidate/unfamiliar.fit/delta_lower"]
+        evaluations[1][
+            "evaluation/development/candidate/rubric.content_alignment/order_disagreements"
+        ]
         == 1
     )
-    assert (
-        evaluations[1]["evaluation/development/candidate/unfamiliar.fit/delta_upper"]
-        == 3
-    )
 
 
-def test_failed_scoring_publishes_retries_and_failures_before_round_aborts(
-    tmp_path, sdk, training_config
-):
-    from PIL import Image
-
-    from src.posttrain.records import file_hash
-    from src.posttrain.rewards import acquire_round
-
-    path = tmp_path / "image.png"
-    Image.new("RGB", (8, 8)).save(path)
+def test_failed_scoring_is_reported_before_round_aborts(tmp_path, sdk, training_config):
+    from src.posttrain.rewards import RoundScores
 
     class FailedClient:
-        def acquire(self, requests):
-            return [
-                {
-                    "scorer": "unfamiliar",
-                    "sample_id": r.sample_id,
-                    "status": "failed",
-                    "attempts": 2,
-                    "values": {},
-                }
-                for r in requests
-            ]
+        def read(self, collection, after):
+            return {
+                "results": [],
+                "next": 0,
+                "errors": [{"backend": "hpsv3", "message": "broken model"}],
+                "progress": {
+                    "accepted": 4,
+                    "completed": 0,
+                    "pairs_completed": 0,
+                    "backends": {"hpsv3": {"calls": 1, "seconds": 0.1, "failures": 1}},
+                },
+            }
 
-    records = [
-        {
-            "sample_id": f"0:{slot}:{draw}",
-            "prompt": {"id": str(slot), "text": "caption"},
-            "image_path": str(path),
-            "image_sha256": file_hash(path),
-        }
-        for slot in (0, 1)
-        for draw in (0, 1)
-    ]
+    atomic_json(
+        tmp_path / "attempts/attempt-round-000000.json", {"collection": "collection"}
+    )
     with (
-        pytest.raises(ValueError, match="required score failed"),
+        pytest.raises(RuntimeError, match="broken model"),
         Tracker(tmp_path, "run") as tracker,
     ):
-        acquire_round(
-            training_config,
-            {"unfamiliar": FailedClient()},
-            records,
-            on_scored=tracker.scoring,
+        RoundScores(training_config, FailedClient(), tmp_path, "attempt", 0).poll(
+            on_scored=tracker.scoring
         )
-    values = [
-        metrics
-        for _, metrics in sdk.logs
-        if "runtime/scoring/unfamiliar/failed_requests" in metrics
-    ]
-    assert values[-1]["runtime/scoring/unfamiliar/failed_requests"] == 4
-    assert values[-1]["runtime/scoring/unfamiliar/retry_attempts"] == 4
+    assert any(
+        metrics.get("runtime/scoring/hpsv3/failures") == 1 for _, metrics in sdk.logs
+    )
     assert not any("train/art_loss" in metrics for _, metrics in sdk.logs)
     assert sdk.finishes == [{"state": "crashed"}]
 

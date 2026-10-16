@@ -69,7 +69,7 @@ def test_inko_model_boundary_accepts_fp32_time_with_bf16_weights():
 def test_collection_noise_is_shared_across_comparison_arms_and_optimizer_clocks(
     training_config, round_index, optimizer_step
 ):
-    prompts = [{"id": "p0"}, {"id": "p1"}]
+    prompts = [{"id": "p0", "aspect": "1:1"}, {"id": "p1", "aspect": "1:1"}]
     ids = [f"{round_index}:0:0", f"{round_index}:1:0"]
     first = collect_art(
         lambda x, *args: torch.zeros_like(x),

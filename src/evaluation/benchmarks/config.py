@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.posttrain.schema import decode, name, require
-from src.posttrain.scoring.config import Scorer
+from src.posttrain.scoring.config import ClientConfig
+from src.posttrain.scoring.contracts import CHANNELS
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,6 @@ class Sampling:
 
 @dataclass(frozen=True)
 class Execution:
-    learner_devices: tuple[int, ...]
     max_inflight_batches: int
     startup_timeout: int
     task_timeout: int
@@ -84,7 +84,7 @@ class Config:
     execution: Execution
     evaluation: Evaluation
     arms: tuple[Arm, ...]
-    scorers: tuple[Scorer, ...]
+    scoring: ClientConfig
 
     def __post_init__(self):
         s, e, v = self.sampling, self.execution, self.evaluation
@@ -100,12 +100,6 @@ class Config:
                 all(n > 0 and n % 16 == 0 for n in shape) for shape in s.shapes.values()
             ),
             "image dimensions must be multiples of 16",
-        )
-        require(
-            bool(e.learner_devices)
-            and min(e.learner_devices) >= 0
-            and len(set(e.learner_devices)) == len(e.learner_devices),
-            "invalid learner devices",
         )
         require(
             min(
@@ -135,15 +129,9 @@ class Config:
                 "invalid guidance/shift",
             )
         require(
-            bool(self.scorers)
-            and len({s.id for s in self.scorers}) == len(self.scorers),
-            "unique nonempty scorers required",
-        )
-        channels = {f"{s.id}.{c.name}" for s in self.scorers for c in s.outputs}
-        require(
             bool(v.channels)
             and len(set(v.channels)) == len(v.channels)
-            and set(v.channels) <= channels,
+            and set(v.channels) <= set(CHANNELS),
             "evaluation requires declared unique channels",
         )
 
@@ -155,14 +143,12 @@ def load_config(path: str | Path) -> Config:
         return decode(Config, tomllib.load(stream))
 
 
-def benchmark_config(training):
+def benchmark_config(training, world_size):
     c, e, v = training.collection, training.execution, training.evaluation
-    services = {channel.split(".")[0] for channel in v.channels}
     return Config(
         Sampling(e.precision, e.microbatch, c.text_exit_layer, v.shapes),
         Execution(
-            e.learner_devices,
-            2 * len(e.learner_devices),
+            2 * world_size,
             e.startup_timeout,
             e.round_timeout,
             e.cpu_threads,
@@ -187,5 +173,5 @@ def benchmark_config(training):
                 v.shift,
             ),
         ),
-        tuple(s for s in training.scorers if s.id in services),
+        training.scoring,
     )

@@ -27,3 +27,15 @@ def peak_memory(device):
         if device.type == "cpu"
         else getattr(torch, device.type).max_memory_allocated(device)
     )
+
+
+def device_count(kind: str):
+    """Use the job's visible allocation; reward workers live on another node."""
+    if kind == "cpu":
+        return 1
+    if kind == "npu":
+        import torch_npu  # noqa: F401
+    count = getattr(torch, kind).device_count()
+    if count < 1:
+        raise RuntimeError(f"no visible {kind} devices")
+    return count

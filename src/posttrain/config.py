@@ -7,7 +7,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .schema import decode, name, require
-from .scoring.config import Scorer
+from .scoring.config import ClientConfig
+from .scoring.contracts import CHANNELS
 
 ART_UPDATES_PER_ROUND = 2
 REPO = Path(__file__).resolve().parents[2]
@@ -26,7 +27,8 @@ class IntervalEvaluation:
     shapes: dict[str, tuple[int, int]]
     channels: tuple[str, ...]
     diversity_asset: str
-    suites: tuple[str, ...] = ("development", "monitor")
+    rubric_prompt_limit: int = 32
+    suites: tuple[str, ...] = ("development", "monitor", "rubric")
     weights: tuple[str, ...] = ("ema",)
     bootstrap_seed: int = 7
     bootstrap_repeats: int = 2000
@@ -34,13 +36,16 @@ class IntervalEvaluation:
 
     def __post_init__(self):
         require(
-            self.every > 0 and self.prompt_limit >= 0 and self.draws_per_prompt > 0,
+            self.every > 0
+            and self.prompt_limit >= 0
+            and self.draws_per_prompt > 0
+            and self.rubric_prompt_limit > 0,
             "invalid evaluation cadence/prompt selection",
         )
         require(
             bool(self.suites)
             and len(set(self.suites)) == len(self.suites)
-            and set(self.suites) <= {"development", "monitor"},
+            and set(self.suites) <= {"development", "monitor", "rubric"},
             "invalid evaluation suites",
         )
         require(
@@ -67,11 +72,10 @@ class Student:
 
 @dataclass(frozen=True)
 class Collection:
-    prompts: str
+    dataset: str
     prompts_per_round: int
     draws_per_prompt: int
-    height: int
-    width: int
+    shapes: dict[str, tuple[int, int]]
     steps: int
     shift: str
     text_exit_layer: int
@@ -119,7 +123,6 @@ class Optimizer:
 
 @dataclass(frozen=True)
 class TrainingExecution:
-    learner_devices: tuple[int, ...]
     microbatch: int
     cpu_threads: int
     collective_timeout: int
@@ -162,7 +165,7 @@ class TrainingConfig:
     student_optimizer: Optimizer
     execution: TrainingExecution
     training: Training
-    scorers: tuple[Scorer, ...]
+    scoring: ClientConfig
     rewards: Rewards
     evaluation: IntervalEvaluation
 
@@ -195,16 +198,14 @@ class TrainingConfig:
         )
         require(
             min(c.prompts_per_round, c.draws_per_prompt, c.text_exit_layer) > 0
-            and all(n > 0 and n % 16 == 0 for n in (c.height, c.width)),
+            and bool(c.dataset)
+            and bool(c.shapes)
+            and all(
+                n > 0 and n % 16 == 0 for shape in c.shapes.values() for n in shape
+            ),
             "invalid collection sizes",
         )
         require(c.draws_per_prompt >= 2, "at least two draws per prompt are required")
-        require(
-            bool(e.learner_devices)
-            and min(e.learner_devices) >= 0
-            and len(set(e.learner_devices)) == len(e.learner_devices),
-            "invalid learner role map",
-        )
         require(
             min(
                 e.microbatch,
@@ -218,13 +219,6 @@ class TrainingConfig:
             "invalid training execution",
         )
         require(
-            c.prompts_per_round
-            * c.draws_per_prompt
-            % (len(e.learner_devices) * e.microbatch)
-            == 0,
-            "round must divide evenly across learners and microbatches",
-        )
-        require(
             0 <= t.seed < 2**63
             and t.rounds > 0
             and t.checkpoint_every > 0
@@ -233,35 +227,24 @@ class TrainingConfig:
             "invalid training length/seed/EMA",
         )
         require(
-            c.prompts_per_round * c.draws_per_prompt % (2 * len(e.learner_devices))
-            == 0,
-            "ART round must split evenly into two update windows",
-        )
-        require(
             math.isfinite(self.art.reference_coefficient)
             and self.art.reference_coefficient >= 0,
             "invalid ART reference coefficient",
         )
-        available = {f"{s.id}.{ch.name}": ch for s in self.scorers for ch in s.outputs}
         channels = self.rewards.channels
         require(
-            bool(self.scorers)
-            and len({s.id for s in self.scorers}) == len(self.scorers)
-            and len({ch.channel for ch in channels}) == len(channels),
-            "unique nonempty scorers/reward channels required",
+            len({ch.channel for ch in channels}) == len(channels),
+            "duplicate reward channel",
         )
+        if any(ch.channel.startswith("rubric.") for ch in channels):
+            require(c.draws_per_prompt % 2 == 0, "rubric rewards require paired draws")
         require(
             bool(channels)
             and math.isclose(sum(ch.weight for ch in channels), 1, abs_tol=1e-7),
             "reward weights must sum to one",
         )
-        require(
-            {ch.channel.split(".")[0] for ch in channels}
-            == {s.id for s in self.scorers},
-            "reward/scorer service set differs",
-        )
         for channel in channels:
-            require(channel.channel in available, "reward channel is undeclared")
+            require(channel.channel in CHANNELS, "reward channel is undeclared")
             require(
                 channel.weight >= 0 and channel.standardization in {"none", "round"},
                 "invalid reward orientation/weight/standardization",
@@ -278,5 +261,22 @@ def load_training_config(path):
         return decode(TrainingConfig, tomllib.load(stream))
 
 
-def training_contract(config, prompts):
-    return json.loads(json.dumps({"config": asdict(config), "prompts": prompts}))
+def training_contract(config, prompts, world_size, scoring):
+    require(
+        world_size > 0
+        and config.collection.prompts_per_round
+        * config.collection.draws_per_prompt
+        % (2 * world_size)
+        == 0,
+        "ART round must give every learner an even number of draws",
+    )
+    return json.loads(
+        json.dumps(
+            {
+                "config": asdict(config),
+                "prompts": prompts,
+                "world_size": world_size,
+                "scoring": scoring,
+            }
+        )
+    )

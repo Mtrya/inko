@@ -26,39 +26,28 @@ from src.posttrain.config import (
     TrainingConfig,
     TrainingExecution,
 )
-from src.posttrain.scoring.config import Scorer
-from src.posttrain.scoring.contracts import Channel
+from src.posttrain.scoring.config import ClientConfig
 
 
 @pytest.fixture
 def sampling_config():
     """Explicit test inputs; no expectations are sourced from production configs."""
-    channel = Channel("fit", "higher")
-    scorer = Scorer(
-        "unfamiliar",
-        (channel,),
-        2,
-        2.0,
-        2,
-        2,
-        "shared_file",
-    )
     checkpoint = Checkpoint("first", "ema")
     arm = Arm("reference", checkpoint, 2, 1.0, "none")
     return Config(
         Sampling("float32", 1, 2, {"1:1": (32, 32)}),
-        Execution((0,), 2, 10, 10, 1),
+        Execution(2, 10, 10, 1),
         Evaluation(
             "unused",
             "unused",
-            ("unfamiliar.fit",),
+            ("hpsv3.mu",),
             0,
             100,
             0.95,
             Diversity((), "", 1, 1),
         ),
         (arm, replace(arm, name="candidate", guidance=2.0)),
-        (scorer,),
+        ClientConfig(2.0, 2, 2),
     )
 
 
@@ -93,11 +82,10 @@ def training_config(sampling_config):
         initialization=Initialization("initial"),
         student=Student("full", 2, 2.0, "attention_mlp"),
         collection=Collection(
-            prompts="fixture.jsonl",
+            dataset="fixture/pool",
             prompts_per_round=2,
             draws_per_prompt=2,
-            height=16,
-            width=16,
+            shapes={"1:1": (16, 16)},
             steps=2,
             shift="shape",
             text_exit_layer=1,
@@ -116,7 +104,6 @@ def training_config(sampling_config):
             muon_momentum=0.95,
         ),
         execution=TrainingExecution(
-            learner_devices=(0,),
             microbatch=1,
             cpu_threads=1,
             collective_timeout=30,
@@ -128,8 +115,8 @@ def training_config(sampling_config):
             deterministic_algorithms=True,
         ),
         training=Training(7, 3, 1, 0, 0.9),
-        scorers=sampling_config.scorers,
-        rewards=Rewards((RewardChannel("unfamiliar.fit", 1.0, "none"),), 1e-4),
+        scoring=sampling_config.scoring,
+        rewards=Rewards((RewardChannel("hpsv3.mu", 1.0, "none"),), 1e-4),
         evaluation=IntervalEvaluation(
             every=1,
             suite="unused",
@@ -140,7 +127,7 @@ def training_config(sampling_config):
             guidance=1.0,
             shift="none",
             shapes={"1:1": (32, 32)},
-            channels=("unfamiliar.fit",),
+            channels=("hpsv3.mu",),
             diversity_asset="lpips",
         ),
     )

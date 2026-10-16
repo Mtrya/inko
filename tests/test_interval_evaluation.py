@@ -102,7 +102,7 @@ def test_interval_sampling_uses_declared_benchmark_rule_and_reuses_export(
     point = publish(
         tmp_path / "training/checkpoints",
         2,
-        training_contract(config, []),
+        training_contract(config, [], 1, {}),
         {"step": 2, "committed_rounds": 1},
         {},
         0,
@@ -122,7 +122,11 @@ def test_interval_sampling_uses_declared_benchmark_rule_and_reuses_export(
 
     def evaluate(config, assets, rows, destination, **kwargs):
         received.append(config.arms)
-        assert kwargs == {"visual_only": True, "suite": "monitor"}
+        assert kwargs == {
+            "visual_only": True,
+            "suite": "monitor",
+            "reference_cache": output.parent / "entry" / "monitor",
+        }
         return {"suite": "monitor"}
 
     monkeypatch.setattr(run_campaign, "load_evaluation_prompts", lambda *args: [])
@@ -157,7 +161,7 @@ def test_recovery_keeps_complete_evaluations_and_finishes_interrupted_before_tra
         ),
     )
     prompts = []
-    contract = training_contract(config, prompts)
+    contract = training_contract(config, prompts, 1, {})
     output = tmp_path / "run"
     checkpoints = output / "training/checkpoints"
 
@@ -194,11 +198,21 @@ def test_recovery_keeps_complete_evaluations_and_finishes_interrupted_before_tra
         checkpoint(3)
 
     monkeypatch.setattr(run_campaign, "load_training_config", lambda path: config)
-    monkeypatch.setattr(run_campaign, "load_prompts", lambda *args: prompts)
+    monkeypatch.setattr(run_campaign, "load_rollout_prompts", lambda *args: prompts)
     monkeypatch.setattr(run_campaign, "evaluate_checkpoint", evaluate)
     monkeypatch.setattr(run_campaign.subprocess, "run", train)
     assets = tmp_path / "assets.json"
-    atomic_json(assets, {})
+    atomic_json(
+        assets,
+        {
+            "rollout": "unused.jsonl",
+            "device_type": "cpu",
+            "scoring": {"endpoint": "http://fixture"},
+        },
+    )
+    monkeypatch.setattr(
+        "src.posttrain.scoring.client.ScoreClient.info", lambda self: {"semantics": {}}
+    )
     run_campaign.execute(tmp_path / "training.toml", assets, output)
     assert events == [("evaluate", 2), ("train", 2, 3), ("evaluate", 3)]
     assert json.loads((output / "complete.json").read_text()) == {

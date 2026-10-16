@@ -32,15 +32,16 @@ def learner(
     from . import checkpoint
     from .art import round_guidance, update_art
     from .distributed import all_reduce, initialize, prime_buckets, wrap
-    from .rewards import publish_collection, wait_for_rewards
+    from .rewards import submit_rollout, wait_for_rewards
     from .roles import Roles
     from .rollout import PromptCursor, collect_art
+    from .scoring.client import ScoreClient, Submissions, group_metadata
     from .state import Clock, TrainingState
     from .tracking import optimizer_rates
 
     device = set_device(
         assets["device_type"],
-        config.execution.learner_devices[rank],
+        rank,
         config.execution.cpu_threads,
     )
     torch.use_deterministic_algorithms(config.execution.deterministic_algorithms)
@@ -50,7 +51,7 @@ def learner(
     torch.manual_seed(seed)
     initialize(
         rank,
-        len(config.execution.learner_devices),
+        contract["world_size"],
         device,
         rendezvous,
         config.execution.collective_timeout,
@@ -125,11 +126,12 @@ def learner(
         cond = conditioning(
             [contract["prompts"][0]["text"]] * config.execution.microbatch
         )
+        height, width = config.collection.shapes[contract["prompts"][0]["aspect"]]
         latent = torch.zeros(
             config.execution.microbatch,
             16,
-            config.collection.height // 8,
-            config.collection.width // 8,
+            height // 8,
+            width // 8,
             device=device,
         )
         times = torch.full((config.execution.microbatch,), 0.5, device=device)
@@ -147,7 +149,6 @@ def learner(
                     "step": clock.step,
                     "exact_state": True,
                     "exact_rng": True,
-                    "cursor": cursor.state_dict(),
                 },
             )
             del saved, rank_saved
@@ -167,7 +168,7 @@ def learner(
             clock.committed_rounds <= stop_after,
             "resume is past requested committed round",
         )
-        prompt_map = {p["id"]: p for p in contract["prompts"]}
+        scoring = ScoreClient(config.scoring, assets["scoring"])
 
         if rank == 0:
             atomic_json(
@@ -184,6 +185,33 @@ def learner(
 
         def collect_round():
             chosen = cursor.take(config.collection.prompts_per_round)
+            collection = f"{attempt}-round-{clock.committed_rounds:06d}"
+            if rank == 0:
+                atomic_json(output / "active_collection.json", {"id": collection})
+                scoring.open(
+                    collection,
+                    [c.channel for c in config.rewards.channels],
+                    seed + clock.committed_rounds,
+                    [
+                        group_metadata(
+                            str(slot),
+                            contract["prompts"][p],
+                            config.collection.draws_per_prompt,
+                        )
+                        for slot, p in enumerate(chosen)
+                    ],
+                )
+                atomic_json(
+                    output / "attempts" / f"{collection}.json",
+                    {
+                        "attempt": attempt,
+                        "round": clock.committed_rounds,
+                        "started_at": time.time(),
+                        "step": clock.step,
+                        "collection": collection,
+                    },
+                )
+            dist.barrier()
             draws = [
                 (
                     slot * config.collection.draws_per_prompt + draw,
@@ -193,13 +221,21 @@ def learner(
                 for slot, p in enumerate(chosen)
                 for draw in range(config.collection.draws_per_prompt)
             ]
-            local = draws[rank :: len(config.execution.learner_devices)]
+            local = draws[rank :: contract["world_size"]]
+            shape_buckets = {}
+            for item in local:
+                shape = config.collection.shapes[item[1]["aspect"]]
+                shape_buckets.setdefault(shape, []).append(item)
+            packed = [
+                bucket[begin : begin + config.execution.microbatch]
+                for _, bucket in sorted(shape_buckets.items())
+                for begin in range(0, len(bucket), config.execution.microbatch)
+            ]
             result = []
-            for begin in range(0, len(local), config.execution.microbatch):
-                batch = local[begin : begin + config.execution.microbatch]
-                cond = conditioning([p["text"] for _, p, _ in batch])
-                result.append(
-                    collect_art(
+            with Submissions(scoring, collection) as submissions:
+                for batch in packed:
+                    cond = conditioning([p["text"] for _, p, _ in batch])
+                    rollout = collect_art(
                         roles.student_field,
                         config,
                         [p for _, p, _ in batch],
@@ -210,33 +246,47 @@ def learner(
                         cond,
                         device,
                     )
+                    generated_at = submit_rollout(
+                        rollout, vae, stats, submissions, output / "rollout_panel"
+                    )
+                    result.append(rollout)
+                    atomic_json(
+                        output / "progress" / f"{attempt}-rank-{rank:03d}.json",
+                        {
+                            "round": clock.committed_rounds,
+                            "batches": len(result),
+                            "last_generated_at": generated_at,
+                            "submission_wait_seconds": submissions.wait_seconds,
+                        },
+                    )
+            group_shapes = [
+                (
+                    16,
+                    *(
+                        n // 8
+                        for n in config.collection.shapes[
+                            contract["prompts"][p]["aspect"]
+                        ]
+                    ),
                 )
-            return result
+                for p in chosen
+            ]
+            return result, group_shapes, submissions.wait_seconds
 
         while clock.committed_rounds < stop_after:
             start = time.monotonic()
             r = clock.committed_rounds
-            if rank == 0:
-                atomic_json(
-                    output / "attempts" / f"{attempt}-round-{r:06d}.json",
-                    {
-                        "attempt": attempt,
-                        "round": r,
-                        "started_at": time.time(),
-                        "step": clock.step,
-                    },
-                )
-            batches = collect_round()
-            records = publish_collection(
-                config, batches, prompt_map, vae, stats, output, attempt, r, rank
-            )
+            batches, group_shapes, submission_wait = collect_round()
+            sample_ids = [key for batch in batches for key in batch.sample_ids]
             synchronize(device)
             collected = time.monotonic()
             values, state.last_reward = wait_for_rewards(
-                config, output, attempt, r, records
+                config, output, attempt, r, sample_ids
             )
             rewarded = time.monotonic()
-            guidance = round_guidance(config, batches, values, reduce=all_reduce)
+            guidance = round_guidance(
+                config, batches, values, group_shapes, reduce=all_reduce
+            )
             skipped = state.skip_inactive_art_round(guidance)
             synchronize(device)
             guided = time.monotonic()
@@ -258,7 +308,6 @@ def learner(
                     step=clock.step,
                     collection_round=r,
                     inner_update=inner,
-                    cursor=cursor.state_dict(),
                     update_seconds=time.monotonic() - update_start,
                     reference_enabled=bool(config.reference_coefficient),
                     attempt=attempt,
@@ -279,13 +328,18 @@ def learner(
                 output / "rounds" / f"{attempt}-round-{r:06d}-rank-{rank:03d}.json",
                 {
                     "clock": clock.state_dict(),
-                    "cursor": cursor.state_dict(),
                     "complete": True,
                     "skipped_zero_guidance": skipped,
                     "active_group_fraction": float(guidance.active.float().mean()),
                     "peak_allocated_bytes": peak_memory(device),
+                    "trajectory_bytes": sum(
+                        t.numel() * t.element_size()
+                        for batch in batches
+                        for t in (batch.states, batch.predictions)
+                    ),
                     "timings": {
                         "collection": collected - start,
+                        "submission_wait": submission_wait,
                         "scoring_wait": rewarded - collected,
                         "guidance": guided - rewarded,
                         "round": time.monotonic() - start,

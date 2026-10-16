@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from src.posttrain.art import group_guidance
+from src.posttrain.art import group_guidance, round_guidance
 from src.posttrain.distributed import (
     all_reduce,
     global_loss,
@@ -115,3 +115,51 @@ def test_guidance_uses_global_reward_spread_and_centered_covariance(tmp_path):
         torch.testing.assert_close(
             stats["directions"], torch.tensor([[0.0, 0.0], [1.0, 1.0]])
         )
+
+
+def mixed_guidance_worker(rank, path, destination):
+    from types import SimpleNamespace
+
+    torch.set_num_threads(1)
+    initialize(rank, 2, torch.device("cpu"), "file://" + path, 30)
+    try:
+        # Each rank lacks all samples for the other shape. The complete groups
+        # have covariance [-0.5,0.5] and [1.5,0,0], respectively.
+        endpoints = (
+            torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+            if rank == 0
+            else torch.tensor([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]])
+        )
+        rollout = SimpleNamespace(
+            terminal=endpoints,
+            draw_indices=[2 * rank, 2 * rank + 1],
+            sample_ids=[f"0:{rank}:0", f"0:{rank}:1"],
+        )
+        config = SimpleNamespace(
+            collection=SimpleNamespace(prompts_per_round=2, draws_per_prompt=2)
+        )
+        result = round_guidance(
+            config,
+            [rollout],
+            {f"0:{rank}:0": 0.0, f"0:{rank}:1": 1.0},
+            [(2,), (3,)],
+            reduce=all_reduce,
+        )
+        torch.save((result.directions, result.active), destination + str(rank))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_mixed_shapes_reduce_with_an_empty_local_bucket(tmp_path):
+    destination = str(tmp_path / "mixed-")
+    mp.spawn(
+        mixed_guidance_worker,
+        args=(str(tmp_path / "mixed-rendezvous"), destination),
+        nprocs=2,
+        join=True,
+    )
+    for rank in range(2):
+        directions, active = torch.load(destination + str(rank), weights_only=True)
+        torch.testing.assert_close(directions[0], torch.tensor([-1.0, 1.0]))
+        torch.testing.assert_close(directions[1], torch.tensor([3**0.5, 0.0, 0.0]))
+        assert active.tolist() == [True, True]

@@ -1,0 +1,43 @@
+# One scoring node: seven TP=2 judges and one worker per auxiliary model.
+[server]
+max_collections = 2
+max_samples = 4096
+max_image_bytes = 16777216
+max_body_bytes = 67108864
+startup_timeout = 1800.0
+
+[rubric]
+model_name = "Qwen3.8-27B"
+replicas = [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9], [10, 11], [12, 13]]
+concurrency = 80
+max_tokens = 16000
+max_model_len = 32768
+request_timeout = 1200.0
+[rubric.weights]
+repository = "Qwen/Qwen3.8-27B"
+files = ["*.json", "*.safetensors", "*.txt", "*.jinja", "*.model"]
+
+[hpsv3]
+devices = [14]
+batch_size = 2
+request_timeout = 600.0
+cpu_threads = 4
+[hpsv3.source]
+repository = "https://github.com/MizzenAI/HPSv3"
+[hpsv3.weights]
+repository = "MizzenAI/HPSv3"
+files = ["HPSv3.safetensors"]
+[hpsv3.backbone]
+repository = "Qwen/Qwen2-VL-7B-Instruct"
+files = ["*.json", "*.safetensors", "*.txt", "*.jinja", "*.model"]
+
+[vqascore]
+devices = [15]
+batch_size = 2
+request_timeout = 600.0
+cpu_threads = 4
+[vqascore.source]
+repository = "https://github.com/linzhiqiu/t2v_metrics"
+[vqascore.weights]
+repository = "Qwen/Qwen3-VL-8B-Instruct"
+files = ["*.json", "*.safetensors", "*.txt", "*.jinja", "*.model"]

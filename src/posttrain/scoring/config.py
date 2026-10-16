@@ -1,39 +1,22 @@
-"""Scorer client acquisition settings and service model configuration."""
+"""Client transport settings and the server-owned model deployment."""
 
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..schema import decode, name, require
-from .backends.hpsv3 import OUTPUTS as HPS_OUTPUTS
-from .backends.vqascore import OUTPUTS as VQA_OUTPUTS
-from .contracts import Capabilities, Channel
+from ..schema import decode, require
 
 
 @dataclass(frozen=True)
-class Scorer:
-    id: str
-    outputs: tuple[Channel, ...]
-    attempts: int
+class ClientConfig:
     timeout: float
-    concurrency: int
-    batch_size: int
-    transport: str
+    attempts: int
+    max_pending: int
 
     def __post_init__(self):
-        name(self.id)
-        require(self.id != "learner", "learner is reserved for the generation role")
         require(
-            bool(self.outputs)
-            and len({c.name for c in self.outputs}) == len(self.outputs),
-            "unique scorer outputs required",
-        )
-        require(
-            min(self.attempts, self.concurrency, self.batch_size, self.timeout) > 0,
-            "acquisition limits must be positive",
-        )
-        require(
-            self.transport in {"shared_file", "png_base64"}, "unknown image transport"
+            min(self.timeout, self.attempts, self.max_pending) > 0,
+            "scoring client limits must be positive",
         )
 
 
@@ -52,64 +35,95 @@ class Model:
 
 
 @dataclass(frozen=True)
-class HPSOptions:
-    backbone: Model
-
-
-@dataclass(frozen=True)
-class Semantics:
-    backend: str
-    source: Source
-    weights: Model
-
-    def __post_init__(self):
-        require(self.backend in {"hpsv3", "vqascore"}, "unknown backend")
-
-
-@dataclass(frozen=True)
-class Limits:
-    max_batch_size: int
-    queue_capacity: int
-    request_timeout: float
+class ServerLimits:
+    max_collections: int
+    max_samples: int
+    max_image_bytes: int
     max_body_bytes: int
-    cpu_threads: int
+    startup_timeout: float
 
     def __post_init__(self):
         require(
             min(
-                self.max_batch_size,
-                self.queue_capacity,
-                self.request_timeout,
+                self.max_collections,
+                self.max_samples,
+                self.max_image_bytes,
                 self.max_body_bytes,
-                self.cpu_threads,
+                self.startup_timeout,
             )
             > 0,
-            "service limits must be positive",
+            "invalid scoring server limits",
         )
 
 
 @dataclass(frozen=True)
-class ServiceConfig:
-    semantics: Semantics
-    options: HPSOptions | None
-    limits: Limits
+class JudgeConfig:
+    weights: Model
+    model_name: str
+    replicas: tuple[tuple[int, ...], ...]
+    concurrency: int
+    max_tokens: int
+    max_model_len: int
+    request_timeout: float
 
-    @property
-    def capabilities(self):
-        return Capabilities(
-            HPS_OUTPUTS if self.semantics.backend == "hpsv3" else VQA_OUTPUTS,
-            self.limits.max_batch_size,
-            ("shared_file", "png_base64"),
+    def __post_init__(self):
+        require(
+            bool(self.replicas) and all(self.replicas), "judge replica devices required"
+        )
+        require(
+            min(
+                self.concurrency,
+                self.max_tokens,
+                self.max_model_len,
+                self.request_timeout,
+            )
+            > 0,
+            "invalid judge execution settings",
+        )
+        require(
+            self.max_tokens < self.max_model_len,
+            "judge context must leave room for inputs",
         )
 
 
-def load_service_config(path):
+@dataclass(frozen=True)
+class AuxiliaryConfig:
+    source: Source
+    weights: Model
+    devices: tuple[int, ...]
+    batch_size: int
+    request_timeout: float
+    cpu_threads: int
+    backbone: Model | None = None
+
+    def __post_init__(self):
+        require(
+            bool(self.devices)
+            and min(self.batch_size, self.request_timeout, self.cpu_threads) > 0,
+            "invalid auxiliary worker settings",
+        )
+
+
+@dataclass(frozen=True)
+class ServerConfig:
+    server: ServerLimits
+    rubric: JudgeConfig
+    hpsv3: AuxiliaryConfig
+    vqascore: AuxiliaryConfig
+
+    def __post_init__(self):
+        devices = [d for replica in self.rubric.replicas for d in replica]
+        devices.extend((*self.hpsv3.devices, *self.vqascore.devices))
+        require(
+            min(devices) >= 0 and len(devices) == len(set(devices)),
+            "scoring workers require disjoint devices",
+        )
+        require(
+            self.hpsv3.backbone is not None and self.vqascore.backbone is None,
+            "only HPS requires a separate backbone",
+        )
+
+
+def load_server_config(path):
     with Path(path).open("rb") as stream:
-        raw = tomllib.load(stream)
-    semantics = decode(Semantics, raw["semantics"])
-    sections = {"semantics", "limits"}
-    if semantics.backend == "hpsv3":
-        sections.add("options")
-    require(set(raw) == sections, "invalid service sections")
-    options = decode(HPSOptions, raw["options"]) if "options" in sections else None
-    return ServiceConfig(semantics, options, decode(Limits, raw["limits"]))
+        return decode(ServerConfig, tomllib.load(stream))

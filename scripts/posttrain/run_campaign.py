@@ -1,4 +1,4 @@
-"""Train to committed boundaries and evaluate after learner/scorer processes exit."""
+"""Train to committed boundaries, then evaluate through the resident scoring service."""
 
 import argparse
 import fcntl
@@ -10,10 +10,14 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from src.evaluation.benchmarks.config import Checkpoint, benchmark_config
-from src.evaluation.benchmarks.prompts import load_evaluation_prompts, load_prompts
-from src.evaluation.benchmarks.run import REPO, run
+from src.evaluation.benchmarks.prompts import (
+    load_evaluation_prompts,
+    load_rubric_prompts,
+)
+from src.evaluation.benchmarks.run import run
 from src.posttrain.checkpoint import inspect
 from src.posttrain.config import load_training_config
+from src.posttrain.prompts import load_rollout_prompts
 from src.posttrain.records import atomic_json
 from src.posttrain.schema import require
 
@@ -21,10 +25,12 @@ from .export import export
 from .readouts import panel
 
 
-def boundaries(config):
+def boundaries(config, stop_after=None):
     every = config.evaluation.every
-    rounds = set(range(every, config.training.rounds + 1, every))
-    rounds.add(config.training.rounds)
+    stop = config.training.rounds if stop_after is None else stop_after
+    require(0 < stop <= config.training.rounds, "invalid campaign stop round")
+    rounds = set(range(every, stop + 1, every))
+    rounds.add(stop)
     yield from sorted(rounds)
 
 
@@ -68,7 +74,7 @@ def _evaluate_checkpoint(checkpoint, training, assets, output, tracker):
         "evaluation checkpoint training config differs",
     )
     interval = training.evaluation
-    base = benchmark_config(training)
+    base = benchmark_config(training, manifest["contract"]["world_size"])
     exports, arms = [], list(base.arms)
     mapped = dict(assets["checkpoints"])
     for view in interval.weights:
@@ -86,15 +92,34 @@ def _evaluate_checkpoint(checkpoint, training, assets, output, tracker):
         exports.append(record)
     config = replace(base, arms=tuple(arms))
     for suite in interval.suites:
-        rows = load_evaluation_prompts(config, suite)
+        selected = config
+        if suite == "rubric":
+            from src.posttrain.scoring.contracts import CHANNELS
+
+            require(
+                len(config.arms) == 2,
+                "rubric interval evaluation requires one student view",
+            )
+            selected = replace(
+                config, evaluation=replace(config.evaluation, channels=CHANNELS)
+            )
+            rows = load_rubric_prompts(
+                assets["development"],
+                selected.sampling.shapes,
+                interval.rubric_prompt_limit,
+                interval.bootstrap_seed,
+            )
+        else:
+            rows = load_evaluation_prompts(config, suite)
         target = output / suite
         report = run(
-            config,
+            selected,
             {**assets, "checkpoints": mapped},
             rows,
             target,
             visual_only=suite == "monitor",
             suite=suite,
+            reference_cache=output.parent / "entry" / suite,
         )
         require(
             suite == "monitor"
@@ -110,7 +135,7 @@ def _evaluate_checkpoint(checkpoint, training, assets, output, tracker):
             tracker.evaluation(
                 report,
                 target,
-                config,
+                selected,
                 manifest["step"],
             )
     receipt = {
@@ -123,12 +148,12 @@ def _evaluate_checkpoint(checkpoint, training, assets, output, tracker):
     return receipt
 
 
-def execute(config_path, assets_path, output, *, track=False):
+def execute(config_path, assets_path, output, *, track=False, stop_after=None):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     training = load_training_config(config_path)
     assets = json.loads(Path(assets_path).read_text())
-    stops = list(boundaries(training))
+    stops = list(boundaries(training, stop_after))
     with (output / ".campaign.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         training_root = output / "training"
@@ -136,11 +161,18 @@ def execute(config_path, assets_path, output, *, track=False):
         if checkpoints:
             from src.posttrain.config import training_contract
 
-            prompts = load_prompts(
-                REPO / training.collection.prompts,
-                {"1:1": (training.collection.height, training.collection.width)},
+            prompts = load_rollout_prompts(
+                assets["rollout"], training.collection.shapes
             )
-            expected = training_contract(training, prompts)
+            from src.posttrain.scoring.client import ScoreClient
+            from src.utils.device import device_count
+
+            expected = training_contract(
+                training,
+                prompts,
+                device_count(assets["device_type"]),
+                ScoreClient(training.scoring, assets["scoring"]).info()["semantics"],
+            )
             require(
                 all(inspect(path)["contract"] == expected for _, path in checkpoints),
                 "campaign recovery contract differs",
@@ -148,7 +180,7 @@ def execute(config_path, assets_path, output, *, track=False):
         # Reconcile evaluations from already committed checkpoints before
         # resuming training. An interrupted evaluation never becomes a skip.
         for round_number, path in checkpoints:
-            if evaluation_due(training, round_number):
+            if evaluation_due(training, round_number) or round_number == stops[-1]:
                 destination = output / "evaluation" / path.name
                 if (destination / "evaluation.json").exists():
                     continue
@@ -188,7 +220,7 @@ def execute(config_path, assets_path, output, *, track=False):
                 inspect(last)["committed_rounds"] == stop,
                 "training segment lacks its committed endpoint",
             )
-            if evaluation_due(training, stop):
+            if evaluation_due(training, stop) or stop == stops[-1]:
                 evaluate_checkpoint(
                     last,
                     training,
@@ -199,7 +231,7 @@ def execute(config_path, assets_path, output, *, track=False):
         atomic_json(
             output / "complete.json",
             {
-                "committed_rounds": training.training.rounds,
+                "committed_rounds": stops[-1],
                 "step": inspect(last)["step"],
             },
         )
@@ -212,6 +244,11 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument(
+        "--stop-after",
+        type=int,
+        help="Bound execution without changing the training horizon",
+    )
+    parser.add_argument(
         "--track",
         action="store_true",
         help="Keep training and interval readouts in one online SwanLab experiment",
@@ -219,18 +256,26 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.validate_only:
         c = load_training_config(args.config)
-        benchmark_config(c)
-        stops = list(boundaries(c))
+        benchmark_config(c, 1)
+        stops = list(boundaries(c, args.stop_after))
         print(
             json.dumps(
                 {
                     "valid": True,
                     "committed_stops": stops,
-                    "evaluations": [s for s in stops if evaluation_due(c, s)],
+                    "evaluations": [
+                        s for s in stops if evaluation_due(c, s) or s == stops[-1]
+                    ],
                 }
             )
         )
     else:
         if args.assets is None or args.output is None:
             parser.error("--assets and --output are required")
-        execute(args.config, args.assets, args.output, track=args.track)
+        execute(
+            args.config,
+            args.assets,
+            args.output,
+            track=args.track,
+            stop_after=args.stop_after,
+        )

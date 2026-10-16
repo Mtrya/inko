@@ -140,7 +140,7 @@ class Tracker:
             metrics[f"train/reward/{channel}/std"] = statistics.pstdev(values)
         metrics["train/art_active_group_fraction"] = rows[0]["active_group_fraction"]
         self.log(metrics, number)
-        stages = ["collection", "scoring_wait", "guidance", "round"]
+        stages = ["collection", "submission_wait", "scoring_wait", "guidance", "round"]
         self.runtime(
             {
                 **{
@@ -173,7 +173,6 @@ class Tracker:
                     },
                     "arms": [asdict(arm) for arm in config.arms],
                     "channels": config.evaluation.channels,
-                    "scorers": [asdict(scorer) for scorer in config.scorers],
                     "confidence": config.evaluation.confidence,
                     "prompt_limit": config.evaluation.prompt_limit,
                     "draws_per_prompt": config.evaluation.draws_per_prompt,
@@ -186,11 +185,6 @@ class Tracker:
         metrics = {}
         prefix = f"evaluation/{suite}"
         reference = config.arms[0].name
-        directions = {
-            f"{scorer.id}.{output.name}": 1 if output.direction == "higher" else -1
-            for scorer in config.scorers
-            for output in scorer.outputs
-        }
         for arm, channels in report.get("arms", {}).items():
             for channel, values in channels.items():
                 key = f"{prefix}/{arm}/{channel}/mean"
@@ -206,8 +200,12 @@ class Tracker:
             for channel, values in channels.items():
                 if values["coverage_complete"] and values["mean_delta"] is not None:
                     key = f"{prefix}/{arm}/{channel}"
-                    sign = directions[channel]
+                    sign = 1
                     metrics[f"{key}/delta"] = sign * values["mean_delta"]
+                    if "win_credit" in values:
+                        metrics[f"{key}/win_credit"] = values["win_credit"]
+                        for field in ("wins", "ties", "losses", "order_disagreements"):
+                            metrics[f"{key}/{field}"] = values[field]
                     if values["interval"] is not None:
                         lower, upper = sorted(sign * v for v in values["interval"])
                         metrics[f"{key}/delta_lower"] = lower
@@ -268,14 +266,14 @@ def update_metrics(rows):
 
 
 class TrainingMetrics:
-    def __init__(self, tracker, config, output, attempt, saved=None):
+    def __init__(self, tracker, config, output, attempt, world_size, saved=None):
         self.tracker, self.config, self.output, self.attempt = (
             tracker,
             config,
             Path(output),
             attempt,
         )
-        self.ranks = len(config.execution.learner_devices)
+        self.ranks = world_size
         self.step = 0 if saved is None else saved["step"]
         self.round = 0 if saved is None else saved["committed_rounds"]
 

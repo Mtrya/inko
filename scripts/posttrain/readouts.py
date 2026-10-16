@@ -7,12 +7,8 @@ import statistics
 from pathlib import Path
 
 from scripts.eval.blind_panel import cmd_panel, tally_votes
-from src.evaluation.benchmarks.run import parse_score
-from src.posttrain.records import atomic_json, file_hash
-from src.posttrain.schema import decode, require
-from src.posttrain.scoring.client import request_for_record
-from src.posttrain.scoring.config import Scorer
-from src.posttrain.scoring.contracts import validate_results
+from src.posttrain.records import atomic_json
+from src.posttrain.schema import require
 
 
 def load_records(run):
@@ -35,9 +31,8 @@ def panel(run, output, seed):
     require(len(arms) >= 2, "blind panel requires two benchmark arms")
     output.mkdir(parents=True, exist_ok=True)
     identity = {
-        "manifest_sha256": file_hash(run / "manifest.json"),
         "seed": seed,
-        "images": {r["sample_id"]: r["image_sha256"] for r in rows},
+        "samples": sorted(r["sample_id"] for r in rows),
     }
     marker = output / "panel.json"
     if marker.exists():
@@ -52,10 +47,6 @@ def panel(run, output, seed):
     )
     suite = {}
     for row in rows:
-        require(
-            file_hash(row["image_path"]) == row["image_sha256"],
-            "panel image bytes changed",
-        )
         destination = output / "arms" / row["arm"] / f"{row['prompt']['id']}.png"
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(row["image_path"], destination)
@@ -98,50 +89,31 @@ def join(run, answer_key, ballot):
     )
     scores = {}
     by_sample = {r["sample_id"]: r for r in rows}
-    specs = {s["id"]: decode(Scorer, s) for s in config["scorers"]}
-    for path in sorted((run / "scores").glob("*/*.json")):
+    for path in sorted((run / "scores").glob("*.json")):
         row = json.loads(path.read_text())
-        score_key = (row["sample_id"], row["scorer"])
+        sample_id = row["sample_id"]
         require(
-            score_key not in scores
-            and score_key[0] in by_sample
-            and score_key[1] in specs,
-            "unexpected or duplicate joined score",
+            sample_id in by_sample and sample_id not in scores,
+            "unknown or duplicate score",
         )
-        spec = specs[score_key[1]]
-        validate_results(
-            [request_for_record(by_sample[score_key[0]], spec)],
-            [parse_score(row)],
-            spec.outputs,
-            complete=False,
-        )
-        scores[score_key] = row
-    directions = {
-        f"{s['id']}.{c['name']}": c["direction"]
-        for s in config["scorers"]
-        for c in s["outputs"]
-    }
+        scores[sample_id] = row
     reference = config["arms"][0]["name"]
     result = {
-        "manifest_sha256": file_hash(run / "manifest.json"),
-        "answer_key_sha256": file_hash(answer_key),
-        "ballot_sha256": file_hash(ballot),
         "human": tally,
         "comparisons": {},
     }
     for arm in [a["name"] for a in config["arms"][1:]]:
         for channel in config["evaluation"]["channels"]:
-            scorer, metric = channel.split(".")
             joined, missing = [], []
             for prompt_id in sorted(prompt_ids):
                 pair = [indexed[(prompt_id, a)] for a in (reference, arm)]
-                scored = [scores.get((r["sample_id"], scorer)) for r in pair]
-                if any(s is None or s["status"] != "ok" for s in scored):
+                scored = [scores.get(r["sample_id"]) for r in pair]
+                if any(s is None or channel not in s["values"] for s in scored):
                     missing.append(prompt_id)
                     continue
                 winner = tally["per_prompt"][prompt_id]
-                raw = scored[1]["values"][metric] - scored[0]["values"][metric]
-                improvement = raw if directions[channel] == "higher" else -raw
+                raw = scored[1]["values"][channel] - scored[0]["values"][channel]
+                improvement = raw
                 # A ballot that chooses another arm cannot order this pair.
                 human = (
                     0

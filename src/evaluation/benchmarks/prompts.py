@@ -60,3 +60,25 @@ def load_evaluation_prompts(config, suite):
         for row in rows
         for draw in range(settings.draws_per_prompt)
     ]
+
+
+def load_rubric_prompts(path, shapes, count, seed):
+    import random
+
+    from src.posttrain.prompts import load_rollout_prompts
+
+    rows = load_rollout_prompts(path, shapes)
+    rng = random.Random(seed)
+    rows = rng.sample(rows, min(count, len(rows)))
+    return [
+        {
+            **row,
+            "seed": int(
+                hashlib.sha256(f"rubric-eval:{seed}:{row['id']}".encode()).hexdigest()[
+                    :15
+                ],
+                16,
+            ),
+        }
+        for row in rows
+    ]

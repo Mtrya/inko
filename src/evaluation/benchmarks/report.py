@@ -31,8 +31,8 @@ def build_report(records, scores, config, *, suite="development"):
     arms = [a.name for a in config.arms]
     indexed = {}
     for score in scores:
-        key = (score["sample_id"], score["scorer"])
-        if key in indexed or key[0] not in samples:
+        key = score["sample_id"]
+        if key in indexed or key not in samples:
             raise ValueError("duplicate or unexpected score in report")
         indexed[key] = score
     report = {
@@ -43,14 +43,14 @@ def build_report(records, scores, config, *, suite="development"):
         "uncertainty": "Paired cluster bootstrap by scene; conditional on these fixed noise seeds.",
     }
     for channel in config.evaluation.channels:
-        scorer, metric = channel.split(".")
+        metric = channel
         by_arm = {}
         for arm in arms:
             selected = [r for r in records if r["arm"] == arm]
             good, failures = {}, []
             for record in selected:
-                result = indexed.get((record["sample_id"], scorer))
-                if result is None or result["status"] != "ok":
+                result = indexed.get(record["sample_id"])
+                if result is None or channel not in result["values"]:
                     failures.append(record["prompt"]["id"])
                 else:
                     good[record["prompt"]["id"]] = (
@@ -103,6 +103,24 @@ def build_report(records, scores, config, *, suite="development"):
                     else "incomplete; no win claim"
                 ),
             }
+            if channel.startswith("rubric."):
+                values = [by_arm[arm][p][1] for p in common]
+                category = channel.split(".", 1)[1]
+                orders = [
+                    indexed[r["sample_id"]]["judgment"]["orders"]
+                    for r in records
+                    if r["arm"] == arm and r["prompt"]["id"] in common
+                ]
+                report["paired"][arm][channel].update(
+                    wins=sum(v == 1 for v in values),
+                    ties=sum(v == 0.5 for v in values),
+                    losses=sum(v == 0 for v in values),
+                    win_credit=statistics.mean(values) if values else None,
+                    order_disagreements=sum(
+                        a[category]["winner"] != b[category]["winner"]
+                        for a, b in orders
+                    ),
+                )
     return report
 
 

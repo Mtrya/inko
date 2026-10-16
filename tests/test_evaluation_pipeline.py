@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 import pytest
 
 from src.evaluation.benchmarks.report import build_report, paired_interval
@@ -16,7 +14,6 @@ def _shutdown_worker(incoming, ready, path):
 
 def test_completed_workers_exit_normally(tmp_path):
     import multiprocessing as mp
-    from types import SimpleNamespace
 
     from src.evaluation.benchmarks.workers import ResidentWorkers
 
@@ -27,8 +24,6 @@ def test_completed_workers_exit_normally(tmp_path):
         target=_shutdown_worker, args=(incoming, ready, str(evidence))
     )
     workers = ResidentWorkers.__new__(ResidentWorkers)
-    workers.services = SimpleNamespace(close=lambda: None)
-    workers.executor = None
     workers.processes = [process]
     workers.incoming, workers.outgoing = incoming, outgoing
     process.start()
@@ -46,59 +41,33 @@ class Workers:
         self.scored = {}
         self.corrupt = corrupt
 
-    def submit(self, role, task):
+    def submit(self, task):
         key = task["task_id"]
-        if role == "learner":
-            self.unfinished.add(key)
-            self.max_unfinished = max(self.max_unfinished, len(self.unfinished))
-            record = {
-                "sample_id": task["sample_ids"][0],
-                "prompt": {"text": "text"},
-                "image_path": "image",
-                "image_sha256": "bytes",
-            }
-            result = {"records": [record], "timings": {}}
-        else:
-            result = {
-                "scores": [
-                    {
-                        "sample_id": "wrong"
-                        if self.corrupt
-                        else task["records"][0]["sample_id"]
-                    }
-                ]
-            }
+        self.unfinished.add(key)
+        self.max_unfinished = max(self.max_unfinished, len(self.unfinished))
+        record = {"sample_id": "wrong" if self.corrupt else task["sample_ids"][0]}
         self.messages.append(
-            {"event": "result", "task_id": key, "role": role, "result": result}
+            {
+                "event": "result",
+                "task_id": key,
+                "role": "learner",
+                "result": {"records": [record], "timings": {}},
+            }
         )
 
     def receive(self, deadline):
         # Reverse order intentionally exercises completion-order independence.
         message = self.messages.pop()
-        if message["role"] != "learner":
-            key = message["task_id"]
-            self.scored.setdefault(key, set()).add(message["role"])
-            if len(self.scored[key]) == 2:
-                self.unfinished.remove(key)
+        self.unfinished.remove(message["task_id"])
         return message
 
 
-def test_bound_is_held_until_both_scores_return(sampling_config):
-    workers = Workers()
-    generated, scored = [], []
+def test_generation_bound_and_out_of_order_completion(sampling_config):
+    workers, generated = Workers(), []
     tasks = [{"task_id": str(i), "sample_ids": [str(i)]} for i in range(7)]
-    config = replace(
-        sampling_config,
-        scorers=(
-            sampling_config.scorers[0],
-            replace(sampling_config.scorers[0], id="another"),
-        ),
-    )
-    run_pipeline(
-        tasks, workers, config, generated.extend, lambda role, rows: scored.extend(rows)
-    )
-    assert workers.max_unfinished <= 2
-    assert len(generated) == 7 and len(scored) == 14
+    run_pipeline(tasks, workers, sampling_config, generated.extend)
+    assert workers.max_unfinished == 2
+    assert {r["sample_id"] for r in generated} == {str(i) for i in range(7)}
     assert not workers.unfinished
 
 
@@ -110,7 +79,6 @@ def test_wrong_sample_response_aborts_pipeline(sampling_config):
             Workers(corrupt=True),
             config,
             lambda rows: None,
-            lambda role, rows: None,
         )
 
 
@@ -125,12 +93,61 @@ def test_paired_interval_and_missing_score_coverage(sampling_config):
     scores = [
         {
             "sample_id": "reference",
-            "scorer": "unfamiliar",
-            "status": "ok",
-            "values": {"fit": 1},
+            "values": {"hpsv3.mu": 1},
         }
     ]
     report = build_report(records, scores, config)
-    comparison = report["paired"]["candidate"]["unfamiliar.fit"]
+    comparison = report["paired"]["candidate"]["hpsv3.mu"]
     assert comparison["paired"] == 0 and comparison["expected"] == 1
     assert not comparison["coverage_complete"] and comparison["mean_delta"] is None
+
+
+def test_rubric_report_distinguishes_agreed_ties_from_order_disagreement(
+    sampling_config,
+):
+    from dataclasses import replace
+
+    config = replace(
+        sampling_config,
+        evaluation=replace(
+            sampling_config.evaluation, channels=("rubric.content_alignment",)
+        ),
+    )
+    records, scores = [], []
+    for prompt, credit, winners in (
+        ("win", 1, ("candidate", "candidate")),
+        ("tie", 0.5, (None, None)),
+        ("disagreement", 0.5, ("reference", "candidate")),
+        ("loss", 0, ("reference", "reference")),
+    ):
+        for arm in ("reference", "candidate"):
+            sample = f"{prompt}:{arm}"
+            records.append(
+                {
+                    "sample_id": sample,
+                    "arm": arm,
+                    "prompt": {"id": prompt, "scene_id": prompt},
+                }
+            )
+            scores.append(
+                {
+                    "sample_id": sample,
+                    "values": {
+                        "rubric.content_alignment": (
+                            credit if arm == "candidate" else 1 - credit
+                        )
+                    },
+                    "judgment": {
+                        "orders": [
+                            {"content_alignment": {"winner": winner}}
+                            for winner in winners
+                        ]
+                    },
+                }
+            )
+    result = build_report(records, scores, config)["paired"]["candidate"][
+        "rubric.content_alignment"
+    ]
+    assert (result["wins"], result["ties"], result["losses"]) == (1, 2, 1)
+    assert result["win_credit"] == 0.5
+    assert result["order_disagreements"] == 1

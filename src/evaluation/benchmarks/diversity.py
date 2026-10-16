@@ -1,12 +1,10 @@
 """All-pairs LPIPS across independent seeds of the same exact caption."""
 
-import inspect
 import statistics
 from collections import defaultdict
 from itertools import combinations
 from pathlib import Path
 
-from src.posttrain.records import file_hash
 from src.posttrain.schema import require
 
 
@@ -22,13 +20,11 @@ def prompt_key(prompt):
 
 def metric_identity(config, assets):
     import torchmetrics
-    from torchmetrics.functional.image.lpips import _LPIPS
 
     require(config.asset in assets["metrics"], "metric asset is not provisioned")
     return {
         "asset": config.asset,
         "torchmetrics_version": torchmetrics.__version__,
-        "implementation_sha256": file_hash(inspect.getfile(_LPIPS)),
     }
 
 
@@ -102,10 +98,6 @@ def measure_diversity(records, config, assets):
     model.eval().requires_grad_(False)
 
     def image_tensor(record):
-        require(
-            file_hash(record["image_path"]) == record["image_sha256"],
-            "diversity image bytes changed",
-        )
         with Image.open(record["image_path"]) as picture:
             array = np.array(picture.convert("RGB"), dtype=np.float32, copy=True)
         return torch.from_numpy(array).permute(2, 0, 1) / 127.5 - 1

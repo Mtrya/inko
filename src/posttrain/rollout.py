@@ -112,7 +112,11 @@ def collect_art(
         )
         for key in sample_ids
     ]
-    shape = (16, c.height // 8, c.width // 8)
+    shapes = {c.shapes[p["aspect"]] for p in prompts}
+    if len(shapes) != 1:
+        raise ValueError("collection microbatch requires a common image shape")
+    height, width = shapes.pop()
+    shape = (16, height // 8, width // 8)
     shift = (
         max(1, ((shape[1] * shape[2] / 4) / 256) ** 0.5) if c.shift == "shape" else 1
     )

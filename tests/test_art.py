@@ -129,7 +129,6 @@ def test_art_windows_are_balanced_and_independent_of_microbatch_packing(
         collection=replace(
             training_config.collection, prompts_per_round=12, draws_per_prompt=8
         ),
-        execution=replace(training_config.execution, learner_devices=tuple(range(12))),
     )
     rng_before = torch.get_rng_state().clone()
     for rank in range(12):
@@ -194,7 +193,7 @@ def test_round_guidance_groups_by_draw_slot_not_prompt_identity(training_config)
         for slot in range(2)
         for draw in range(2)
     ]
-    guidance = round_guidance(config, rollouts, rewards)
+    guidance = round_guidance(config, rollouts, rewards, [(2,), (2,)])
     # Slot 0: endpoints (1,0),(0,1) with rewards 0,1 give covariance
     # (-0.5,0.5), MAD 0.5, signal (-1,1) and unit-RMS direction (-1,1).
     # Slot 1: endpoints (1,1),(2,1) with rewards 0,2 give covariance (1,0),
@@ -375,7 +374,7 @@ def test_collection_caches_aligned_trajectory(new_roles, training_config, small_
     rollout = collect_art(
         roles.student_field,
         config,
-        [{"id": "p0"}],
+        [{"id": "p0", "aspect": "1:1"}],
         ["0:0:0"],
         [0],
         0,
@@ -421,7 +420,11 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
     torch.set_num_threads(1)
     torch.manual_seed(10)
     config = replace(
-        training_config, student=replace(training_config.student, mode=mode)
+        training_config,
+        student=replace(training_config.student, mode=mode),
+        collection=replace(
+            training_config.collection, shapes={"1:1": (16, 16), "1:2": (32, 16)}
+        ),
     )
     roles = new_roles(config, small_model())
     cond = (torch.randn(1, 1, 1024), torch.randn(1, 1024), torch.ones(1, 1))
@@ -429,7 +432,7 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
         collect_art(
             roles.student_field,
             config,
-            [{"id": f"p{slot}"}],
+            [{"id": f"p{slot}", "aspect": "1:1" if slot == 0 else "1:2"}],
             [f"0:{slot}:{draw}"],
             [slot * config.collection.draws_per_prompt + draw],
             0,
@@ -448,10 +451,11 @@ def test_art_round_updates_two_disjoint_windows_and_round_trips_state(
             for index, rollout in enumerate(rollouts)
             for key in rollout.sample_ids
         },
+        [(16, 2, 2), (16, 4, 2)],
     )
     assert isinstance(guidance, GroupGuidance)
     assert guidance.active.tolist() == [True, True]
-    assert guidance.directions.shape == (2, 16, 2, 2)
+    assert [tuple(d.shape) for d in guidance.directions] == [(16, 2, 2), (16, 4, 2)]
     no_anchor = replace(config, art=ART(reference_coefficient=0.0))
     assert new_roles(no_anchor, small_model()).reference is None
     state = TrainingState(config, roles, None, Clock())
@@ -544,7 +548,7 @@ def test_art_reward_barrier_returns_the_combined_rewards(tmp_path, training_conf
     )
 
     output, attempt, step = tmp_path, "a", 0
-    local = [{"sample_id": "0:0:0"}, {"sample_id": "0:0:1"}]
+    local = ["0:0:0", "0:0:1"]
     packet = {
         "step": step,
         "policy_version": step,
@@ -558,18 +562,23 @@ def test_art_reward_barrier_returns_the_combined_rewards(tmp_path, training_conf
     assert values == {"0:0:0": 1.0, "0:0:1": -1.0, "0:1:0": 0.5, "0:1:1": -0.5}
     assert reward == packet["reward"]
     with pytest.raises(ValueError, match="missing local reward"):
-        wait_for_rewards(
-            training_config, output, attempt, step, [{"sample_id": "0:9:9"}]
-        )
+        wait_for_rewards(training_config, output, attempt, step, ["0:9:9"])
 
 
 def test_training_config_rejects_invalid_collection_and_anchor(training_config):
-    with pytest.raises(ValueError, match="two update windows"):
-        replace(
-            training_config,
-            collection=replace(
-                training_config.collection, prompts_per_round=3, draws_per_prompt=3
+    from src.posttrain.config import training_contract
+
+    with pytest.raises(ValueError, match="even number of draws"):
+        training_contract(
+            replace(
+                training_config,
+                collection=replace(
+                    training_config.collection, prompts_per_round=3, draws_per_prompt=3
+                ),
             ),
+            [],
+            1,
+            {},
         )
     with pytest.raises(ValueError, match="two draws"):
         replace(

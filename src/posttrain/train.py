@@ -27,8 +27,9 @@ def launch(
     assets_path,
     track=False,
 ):
-    from .rewards import score_ready_round
-    from .scoring.lifecycle import Services, isolated_environment
+    from .rewards import RoundScores
+    from .scoring.client import ScoreClient
+    from .scoring.lifecycle import isolated_environment
     from .tracking import Tracker, TrainingMetrics
 
     output.mkdir(parents=True, exist_ok=True)
@@ -69,13 +70,11 @@ def launch(
             environment["HCCL_DETERMINISTIC"] = (
                 "true" if config.execution.deterministic_algorithms else "false"
             )
-        services = Services(
-            config.scorers,
-            assets.get("services", {}),
-            output,
-            config.execution.learner_devices,
-            config.execution.startup_timeout,
-        )
+        client = ScoreClient(config.scoring, assets["scoring"])
+        active = output / "active_collection.json"
+        if active.exists():
+            client.release(json.loads(active.read_text())["id"])
+            active.unlink()
         next_score_round = 0
         saved = None
         if resume:
@@ -101,12 +100,11 @@ def launch(
                 tracker = Tracker(
                     output, config_path.stem, resume=resume, config=asdict(config)
                 ).__enter__()
-                telemetry = TrainingMetrics(tracker, config, output, attempt, saved)
-            services.__enter__()
-            atomic_json(
-                output / "service_startup" / f"{attempt}.json", services.startup
-            )
-            for rank in range(len(config.execution.learner_devices)):
+                telemetry = TrainingMetrics(
+                    tracker, config, output, attempt, contract["world_size"], saved
+                )
+            scores = RoundScores(config, client, output, attempt, next_score_round)
+            for rank in range(contract["world_size"]):
                 log = (output / f"{attempt}-learner-{rank:03d}.log").open("w")
                 logs.append(log)
                 argv = [
@@ -138,16 +136,10 @@ def launch(
             while any(p.poll() is None for p in processes):
                 if telemetry is not None:
                     telemetry.poll()
-                services.check()
-                while score_ready_round(
-                    config,
-                    services,
-                    output,
-                    attempt,
-                    next_score_round,
-                    on_scored=None if tracker is None else tracker.scoring,
+                while scores.poll(
+                    on_scored=None if tracker is None else tracker.scoring
                 ):
-                    next_score_round += 1
+                    pass
                 for rank, process in enumerate(processes):
                     if process.poll() is not None:
                         continue
@@ -167,6 +159,14 @@ def launch(
                             (output / "rounds").glob(
                                 f"{attempt}-round-*-rank-{rank:03d}.json"
                             )
+                        )
+                        progress.extend(
+                            p
+                            for p in (
+                                output / "progress" / f"{attempt}-rank-{rank:03d}.json",
+                                output / "progress" / f"{attempt}-scoring.json",
+                            )
+                            if p.exists()
                         )
                         latest = max(
                             [
@@ -203,7 +203,9 @@ def launch(
                     process.wait()
             for log in logs:
                 log.close()
-            services.close()
+            if active.exists():
+                client.release(json.loads(active.read_text())["id"])
+                active.unlink()
             if tracker is not None:
                 tracker.__exit__(*error)
     return {
@@ -233,28 +235,27 @@ def main():
     parser.add_argument("--attempt")
     args = parser.parse_args()
     config = load_training_config(args.config)
-    from src.evaluation.benchmarks.prompts import load_prompts
+    from .config import training_contract
+    from .prompts import load_rollout_prompts
 
-    from .config import REPO, training_contract
-
-    prompts = load_prompts(
-        REPO / config.collection.prompts,
-        {"1:1": (config.collection.height, config.collection.width)},
+    assets = json.loads(args.assets.read_text()) if args.assets else None
+    prompts = (
+        load_rollout_prompts(assets["rollout"], config.collection.shapes)
+        if assets
+        else None
     )
     if args.validate_only:
         print(
             json.dumps(
                 {
                     "valid": True,
-                    "learner_count": len(config.execution.learner_devices),
-                    "prompts": len(prompts),
+                    "prompts": len(prompts) if prompts is not None else None,
                 }
             )
         )
         return
     if not args.assets or not args.output:
         parser.error("--assets and --output are required")
-    assets = json.loads(args.assets.read_text())
     output = args.output.resolve()
     stop = args.stop_after if args.stop_after is not None else config.training.rounds
     require(0 < stop <= config.training.rounds, "invalid stop round")
@@ -274,7 +275,18 @@ def main():
             args.attempt,
         )
     else:
-        contract = training_contract(config, prompts)
+        from src.utils.device import device_count
+
+        from .scoring.client import ScoreClient
+
+        info = ScoreClient(config.scoring, assets["scoring"]).info()
+        require(
+            {c.channel for c in config.rewards.channels} <= set(info["channels"]),
+            "scoring service does not supply required rewards",
+        )
+        contract = training_contract(
+            config, prompts, device_count(assets["device_type"]), info["semantics"]
+        )
         print(
             json.dumps(
                 launch(

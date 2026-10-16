@@ -107,7 +107,7 @@ def losses(
 
 @dataclass
 class GroupGuidance:
-    directions: torch.Tensor  # [groups, *latent] unit RMS where active, else zero
+    directions: tuple[torch.Tensor, ...]  # Per-group latent shape; unit RMS or zero
     magnitudes: torch.Tensor  # [groups] one where active, else zero
     active: torch.Tensor  # [groups] bool
 
@@ -134,7 +134,7 @@ def group_guidance(
     r = rewards.detach().float().reshape(-1)
     index = groups.reshape(-1)
     require(
-        x.ndim == 2 and x.shape[0] > 0 and x.shape[0] == r.numel() == index.numel(),
+        x.ndim == 2 and x.shape[0] == r.numel() == index.numel(),
         "guidance needs one reward and group per endpoint",
     )
     require(
@@ -143,8 +143,10 @@ def group_guidance(
     )
     require(
         index.dtype in (torch.int32, torch.int64)
-        and int(index.min()) >= 0
-        and int(index.max()) < group_count,
+        and (
+            index.numel() == 0
+            or (int(index.min()) >= 0 and int(index.max()) < group_count)
+        ),
         "invalid guidance group index",
     )
     require(
@@ -204,34 +206,62 @@ def group_guidance(
     }
 
 
-def round_guidance(config, rollouts, rewards, *, reduce=None):
+def round_guidance(config, rollouts, rewards, group_shapes, *, reduce=None):
     """Guidance for one ART round from this rank's rollouts and the round rewards.
 
     A draw's group is its collection slot, `draw_index // draws_per_prompt`:
     prompt groups never key on prompt text, so a prompt repeated within one
     round still yields two independent groups.
     """
-    ids = [key for r in rollouts for key in r.sample_ids]
-    require(all(key in rewards for key in ids), "missing local reward for the guidance")
     draws = config.collection.draws_per_prompt
-    endpoints = torch.cat([r.terminal.flatten(1) for r in rollouts]).float()
-    stats = group_guidance(
-        endpoints,
-        torch.tensor([rewards[key] for key in ids], device=endpoints.device),
-        torch.tensor(
-            [draw // draws for r in rollouts for draw in r.draw_indices],
-            device=endpoints.device,
-        ),
-        config.collection.prompts_per_round,
-        expected_group_size=draws,
-        reduce=reduce,
+    require(
+        len(group_shapes) == config.collection.prompts_per_round,
+        "one latent shape required per prompt group",
     )
-    shape = (-1, *rollouts[0].terminal.shape[1:])
-    return GroupGuidance(
-        stats["directions"].reshape(shape),
-        stats["magnitudes"],
-        stats["active"],
-    )
+    device = rollouts[0].terminal.device
+    directions = [None] * len(group_shapes)
+    magnitudes = torch.zeros(len(group_shapes), device=device)
+    active = torch.zeros(len(group_shapes), dtype=torch.bool, device=device)
+    # All ranks know the selected prompt shapes, including buckets absent locally.
+    for shape in sorted(set(group_shapes)):
+        slots = [i for i, s in enumerate(group_shapes) if s == shape]
+        indices = {slot: i for i, slot in enumerate(slots)}
+        endpoints, values, groups = [], [], []
+        for rollout in rollouts:
+            for i, draw in enumerate(rollout.draw_indices):
+                slot = draw // draws
+                if slot not in indices:
+                    continue
+                require(
+                    tuple(rollout.terminal.shape[1:]) == shape,
+                    "group latent shape changed",
+                )
+                key = rollout.sample_ids[i]
+                require(key in rewards, "missing local reward for the guidance")
+                endpoints.append(rollout.terminal[i].flatten())
+                values.append(rewards[key])
+                groups.append(indices[slot])
+        width = 1
+        for dimension in shape:
+            width *= dimension
+        x = (
+            torch.stack(endpoints).float()
+            if endpoints
+            else torch.empty((0, width), device=device)
+        )
+        stats = group_guidance(
+            x,
+            torch.tensor(values, device=device),
+            torch.tensor(groups, device=device, dtype=torch.long),
+            len(slots),
+            expected_group_size=draws,
+            reduce=reduce,
+        )
+        for i, slot in enumerate(slots):
+            directions[slot] = stats["directions"][i].reshape(shape)
+        magnitudes[slots] = stats["magnitudes"]
+        active[slots] = stats["active"]
+    return GroupGuidance(tuple(directions), magnitudes, active)
 
 
 def accumulation(model, last):

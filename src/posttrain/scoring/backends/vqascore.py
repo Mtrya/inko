@@ -3,9 +3,6 @@
 import importlib
 import sys
 
-from ..contracts import Channel
-
-OUTPUTS = (Channel("probability", "higher"),)
 SCORING_OPTIONS = {
     "question_template": 'Does this figure show "{}"? Please answer Yes or No.',
     "answer_template": "Yes",

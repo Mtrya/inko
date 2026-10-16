@@ -3,14 +3,16 @@
 Selected training recipe: DiffusionART on the 600k pretrain EMA at 896p,
 attention LoRA rank 64/alpha 64, Muon LR 1e-3, no reference anchor and
 500 collected rounds (1000 optimizer updates). Export the EMA (0.999).
-`configs/posttrain.toml` contains the full configuration. The experiment
-campaign and final breadth/held-out confirmation are complete.
+`configs/posttrain.toml` contains the full configuration. The selection campaign
+used two rewards and smaller collections; its breadth/held-out assessment is
+complete. The coming run uses 64 prompts x 16 draws and seven reward channels
+on the HF rollout pool. The execution envelope below uses the extended time budget.
 
 See the [mathematical contract](posttrain_contract.md),
 [evaluation protocol](posttrain_evaluation.md) and
 [campaign execution guide](posttrain_campaign.md).
 
-## Fixed inputs
+## Selection campaign inputs
 
 | Input | Value |
 |---|---|
@@ -140,7 +142,7 @@ internal experiment ledger.
 | `src/evaluation/benchmarks/` | Independently runnable benchmark execution and reporting |
 | `configs/posttrain.toml` | ART training and interval evaluation settings |
 | `configs/prompts/` | Tracked DrawBench and monitor suites; local `rollout.jsonl` is ignored by Git |
-| `configs/scorers/` | Per-scorer source, weights and execution limits |
+| `configs/scoring_server.toml` | All reward-model sources, weights, placement and execution limits |
 
 Training configs accept TOML or JSON with one schema; unknown or missing
 required fields fail. Optimizer settings and reward epsilon have implementation
@@ -179,23 +181,72 @@ The completed campaign used named fast/slow shadows. Current checkpoints store
 one EMA, controlled by `training.ema_decay`; the retained campaign's selected
 merged export above remains directly loadable.
 
-Score services are config-declared independent processes
-(`configs/scorers/*.toml`), started by the coordinator when the assets name a
-launch and otherwise reached as external endpoints. The client validates
-service capabilities against the declared outputs before any rollout, requires
-every channel of a round before an update, records explicit failures instead of
-zero rewards, and keeps raw per-scorer outputs alongside the mixture.
+The separate scoring service owns Qwen pairwise rubric judging, HPSv3 and
+VQAScore. Learners send encoded images as each microbatch completes. Training
+waits for all seven channels before assembling rewards and updating the student.
+Both-order decisions and reasons remain with the raw score records; parse or
+inference failures abort the collection. The [campaign guide](posttrain_campaign.md)
+contains the launch and data-preparation commands.
 
 ## Execution envelope
 
-The reference config uses 12 learner devices, microbatch 1, BF16 forward with
-FP32 parameters/optimizer state/reductions, activation checkpointing off, and
-explicit deterministic kernels plus intra-host RoCE. Learner DDP wraps only the
-student; scorers never join collectives. Startup primes each wrapper's
-reduction layout with a zero-loss backward and restores RNG before
-initialization or resume.
+Use one 16-device learner node and one 16-device scoring node. The scorer runs
+seven Qwen TP=2 replicas at concurrency 80 each, plus HPS and VQA on one device
+each with batch size two. Keep medium thinking, sampled decoding and both
+judging orders. A selective answer-masking runtime change removes full-batch
+logit transfers; the prepared Ascend environment contains it.
 
-The 896p, 20-step, 12-prompt by 8-draw envelope completed qualification
+Larger Qwen tensor parallelism and TP=1 replicas were slower. Speculative
+decoding failed under real image load, and lower thinking effort saved no
+tokens. Disabling thinking was faster but confused references with candidates
+and invented objects. Learner batch, compilation and cast-cache comparisons
+supplied no usable further speedup. Only then was collection size reduced.
+
+| Prompts x draws | Measured round time | 500 rounds before overhead |
+|---|---|---|
+| 80 x 48 | 2,531.13 s | 14.65 days |
+| 80 x 16 | 935.95 s | 5.42 days |
+| 80 x 12 | 846.54 s mean over two rounds | 4.90 days |
+| 80 x 10 | 679.26 s mean over three rounds | 3.93 days |
+| **64 x 16 selected** | **869.45 s estimated from 80 x 10** | **5.03 days estimated** |
+
+The 80 x 10 rounds took 639.95, 635.16 and 762.66 seconds; the last included
+a long final judge response. Scale their mean by 1,024/800 for the selected
+64 x 16 collection. Add seven seconds for each of 30 checkpoint publications,
+ten complete 1,000-second evaluations, ten 180-second learner starts and six
+minutes for scorer startup:
+**124.2 hours / 5.17 days**, about **3,974 NPU-hours**. With round times 20%
+longer, the estimate is **148.3 hours / 6.18 days**. Use a seven-day job limit.
+The exact 64 x 16 workload was not timed; the heavier 80 x 16 round established
+capacity, while three 80 x 10 rounds exercised the complete recovery/evaluation
+path. Neither requires another capacity run for this intermediate workload.
+
+The extended budget permits 16 draws per prompt instead of the five-day
+80 x 10 fallback. The final 64 x 16 collection uses 1,024 images per round,
+with more candidates for each prompt's reward covariance and fewer prompt groups.
+It preserves 20 steps, resolution, seven channels, 1,000 updates and both judging
+orders. Over 500 rounds it collects 512,000 images and trains 10.24 million
+trajectory sites, versus 1.92 million images and 38.4 million sites at 80 x 48.
+Final quality and sustained duration remain to be measured in the monitored run.
+
+Learners use microbatch 4, BF16 forward with FP32 parameters/optimizer state/
+reductions, activation checkpointing off, deterministic kernels and intra-host
+RoCE. DDP wraps only the student. Startup primes each wrapper's reduction
+layout with a zero-loss backward and restores RNG before initialization or
+resume. The 80 x 10 qualification peaked at 25.44 GiB per learner; trajectories
+occupied 23.55 GiB across all 16 learners, projecting to 30.1 GiB at 64 x 16.
+Two retained recovery states and ten interval
+exports/reports require about 60 GiB of storage. Checkpoints publish every 20
+rounds and at evaluation/final boundaries.
+
+All seven channels completed without failure in the selected rounds; all
+prompt groups supplied active guidance. The supported driver completed the
+entry/EMA benchmark path and resumed committed training through step six.
+Reviewed images were nearly unchanged, with shared base-model weaknesses in
+lettering, counting and geometry. This checks execution and gross update errors,
+not long-term reward effectiveness.
+
+The completed campaign's 896p, 20-step, 12-prompt by 8-draw envelope completed qualification
 and all recipe comparisons. The selected rank-64 run completed 500 rounds/
 1000 updates with zero skips, taking 13.3075 allocated hours
 (212.92 NPU-hours) on sixteen Ascend devices. Peak learner allocation was

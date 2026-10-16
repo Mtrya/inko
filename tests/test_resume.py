@@ -20,9 +20,7 @@ from src.posttrain.checkpoint import (
     restore_rng,
     rng_state,
 )
-from src.posttrain.records import file_hash
 from src.posttrain.rollout import PromptCursor, art_window, collect_art
-from src.posttrain.scoring.client import ScoreClient, request_for_record
 from src.posttrain.state import Clock, TrainingState
 
 
@@ -40,7 +38,7 @@ def test_committed_round_state_round_trips_through_a_checkpoint(
         collect_art(
             roles.student_field,
             config,
-            [{"id": f"p{slot}"}],
+            [{"id": f"p{slot}", "aspect": "1:1"}],
             [f"0:{slot}:{draw}"],
             [slot * 2 + draw],
             0,
@@ -52,7 +50,7 @@ def test_committed_round_state_round_trips_through_a_checkpoint(
         for draw in range(2)
     ]
     values = {r.sample_ids[0]: float(i) for i, r in enumerate(rollouts)}
-    guidance = round_guidance(config, rollouts, values)
+    guidance = round_guidance(config, rollouts, values, [(16, 2, 2), (16, 2, 2)])
     state.last_reward = values
     for window in (0, 1):
         update_art(
@@ -282,7 +280,7 @@ def test_art_skip_preserves_momentum_ema_and_updates_across_resume(
             collect_art(
                 current.roles.student_field,
                 config,
-                [{"id": f"p{prompt}"}],
+                [{"id": f"p{prompt}", "aspect": "1:1"}],
                 [f"{r}:{slot}:{draw}"],
                 [slot * 2 + draw],
                 r,
@@ -296,7 +294,7 @@ def test_art_skip_preserves_momentum_ema_and_updates_across_resume(
 
     def update(current, batches):
         rewards = {r.sample_ids[0]: float(i) for i, r in enumerate(batches)}
-        guidance = round_guidance(config, batches, rewards)
+        guidance = round_guidance(config, batches, rewards, [(16, 2, 2), (16, 2, 2)])
         assert not current.skip_inactive_art_round(guidance)
         for window in (0, 1):
             update_art(
@@ -314,7 +312,12 @@ def test_art_skip_preserves_momentum_ema_and_updates_across_resume(
 
     update(state, collect(state, cursor.take(2)))
     batches = collect(state, cursor.take(2))
-    tied = round_guidance(config, batches, {r.sample_ids[0]: 0.1 for r in batches})
+    tied = round_guidance(
+        config,
+        batches,
+        {r.sample_ids[0]: 0.1 for r in batches},
+        [(16, 2, 2), (16, 2, 2)],
+    )
     before = cpu_state(state.state_dict())
     assert state.skip_inactive_art_round(tied)
     after = state.state_dict()
@@ -381,12 +384,53 @@ def test_art_reference_penalty_remains_active_without_reward_guidance(
     assert_exact(before, state.state_dict())
 
 
+@pytest.mark.parametrize("paired", (False, True))
 def test_config_only_external_service_collection_join_report_and_resume(
-    tmp_path, monkeypatch, sampling_config
+    tmp_path, monkeypatch, sampling_config, paired
 ):
+    import base64
+    import io
+
+    categories = (
+        "content_alignment",
+        "form_structure",
+        "aesthetics",
+        "style_medium",
+        "artifacts",
+    )
+
+    class Judge:
+        def judge(self, prompt, rubric, images):
+            assert len(images) == 3
+            red = []
+            for image in images[:2]:
+                with Image.open(
+                    io.BytesIO(base64.b64decode(image.split(",", 1)[1]))
+                ) as picture:
+                    red.append(picture.getpixel((0, 0))[0])
+            return {
+                "decisions": {
+                    key: {
+                        "verdict": "A" if red[0] > red[1] else "B",
+                        "basis": "fixture verdict",
+                    }
+                    for key in categories
+                }
+            }
+
     config = sampling_config
-    spec = config.scorers[0]
-    endpoint = Endpoint(tmp_path, spec, Backend())
+    backend = Backend()
+    if paired:
+        config = replace(
+            config,
+            evaluation=replace(
+                config.evaluation,
+                channels=("hpsv3.mu", *(f"rubric.{key}" for key in categories)),
+            ),
+        )
+    endpoint = Endpoint(
+        tmp_path, {"hpsv3": backend, **({"rubric": Judge()} if paired else {})}
+    )
     artifacts = {"checkpoints": {}, "text_encoder": "encoder", "vae": "vae"}
     monkeypatch.setattr(benchmark, "verify_assets", lambda *args: artifacts)
     prompts = [
@@ -399,60 +443,56 @@ def test_config_only_external_service_collection_join_report_and_resume(
         }
     ]
 
+    if paired:
+        reference = tmp_path / "reference.jpg"
+        Image.new("RGB", (9, 7), "white").save(reference)
+        prompts[0].update(
+            reference=str(reference),
+            rubric={
+                key: [{"weight": "high", "text": "fixture criterion"}]
+                for key in categories
+            },
+        )
+
     class Workers:
         generated = 0
 
-        def __init__(self, config, assets, output, **kwargs):
+        def __init__(self, config, assets):
             self.messages, self.startup = [], []
-            self.client = ScoreClient(
-                config.scorers[0],
-                assets["services"][spec.id]["endpoints"],
-                output / "acquisition" / spec.id,
-            )
 
         def __enter__(self):
-            self.client.handshake()
             return self
 
         def __exit__(self, *args):
             pass
 
-        def submit(self, role, task):
-            if role == "learner":
-                Workers.generated += 1
-                directory = tmp_path / task["arm"].name
-                directory.mkdir(exist_ok=True)
-                image, latent = directory / "image.png", directory / "latent.pt"
-                Image.new("RGB", (8, 8), (20, 100, 200)).save(image)
-                latent.write_bytes(b"detached latent fixture")
-                result = {
-                    "records": [
-                        {
-                            "sample_id": task["sample_ids"][0],
-                            "prompt": prompts[0],
-                            "arm": task["arm"].name,
-                            "image_path": str(image),
-                            "image_sha256": file_hash(image),
-                            "latent_path": str(latent),
-                            "latent_sha256": file_hash(latent),
-                        }
-                    ],
-                    "timings": {},
-                }
-            else:
-                result = {
-                    "scores": self.client.acquire(
-                        [
-                            request_for_record(r, self.client.spec)
-                            for r in task["records"]
-                        ]
-                    )
-                }
+        def submit(self, task):
+            Workers.generated += 1
+            directory = tmp_path / task["arm"].name
+            directory.mkdir(exist_ok=True)
+            image = directory / "image.png"
+            Image.new(
+                "RGB",
+                (8, 8),
+                (200 if task["arm"].name == "candidate" else 20, 100, 200),
+            ).save(image)
+            result = {
+                "records": [
+                    {
+                        "sample_id": task["sample_ids"][0],
+                        "prompt": prompts[0],
+                        "arm": task["arm"].name,
+                        "image_path": str(image),
+                    }
+                ],
+                "timings": {},
+            }
+
             self.messages.append(
                 {
                     "event": "result",
                     "task_id": task["task_id"],
-                    "role": role,
+                    "role": "learner",
                     "result": result,
                 }
             )
@@ -461,27 +501,33 @@ def test_config_only_external_service_collection_join_report_and_resume(
             return self.messages.pop()
 
     monkeypatch.setattr(benchmark, "ResidentWorkers", Workers)
-    assets = {"services": {spec.id: {"endpoints": [endpoint.url]}}}
+    assets = {"scoring": {"endpoint": endpoint.url}}
     try:
         first = benchmark.run(config, assets, prompts, tmp_path / "run")
         second = benchmark.run(config, assets, prompts, tmp_path / "run")
         assert first == second and Workers.generated == 2
-        assert first["arms"]["reference"]["unfamiliar.fit"]["mean_on_successes"] == 0.75
-        assert first["paired"]["candidate"]["unfamiliar.fit"]["mean_delta"] == 0.0
-        # Remove only the caller's final result; durable client results survive service restart.
-        next((tmp_path / "run/scores/unfamiliar").glob("*.json")).unlink()
+        assert first["arms"]["reference"]["hpsv3.mu"]["mean_on_successes"] == 0.75
+        assert first["paired"]["candidate"]["hpsv3.mu"]["mean_delta"] == 0.0
+        if paired:
+            readout = first["paired"]["candidate"]["rubric.content_alignment"]
+            assert (
+                readout["wins"],
+                readout["ties"],
+                readout["losses"],
+                readout["win_credit"],
+            ) == (1, 0, 0, 1.0)
+        assert len(backend.calls) == 2
+        # Missing scores are reacquired without regenerating images.
+        next((tmp_path / "run/scores").glob("*.json")).unlink()
         assert benchmark.run(config, assets, prompts, tmp_path / "run") == first
         assert Workers.generated == 2
+        assert len(backend.calls) == (4 if paired else 3)
         with pytest.raises(ValueError, match="identity changed"):
             benchmark.run(
                 config, assets, [dict(prompts[0], text="another")], tmp_path / "run"
             )
         artifacts["checkpoints"] = {"candidate": "/another/model.pt"}
         with pytest.raises(ValueError, match="identity changed"):
-            benchmark.run(config, assets, prompts, tmp_path / "run")
-        artifacts["checkpoints"] = {}
-        (tmp_path / "reference/image.png").write_bytes(b"changed bytes")
-        with pytest.raises(ValueError, match="image bytes changed"):
             benchmark.run(config, assets, prompts, tmp_path / "run")
     finally:
         endpoint.close()

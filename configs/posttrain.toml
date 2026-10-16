@@ -12,15 +12,18 @@ alpha = 64.0
 targets = "attention"
 
 [collection]
-prompts = "configs/prompts/rollout.jsonl"
-prompts_per_round = 12
-draws_per_prompt = 8
-height = 896
-width = 896
+dataset = "kaupane/inko-rollout-25k"
+prompts_per_round = 64
+draws_per_prompt = 16
 # The base model's ODE quality is flat between 20 and 50 steps at CFG 1.
 steps = 20
 shift = "shape"
 text_exit_layer = 20
+
+[collection.shapes]
+"1:1" = [896, 896]
+"4:3" = [768, 1024]
+"3:4" = [1024, 768]
 
 # One optimizer update per disjoint half of the round's (draw, step) items;
 # the cached rollout prediction is the anchor, so there is no old policy.
@@ -35,12 +38,11 @@ lr = 1e-05
 muon_lr = 0.001
 
 [execution]
-learner_devices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-microbatch = 1
+microbatch = 4
 cpu_threads = 4
 collective_timeout = 600
 startup_timeout = 1800
-round_timeout = 600
+round_timeout = 3600
 precision = "bfloat16"
 activation_checkpointing = false
 intra_host_roce = true
@@ -49,7 +51,7 @@ deterministic_algorithms = true
 [training]
 seed = 1729
 rounds = 500
-checkpoint_every = 50
+checkpoint_every = 20
 checkpoint_keep_last = 2
 ema_decay = 0.999
 
@@ -58,6 +60,7 @@ every = 50
 suite = "configs/prompts/drawbench.jsonl"
 monitor_suite = "configs/prompts/monitor.jsonl"
 prompt_limit = 100
+rubric_prompt_limit = 32
 draws_per_prompt = 4
 steps = 20
 guidance = 1.0
@@ -72,39 +75,45 @@ diversity_asset = "lpips_alex"
 "4:3" = [768, 1024]
 "3:4" = [1024, 768]
 
-[[scorers]]
-id = "hpsv3"
-attempts = 2
-timeout = 600.0
-concurrency = 2
-batch_size = 2
-transport = "shared_file"
-[[scorers.outputs]]
-name = "mu"
-direction = "higher"
-[[scorers.outputs]]
-name = "log_sigma"
-direction = "lower"
+[scoring]
+timeout = 60.0
+attempts = 3
+max_pending = 4
 
-[[scorers]]
-id = "vqascore"
-attempts = 2
-timeout = 600.0
-concurrency = 2
-batch_size = 2
-transport = "shared_file"
-[[scorers.outputs]]
-name = "probability"
-direction = "higher"
+# Pairwise rubric channels keep their 0/0.5/1 scale. Auxiliary scores are
+# standardized across the round before the seven equally weighted rewards mix.
 
-# Round standardization puts both raw channel scales on one mixture scale;
-# the group advantage then normalizes within each prompt.
+[[rewards.channels]]
+channel = "rubric.content_alignment"
+weight = 0.14285714285714285
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.form_structure"
+weight = 0.14285714285714285
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.aesthetics"
+weight = 0.14285714285714285
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.style_medium"
+weight = 0.14285714285714285
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.artifacts"
+weight = 0.14285714285714285
+standardization = "none"
+
 [[rewards.channels]]
 channel = "hpsv3.mu"
-weight = 0.5
+weight = 0.14285714285714285
 standardization = "round"
 
 [[rewards.channels]]
 channel = "vqascore.probability"
-weight = 0.5
+weight = 0.14285714285714285
 standardization = "round"

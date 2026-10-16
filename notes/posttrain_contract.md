@@ -40,9 +40,14 @@ uses a separate keyed stream.
 
 ## Combined reward
 
-Scorers return raw channels; `combine_round` orients each reward channel by
-the scorer output's direction, optionally standardizes it over the round, and mixes channels
-with nonnegative weights that sum to one. Missing, failed or nonfinite required
+All seven scorer channels are higher-is-better. `combine_round` optionally
+standardizes each channel over the round, then mixes channels with nonnegative
+weights that sum to one. The selected mixture keeps the five pairwise rubric
+channels on their `1/0.5/0` scale and round-standardizes HPSv3 and VQAScore.
+Standardizing a rubric channel would amplify its remaining decisive judgments
+as ties become more frequent, changing its influence relative to other channels.
+Keeping raw labels avoids that multiplier; ART still normalizes the combined
+covariance once per prompt. Missing, failed or nonfinite required
 scores abort before any optimizer update; they never become zero rewards.
 The complete combined-reward map is admitted before guidance is constructed.
 
@@ -169,8 +174,8 @@ reference, EMA), the student optimizer and its clock,
 `last_reward`, both round counts, the prompt cursor and per-rank RNG. Files are
 fsynced before a manifest-bearing directory is atomically renamed; incomplete directories are
 never recovery points. Resume requires an unchanged training contract and
-verifies exact restoration before collecting again; work inside an uncommitted
-round is discarded and recollected.
+verifies exact restoration before collecting again; work after the latest saved
+checkpoint is discarded and recollected.
 
 ## Verification and references
 

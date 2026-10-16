@@ -6,11 +6,10 @@ import queue
 import sys
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 
 from src.posttrain.artifacts import package_versions
-from src.posttrain.scoring.client import request_for_record
-from src.posttrain.scoring.lifecycle import Services, isolated_environment
+from src.posttrain.scoring.lifecycle import isolated_environment
+from src.utils.device import device_count
 
 
 def _worker(index, config, assets, incoming, outgoing):
@@ -74,40 +73,22 @@ def _worker(index, config, assets, incoming, outgoing):
 
 
 class ResidentWorkers:
-    def __init__(self, config, assets, output, *, generate=True, score=True):
-        self.config, self.assets, self.output = config, assets, output
+    def __init__(self, config, assets):
+        self.config, self.assets = config, assets
         context = mp.get_context("spawn")
         capacity = config.execution.max_inflight_batches
         self.incoming = context.Queue(maxsize=capacity)
-        self.outgoing = context.Queue(maxsize=capacity * (len(config.scorers) + 1) + 32)
-        self.processes = (
-            [
-                context.Process(
-                    target=_worker,
-                    args=(i, config, assets, self.incoming, self.outgoing),
-                )
-                for i in config.execution.learner_devices
-            ]
-            if generate
-            else []
-        )
-        self.services = Services(
-            config.scorers if score else (),
-            assets.get("services", {}),
-            output,
-            config.execution.learner_devices,
-            config.execution.startup_timeout,
-        )
-        self.executor = None
+        self.outgoing = context.Queue(maxsize=capacity + 32)
+        self.processes = [
+            context.Process(
+                target=_worker, args=(i, config, assets, self.incoming, self.outgoing)
+            )
+            for i in range(device_count(assets["device_type"]))
+        ]
         self.startup = []
 
     def __enter__(self):
         try:
-            self.services.__enter__()
-            self.startup.extend(self.services.startup)
-            self.executor = ThreadPoolExecutor(
-                max_workers=max(1, sum(s.concurrency for s in self.config.scorers))
-            )
             for p in self.processes:
                 p.start()
             deadline = time.monotonic() + self.config.execution.startup_timeout
@@ -121,36 +102,11 @@ class ResidentWorkers:
             self.close()
             raise
 
-    def submit(self, role, task):
-        if role == "learner":
-            self.incoming.put({**task, "enqueued_at": time.perf_counter()}, timeout=5)
-            return
-        self.executor.submit(self._score, role, task, time.perf_counter())
-
-    def _score(self, role, task, enqueued):
-        try:
-            client = self.services.clients[role]
-            started = time.perf_counter()
-            requests = [request_for_record(r, client.spec) for r in task["records"]]
-            scores = client.acquire(requests)
-            self.outgoing.put(
-                {
-                    "event": "result",
-                    "role": role,
-                    "task_id": task["task_id"],
-                    "result": {"scores": scores},
-                    "service_seconds": time.perf_counter() - started,
-                    "queue_seconds": started - enqueued,
-                }
-            )
-        except BaseException:  # noqa: BLE001 - propagate acquisition failures
-            self.outgoing.put(
-                {"event": "fatal", "role": role, "error": traceback.format_exc()}
-            )
+    def submit(self, task):
+        self.incoming.put({**task, "enqueued_at": time.perf_counter()}, timeout=5)
 
     def receive(self, deadline):
         while time.monotonic() < deadline:
-            self.services.check()
             try:
                 message = self.outgoing.get(
                     timeout=min(1, max(0.01, deadline - time.monotonic()))
@@ -167,9 +123,6 @@ class ResidentWorkers:
         raise TimeoutError("pipeline task deadline exceeded")
 
     def close(self, *, graceful=False):
-        self.services.close()
-        if self.executor:
-            self.executor.shutdown(wait=True, cancel_futures=True)
         alive = [p for p in self.processes if p.pid is not None and p.is_alive()]
         if graceful:
             # Completed workers return normally so accelerator compiler children
@@ -194,77 +147,36 @@ class ResidentWorkers:
         self.close(graceful=exc[0] is None)
 
 
-def run_pipeline(tasks, workers, config, on_generated, on_scored):
-    """Overlap generation/scoring, bounding total batches until both scores join.
-
-    Tasks with existing records skip generation. Each may request only the scorer
-    results missing from a durable previous attempt. The worker interface also
-    permits deterministic mechanism tests without loading any model.
-    """
+def run_pipeline(tasks, workers, config, on_generated):
+    """Bound generation batches; the callback streams each result to scoring."""
     iterator = iter(tasks)
-    inflight, exhausted = {}, False
-    telemetry = []
-    limit = config.execution.max_inflight_batches
-    timeout = config.execution.task_timeout
-
-    def score(task, records):
-        task["phase"] = "score"
-        task["expected_samples"] = {r["sample_id"] for r in records}
-        task["waiting"] = set(
-            task.get("missing_scorers", [s.id for s in config.scorers])
-        )
-        task["deadline"] = time.monotonic() + timeout
-        for role in task["waiting"]:
-            workers.submit(role, {"task_id": task["task_id"], "records": records})
-
+    inflight, exhausted, telemetry = {}, False, []
     while inflight or not exhausted:
-        while not exhausted and len(inflight) < limit:
+        while not exhausted and len(inflight) < config.execution.max_inflight_batches:
             try:
-                task = dict(next(iterator))
+                task = next(iterator)
             except StopIteration:
                 exhausted = True
                 break
             key = task["task_id"]
             if key in inflight:
-                raise ValueError("duplicate in-flight task ID")
-            inflight[key] = task
-            if "records" in task:
-                score(task, task["records"])
-                if not task["waiting"]:
-                    del inflight[key]
-            else:
-                task.update(phase="generate", deadline=time.monotonic() + timeout)
-                workers.submit("learner", task)
+                raise ValueError("duplicate generation task ID")
+            inflight[key] = (task, time.monotonic() + config.execution.task_timeout)
+            workers.submit(task)
         if not inflight:
             continue
-        message = workers.receive(min(t["deadline"] for t in inflight.values()))
+        message = workers.receive(min(deadline for _, deadline in inflight.values()))
         if message.get("event") != "result" or message.get("task_id") not in inflight:
-            raise ValueError("unexpected worker result")
-        task = inflight[message["task_id"]]
-        role, result = message["role"], message["result"]
-        if role == "learner":
-            if task["phase"] != "generate":
-                raise ValueError("duplicate generation result")
-            if [r["sample_id"] for r in result["records"]] != task["sample_ids"]:
-                raise ValueError("generation returned different sample identities")
-            on_generated(result["records"])
-            score(task, result["records"])
-            if not task["waiting"]:
-                del inflight[task["task_id"]]
-        else:
-            if task["phase"] != "score" or role not in task["waiting"]:
-                raise ValueError("unexpected/duplicate scorer response")
-            returned = [r["sample_id"] for r in result["scores"]]
-            if (
-                len(returned) != len(set(returned))
-                or set(returned) != task["expected_samples"]
-            ):
-                raise ValueError("scorer returned different sample identities")
-            on_scored(role, result["scores"])
-            task["waiting"].remove(role)
-            if not task["waiting"]:
-                del inflight[task["task_id"]]
-        telemetry.append({k: v for k, v in message.items() if k != "result"})
-        if role == "learner":
-            telemetry[-1]["timings"] = result["timings"]
+            raise ValueError("unexpected generation result")
+        task, _ = inflight.pop(message["task_id"])
+        result = message["result"]
+        if [r["sample_id"] for r in result["records"]] != task["sample_ids"]:
+            raise ValueError("generation returned different sample identities")
+        on_generated(result["records"])
+        telemetry.append(
+            {
+                **{k: v for k, v in message.items() if k != "result"},
+                "timings": result["timings"],
+            }
+        )
     return telemetry

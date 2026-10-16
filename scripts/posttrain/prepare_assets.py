@@ -1,4 +1,4 @@
-"""Prepare one scorer and checksum manifest in an isolated asset tree."""
+"""Prepare all reward-model assets; runtime startup only loads these paths."""
 
 import argparse
 import fnmatch
@@ -10,7 +10,7 @@ from pathlib import Path
 from src.posttrain.artifacts import verify_model
 from src.posttrain.records import atomic_json
 from src.posttrain.schema import require
-from src.posttrain.scoring.config import load_service_config
+from src.posttrain.scoring.config import load_server_config
 
 
 def source_checkout(repository, destination):
@@ -61,7 +61,7 @@ def model_manifest(model, destination, *, download, source=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--config", type=Path, required=True, help="complete scorer service TOML"
+        "--config", type=Path, required=True, help="scoring server TOML"
     )
     parser.add_argument("--artifact-root", type=Path)
     parser.add_argument(
@@ -71,49 +71,39 @@ def main():
     parser.add_argument("--device-type", choices=["npu", "cuda", "cpu"], default="npu")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
-    config = load_service_config(args.config)
+    config = load_server_config(args.config)
     if args.validate_only:
-        print(json.dumps(asdict(config.capabilities), indent=2))
+        print(json.dumps(asdict(config), indent=2))
         return
     if args.output is None or (args.artifact_root is None and args.assets is None):
         parser.error("--output plus --artifact-root or --assets required")
-    if args.assets:
-        assets = json.loads(args.assets.read_text())
-    else:
-        root = args.artifact_root.resolve()
-        source = root / "source"
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source_checkout(config.semantics.source.repository, source)
-        assets = {
-            "source": str(source),
-            "weights": str(root / "weights"),
-            "device_type": args.device_type,
-        }
-        if config.semantics.backend == "hpsv3":
-            assets["backbone"] = str(root / "backbone")
-    source = Path(assets["weights"]) if args.assets and args.artifact_root else None
-    if source is not None:
-        assets["weights"] = str(args.artifact_root.resolve() / "weights")
-    assets["weights_manifest"] = model_manifest(
-        config.semantics.weights,
-        Path(assets["weights"]),
-        download=not args.assets,
-        source=source,
+    assets = (
+        json.loads(args.assets.read_text())
+        if args.assets
+        else {"device_type": args.device_type}
     )
-    if config.semantics.backend == "hpsv3":
-        source = (
-            Path(assets["backbone"]) if args.assets and args.artifact_root else None
-        )
-        if source is not None:
-            assets["backbone"] = str(args.artifact_root.resolve() / "backbone")
-        assets["backbone_manifest"] = model_manifest(
-            config.options.backbone,
-            Path(assets["backbone"]),
-            download=not args.assets,
-            source=source,
-        )
-        if Path(assets["weights"]).is_dir():
-            assets["weights"] = str(Path(assets["weights"]) / "HPSv3.safetensors")
+    for role in ("rubric", "hpsv3", "vqascore"):
+        spec = getattr(config, role)
+        existing = dict(assets.get(role, {}))
+        root = args.artifact_root.resolve() / role if args.artifact_root else None
+        prepared = dict(existing)
+        if role != "rubric" and not existing:
+            prepared["source"] = str(root / "source")
+            source_checkout(spec.source.repository, Path(prepared["source"]))
+        for field in ("weights", "backbone") if role == "hpsv3" else ("weights",):
+            model = getattr(spec, field)
+            source = Path(existing[field]) if existing else None
+            destination = root / field if root else source
+            model_manifest(
+                model,
+                destination,
+                download=not existing,
+                source=source if root and existing else None,
+            )
+            prepared[field] = str(destination)
+        if role == "hpsv3" and Path(prepared["weights"]).is_dir():
+            prepared["weights"] = str(Path(prepared["weights"]) / "HPSv3.safetensors")
+        assets[role] = prepared
     atomic_json(args.output, assets)
 
 

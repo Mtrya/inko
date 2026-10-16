@@ -6,7 +6,6 @@ from pathlib import Path
 
 import torch
 
-from src.posttrain.records import file_hash
 from src.posttrain.sampling import sample, time_grid
 from src.utils.device import peak_memory, synchronize
 
@@ -139,11 +138,6 @@ class Generator:
             temporary = image_path.with_suffix(".png.tmp")
             image.save(temporary, format="PNG")
             temporary.replace(image_path)
-            tensors = {"terminal": rollout.terminal[i].cpu()}
-            latent_path = directory / f"{prompt['id']}.pt"
-            temporary = latent_path.with_suffix(".pt.tmp")
-            torch.save(tensors, temporary)
-            temporary.replace(latent_path)
             records.append(
                 {
                     "sample_id": sample_id,
@@ -151,9 +145,6 @@ class Generator:
                     "arm": arm.name,
                     "checkpoint": asdict(arm.checkpoint),
                     "image_path": str(image_path),
-                    "image_sha256": file_hash(image_path),
-                    "latent_path": str(latent_path),
-                    "latent_sha256": file_hash(latent_path),
                     "grid": list(grid),
                     "shape": list(shape),
                     "seed": prompt["seed"],
