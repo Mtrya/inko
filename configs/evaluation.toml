@@ -52,6 +52,7 @@ judge = "Qwen2.5-VL-72B-Instruct"
 [benchmarks.qwen_image]
 seed = 42
 batch_size = 1
+processes = 8
 
 [models.dreamlite_base]
 pipeline = "DreamLitePipeline"
