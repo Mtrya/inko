@@ -2,6 +2,9 @@
 
 import argparse
 import json
+import os
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -48,16 +51,31 @@ def main():
         print(json.dumps(result, indent=2))
         return
 
-    from src.evaluation.generation.config import load_config
-    from src.evaluation.generation.run import run
+    from src.evaluation.generation.config import ExternalModel, load_config
     from src.evaluation.records import load_catalog
 
     with args.assets.open("rb") as stream:
         assets = tomllib.load(stream)
+    config = load_config(args.config)
+    model = next((m for m in config.models if m.name == args.model), None)
+    if model is None:
+        raise ValueError(f"unknown model {args.model}")
+    if isinstance(model, ExternalModel):
+        entry = assets["models"][model.asset]
+        python = str(Path(entry["python"]).absolute())
+        if python != str(Path(sys.executable).absolute()):
+            env = {**os.environ, **entry.get("env", {})}
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+            subprocess.run(
+                [python, "-m", "scripts.eval.run", *sys.argv[1:]], env=env, check=True
+            )
+            return
+    from src.evaluation.generation.run import run
+
     print(
         json.dumps(
             run(
-                load_config(args.config),
+                config,
                 assets,
                 load_catalog(args.prompts),
                 args.model,

@@ -65,7 +65,7 @@ conform to this schema. Planner estimates require device validation.
 | Command | Purpose |
 |---|---|
 | `eval.run prepare` | Materialize a released benchmark catalog with native metadata and draw seeds. |
-| `eval.run generate` | Generate Inko images from a prepared catalog; resume missing outputs without a trainer or scoring service. |
+| `eval.run generate` | Generate Inko or external-model images from a prepared catalog; resume missing outputs. |
 | `eval.run score` | Score saved images with the benchmark's official judges and aggregation. |
 | `eval.blind_panel panel` | Assemble blinded comparisons from directories of `<prompt_id>.png` images. |
 | `eval.blind_panel tally` | Count wins and ties from a completed ballot. |
@@ -84,11 +84,19 @@ package overlays for its workers. Each prompt JSONL row contains `benchmark`,
 `split`, `prompt_id`, `variant`, `text`, `metadata` (including `aspect`), and an
 explicit `seeds` array, one entry per draw. Metadata retains native benchmark fields.
 
+External models use `[models.ASSET]` entries with a local pipeline `path` and
+isolated `python` interpreter. Optional `[models.ASSET.env]` values locate caches.
+The command launches that interpreter automatically. Model entries in
+`configs/evaluation.toml` preserve native precision, dimensions and pipeline
+arguments. Sample records include token counts and truncation; execution records
+include component sizes, scheduler settings and peak device/host memory.
+
 Outputs are grouped by model, benchmark and split, with a prompt catalog,
 `samples.jsonl` and lossless images. Image paths resolve from the output root.
 Each model saves its inference settings and execution measurements. Repeating
 the command resumes missing images; changing image-affecting settings requires
-a new output directory. Later models can use the same output root.
+a new output directory. Different models can generate concurrently into the
+same output root.
 
 Benchmark commands accept `--benchmark geneval|dpg|oneig|tiif|qwen_image`:
 

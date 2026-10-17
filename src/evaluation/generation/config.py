@@ -23,6 +23,17 @@ class Arm:
 
 
 @dataclass(frozen=True)
+class ExternalModel:
+    name: str
+    pipeline: str
+    asset: str
+    precision: str
+    batch_size: int
+    shapes: dict[str, tuple[int, int]]
+    parameters: dict[str, object]
+
+
+@dataclass(frozen=True)
 class Sampling:
     precision: str
     batch_size: int
@@ -42,7 +53,7 @@ class Execution:
 class Config:
     sampling: Sampling
     execution: Execution
-    models: tuple[Arm, ...]
+    models: tuple[Arm | ExternalModel, ...]
 
     def __post_init__(self):
         validate_generation(self.sampling, self.execution, self.models)
@@ -72,6 +83,39 @@ def validate_generation(s, e, arms):
     )
     for arm in arms:
         name(arm.name)
+        if isinstance(arm, ExternalModel):
+            name(arm.asset)
+            require(
+                arm.pipeline
+                in {
+                    "DreamLitePipeline",
+                    "SanaPipeline",
+                    "PixArtSigmaPipeline",
+                    "StableDiffusion3Pipeline",
+                    "MOSSImagePipeline",
+                    "QwenImage21Pipeline",
+                },
+                "unsupported external pipeline",
+            )
+            require(
+                arm.precision in {"float16", "bfloat16", "float32"}
+                and arm.batch_size > 0
+                and bool(arm.shapes),
+                "invalid external precision/batch/shapes",
+            )
+            require(
+                all(
+                    len(shape) == 2 and all(n > 0 and n % 16 == 0 for n in shape)
+                    for shape in arm.shapes.values()
+                ),
+                "external image dimensions must be multiples of 16",
+            )
+            require(
+                type(arm.parameters.get("num_inference_steps")) is int
+                and arm.parameters["num_inference_steps"] > 0,
+                "external pipeline requires positive num_inference_steps",
+            )
+            continue
         name(arm.checkpoint.asset)
         name(arm.checkpoint.weights)
         require(
@@ -84,5 +128,12 @@ def load_config(path):
     with Path(path).open("rb") as stream:
         raw = tomllib.load(stream)
     raw.pop("benchmarks", None)
-    raw["models"] = [{"name": key, **value} for key, value in raw["models"].items()]
-    return decode(Config, raw)
+    models = tuple(
+        decode(ExternalModel if "pipeline" in value else Arm, {"name": key, **value})
+        for key, value in raw.pop("models").items()
+    )
+    if raw.keys() != {"sampling", "execution"}:
+        raise ValueError("generation requires sampling, execution and models sections")
+    return Config(
+        decode(Sampling, raw["sampling"]), decode(Execution, raw["execution"]), models
+    )

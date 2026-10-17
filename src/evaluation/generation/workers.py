@@ -3,6 +3,7 @@
 import multiprocessing as mp
 import os
 import queue
+import resource
 import sys
 import time
 import traceback
@@ -29,11 +30,19 @@ def _worker(index, sampling, execution, assets, incoming, outgoing):
     try:
         from src.utils.device import peak_memory, set_device, synchronize
 
-        from .inko import Generator
-
         started = time.perf_counter()
         device = set_device(assets["device_type"], index, execution.cpu_threads)
-        backend = Generator(sampling, assets, device)
+        details = {}
+        if "external_model" in assets:
+            from .external import Generator
+
+            model = assets["external_model"]
+            backend = Generator(model, assets["models"][model.asset], device)
+            details = backend.details()
+        else:
+            from .inko import Generator
+
+            backend = Generator(sampling, assets, device)
         synchronize(device)
         outgoing.put(
             {
@@ -42,6 +51,11 @@ def _worker(index, sampling, execution, assets, incoming, outgoing):
                 "device": index,
                 "load_seconds": time.perf_counter() - started,
                 "packages": package_versions(),
+                "peak_host_memory_bytes": resource.getrusage(
+                    resource.RUSAGE_SELF
+                ).ru_maxrss
+                * 1024,
+                **details,
             }
         )
         while True:
@@ -60,6 +74,10 @@ def _worker(index, sampling, execution, assets, incoming, outgoing):
                     "service_seconds": time.perf_counter() - started,
                     "queue_seconds": started - task["enqueued_at"],
                     "peak_memory_bytes": peak_memory(device),
+                    "peak_host_memory_bytes": resource.getrusage(
+                        resource.RUSAGE_SELF
+                    ).ru_maxrss
+                    * 1024,
                 }
             )
     except BaseException:  # noqa: BLE001 - propagate worker failures

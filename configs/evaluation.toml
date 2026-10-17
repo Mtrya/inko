@@ -1,4 +1,4 @@
-# Matched Inko inference for base and exported posttrain EMA weights.
+# Inko base/EMA use matched sampling; external models use their native recipes.
 [sampling]
 precision = "bfloat16"
 batch_size = 1
@@ -45,3 +45,122 @@ judge = "Qwen2.5-VL-72B-Instruct"
 [benchmarks.qwen_image]
 seed = 42
 batch_size = 1
+
+[models.dreamlite_base]
+pipeline = "DreamLitePipeline"
+asset = "dreamlite"
+precision = "bfloat16"
+batch_size = 1
+
+[models.dreamlite_base.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.dreamlite_base.parameters]
+num_inference_steps = 28
+guidance_scale = 3.5
+negative_prompt = ""
+max_sequence_length = 200
+
+[models.sana_06b]
+pipeline = "SanaPipeline"
+asset = "sana"
+precision = "float16"
+batch_size = 1
+
+[models.sana_06b.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.sana_06b.parameters]
+num_inference_steps = 20
+guidance_scale = 4.5
+negative_prompt = ""
+max_sequence_length = 300
+clean_caption = false
+use_resolution_binning = true
+
+[models.pixart_sigma]
+pipeline = "PixArtSigmaPipeline"
+asset = "pixart"
+precision = "float16"
+batch_size = 1
+
+[models.pixart_sigma.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.pixart_sigma.parameters]
+num_inference_steps = 20
+guidance_scale = 4.5
+negative_prompt = ""
+max_sequence_length = 300
+clean_caption = true
+use_resolution_binning = true
+eta = 0.0
+
+[models.sd35_medium]
+pipeline = "StableDiffusion3Pipeline"
+asset = "sd35"
+precision = "bfloat16"
+batch_size = 1
+
+[models.sd35_medium.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.sd35_medium.parameters]
+num_inference_steps = 40
+guidance_scale = 4.5
+negative_prompt = ""
+max_sequence_length = 512
+
+[models.moss_image_sft]
+pipeline = "MOSSImagePipeline"
+asset = "moss"
+precision = "bfloat16"
+batch_size = 1
+
+[models.moss_image_sft.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.moss_image_sft.parameters]
+num_inference_steps = 50
+guidance_scale = 3.0
+negative_prompt = ""
+max_sequence_length = 4096
+uncond_skip_layers = [22]
+
+[models.qwen_image_21]
+pipeline = "QwenImage21Pipeline"
+asset = "qwen21"
+precision = "bfloat16"
+batch_size = 1
+
+[models.qwen_image_21.shapes]
+"1:1" = [2048, 2048]
+"3:4" = [2304, 1792]
+"4:3" = [1792, 2304]
+"16:9" = [1536, 2688]
+"9:16" = [2688, 1536]
+
+[models.qwen_image_21.parameters]
+num_inference_steps = 40
+true_cfg_scale = 1.0
+use_kv_cache = true

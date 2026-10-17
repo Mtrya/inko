@@ -18,6 +18,7 @@ from src.evaluation.records import (
 from src.posttrain.records import atomic_json
 from src.utils import prompt_contract
 
+from .config import ExternalModel
 from .workers import ResidentWorkers, run_pipeline
 
 
@@ -26,31 +27,43 @@ def run(config, assets, catalog, model, output):
     if arm is None:
         raise ValueError(f"unknown model {model}")
     output = Path(output).resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    with (output / ".writer.lock").open("a") as lock:
+    directory = output / arm.name
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / ".writer.lock").open("a") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         return _run(config, assets, catalog, arm, output)
 
 
 def _run(config, assets, catalog, arm, output):
+    external = isinstance(arm, ExternalModel)
+    shapes = arm.shapes if external else config.sampling.shapes
+    batch_size = arm.batch_size if external else config.sampling.batch_size
     sampling = asdict(config.sampling)
     sampling.pop("batch_size")
-    recipe = {
-        "model": asdict(arm),
-        "sampling": sampling,
-        "weights": str(Path(assets["checkpoints"][arm.checkpoint.asset]).resolve()),
-        "text_encoder": str(Path(assets["text_encoder"]).resolve()),
-        "vae": str(Path(assets["vae"]).resolve()),
-        "conditioning": {
-            "template": prompt_contract.PROMPT_TEMPLATE,
-            "system": prompt_contract.SYSTEM_PROMPT,
-            "drop_idx": prompt_contract.DROP_IDX,
-            "max_sequence_length": prompt_contract.MAX_SEQUENCE_LENGTH,
-        },
-    }
+    recipe = (
+        {
+            "model": asdict(arm),
+            "weights": str(Path(assets["models"][arm.asset]["path"]).resolve()),
+        }
+        if external
+        else {
+            "model": asdict(arm),
+            "sampling": sampling,
+            "weights": str(Path(assets["checkpoints"][arm.checkpoint.asset]).resolve()),
+            "text_encoder": str(Path(assets["text_encoder"]).resolve()),
+            "vae": str(Path(assets["vae"]).resolve()),
+            "conditioning": {
+                "template": prompt_contract.PROMPT_TEMPLATE,
+                "system": prompt_contract.SYSTEM_PROMPT,
+                "drop_idx": prompt_contract.DROP_IDX,
+                "max_sequence_length": prompt_contract.MAX_SEQUENCE_LENGTH,
+            },
+        }
+    )
+    if external:
+        recipe["model"].pop("batch_size")
     recipe = json.loads(json.dumps(recipe))
     root = output / arm.name
-    root.mkdir(exist_ok=True)
     settings = root / "settings.json"
     if settings.exists() and json.loads(settings.read_text()) != recipe:
         raise ValueError("generation settings changed; use a new output directory")
@@ -81,7 +94,7 @@ def _run(config, assets, catalog, arm, output):
         pending, retained = {}, []
         for prompt in prompts:
             aspect = prompt["metadata"]["aspect"]
-            height, width = config.sampling.shapes[aspect]
+            height, width = shapes[aspect]
             for draw, seed in enumerate(prompt["seeds"]):
                 path = (
                     directory
@@ -141,8 +154,8 @@ def _run(config, assets, catalog, arm, output):
             append_jsonl(temporary, retained)
             temporary.replace(journal)
         for group in pending.values():
-            for offset in range(0, len(group), config.sampling.batch_size):
-                chunk = group[offset : offset + config.sampling.batch_size]
+            for offset in range(0, len(group), batch_size):
+                chunk = group[offset : offset + batch_size]
                 tasks.append(
                     {
                         "task_id": str(len(tasks)),
@@ -162,7 +175,10 @@ def _run(config, assets, catalog, arm, output):
     started = time.perf_counter()
     startup, telemetry = [], []
     if tasks:
-        with ResidentWorkers(config.sampling, config.execution, assets) as workers:
+        worker_assets = {**assets, "external_model": arm} if external else assets
+        with ResidentWorkers(
+            config.sampling, config.execution, worker_assets
+        ) as workers:
             startup = workers.startup
             telemetry = run_pipeline(tasks, workers, config.execution, generated)
     summary = {
@@ -171,7 +187,7 @@ def _run(config, assets, catalog, arm, output):
         "recovered_images": recovered,
         "wall_seconds": time.perf_counter() - started,
         "execution": asdict(config.execution),
-        "batch_size": config.sampling.batch_size,
+        "batch_size": batch_size,
         "device_type": assets["device_type"],
         "startup": startup,
         "workers": telemetry,
