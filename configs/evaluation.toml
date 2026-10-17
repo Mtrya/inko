@@ -28,3 +28,20 @@ checkpoint = {asset = "inko_posttrain", weights = "ema"}
 steps = 20
 guidance = 1.0
 shift = "shape"
+
+[benchmarks.geneval]
+seed = 42
+
+[benchmarks.dpg]
+seed = 42
+
+[benchmarks.oneig]
+seed = 42
+
+[benchmarks.tiif]
+seed = 42
+judge = "Qwen2.5-VL-72B-Instruct"
+
+[benchmarks.qwen_image]
+seed = 42
+batch_size = 1

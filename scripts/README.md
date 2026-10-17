@@ -64,7 +64,9 @@ conform to this schema. Planner estimates require device validation.
 
 | Command | Purpose |
 |---|---|
+| `eval.run prepare` | Materialize a released benchmark catalog with native metadata and draw seeds. |
 | `eval.run generate` | Generate Inko images from a prepared catalog; resume missing outputs without a trainer or scoring service. |
+| `eval.run score` | Score saved images with the benchmark's official judges and aggregation. |
 | `eval.blind_panel panel` | Assemble blinded comparisons from directories of `<prompt_id>.png` images. |
 | `eval.blind_panel tally` | Count wins and ties from a completed ballot. |
 | `eval.cfg_steps_sweep` | Generate the prompt suite across a CFG x ODE-steps grid from one checkpoint, one arm directory per cell. |
@@ -87,6 +89,38 @@ Outputs are grouped by model, benchmark and split, with a prompt catalog,
 Each model saves its inference settings and execution measurements. Repeating
 the command resumes missing images; changing image-affecting settings requires
 a new output directory. Later models can use the same output root.
+
+Benchmark commands accept `--benchmark geneval|dpg|oneig|tiif|qwen_image`:
+
+```bash
+python -m scripts.eval.run prepare --config configs/evaluation.toml \
+  --assets data/evaluation/scorers.toml --benchmark geneval \
+  --output data/evaluation/geneval.jsonl
+python -m scripts.eval.run score --config configs/evaluation.toml \
+  --assets data/evaluation/scorers.toml --benchmark geneval \
+  --images runs/evaluation --model inko_pretrain \
+  --output runs/evaluation/scores/inko_pretrain/geneval
+```
+
+The scorer asset TOML has a `[benchmarks.NAME]` table for each selected benchmark.
+Each table supplies an official checkout `source`, an isolated `python`
+interpreter, and the assets below. Optional `env` entries locate model caches.
+
+| Benchmark | Prepared catalog / draws | Additional assets |
+|---|---|---|
+| [GenEval](https://github.com/djghosh13/geneval) | Original 553 prompts / four | `detector` directory, `model_config`; OpenAI CLIP ViT-L/14 in its native cache. |
+| [DPG](https://github.com/TencentQQGYLab/ELLA/tree/main/dpg_bench) | Released 1,065 prompts / four | `model`: released mPLUG checkpoint directory. |
+| [OneIG](https://github.com/OneIG-Bench/OneIG-Benchmark) | English 1,120 prompts / four | `qwen`, `csd`, `style_encoder`, `dreamsim`, `clip_processor`, `llm2clip_vision`, `llm2clip_text`. |
+| [TIIF](https://github.com/A113N-W3I/TIIF-Bench) | Testmini 277 scenes, short and long / one per description | `base_url` for Qwen2.5-VL-72B; `ocr_python` and `ocr_options` for PaddleOCR. |
+| [Qwen-Image-Bench](https://github.com/QwenLM/Qwen-Image-Bench) | Released 1,000 IDs, English / one | `data`: released prompt JSONL; `model`: Q-Judger checkpoint directory. |
+
+Scoring constructs native layouts from saved image records. It writes
+`scores.jsonl` with the prompt, draw records, raw judgments and elapsed time.
+`summary.json` contains native aggregates and expected/evaluated prompt-dimension
+counts; `execution.jsonl` records scorer load time and peak CUDA allocation.
+Resume skips published prompt-dimension results. Missing images or scorer
+failures stop scoring before a complete summary is published. Use a new score
+directory when changing the judge or its settings; generation is independent.
 
 ## Caption production (`scripts/caption/`)
 

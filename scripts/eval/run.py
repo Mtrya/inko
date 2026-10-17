@@ -1,4 +1,4 @@
-"""Standalone evaluation generation from prepared prompt catalogs."""
+"""Prepare benchmark catalogs, generate images, and run official scorers."""
 
 import argparse
 import json
@@ -17,7 +17,36 @@ def main():
     generate.add_argument("--prompts", type=Path, required=True)
     generate.add_argument("--model", required=True)
     generate.add_argument("--output", type=Path, required=True)
+    for name in ("prepare", "score"):
+        command = commands.add_parser(name)
+        command.add_argument("--config", type=Path, required=True)
+        command.add_argument("--assets", type=Path, required=True)
+        command.add_argument(
+            "--benchmark",
+            choices=("geneval", "dpg", "oneig", "tiif", "qwen_image"),
+            required=True,
+        )
+        command.add_argument("--output", type=Path, required=True)
+        if name == "score":
+            command.add_argument("--images", type=Path, required=True)
+            command.add_argument("--model", required=True)
     args = parser.parse_args()
+
+    if args.command != "generate":
+        from src.evaluation.benchmarks.run import prepare, score
+
+        with args.config.open("rb") as stream:
+            settings = tomllib.load(stream)["benchmarks"][args.benchmark]
+        with args.assets.open("rb") as stream:
+            assets = tomllib.load(stream)["benchmarks"][args.benchmark]
+        if args.command == "prepare":
+            result = prepare(args.benchmark, settings, assets, args.output)
+        else:
+            result = score(
+                args.benchmark, settings, assets, args.model, args.images, args.output
+            )
+        print(json.dumps(result, indent=2))
+        return
 
     from src.evaluation.generation.config import load_config
     from src.evaluation.generation.run import run

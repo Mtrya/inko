@@ -83,5 +83,6 @@ def validate_generation(s, e, arms):
 def load_config(path):
     with Path(path).open("rb") as stream:
         raw = tomllib.load(stream)
+    raw.pop("benchmarks", None)
     raw["models"] = [{"name": key, **value} for key, value in raw["models"].items()]
     return decode(Config, raw)
