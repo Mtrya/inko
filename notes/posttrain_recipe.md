@@ -139,7 +139,8 @@ internal experiment ledger.
 | Path | Responsibility |
 |---|---|
 | `src/posttrain/` | ART trainer, sampling, reward transforms and score clients |
-| `src/evaluation/benchmarks/` | Independently runnable benchmark execution and reporting |
+| `src/evaluation/monitoring/` | Training diagnostics and independently runnable interval reward/LPIPS comparisons |
+| `src/evaluation/generation/` | Shared sampling and standalone image generation |
 | `configs/posttrain.toml` | ART training and interval evaluation settings |
 | `configs/prompts/` | Tracked DrawBench and monitor suites; local `rollout.jsonl` is ignored by Git |
 | `configs/scoring_server.toml` | All reward-model sources, weights, placement and execution limits |

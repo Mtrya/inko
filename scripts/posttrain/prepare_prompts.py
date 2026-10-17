@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from src.evaluation.benchmarks.prompts import normalized_text
+from src.evaluation.generation.prompts import normalized_text
 from src.posttrain.config import load_training_config
 from src.posttrain.prompts import load_rollout_prompts
 from src.posttrain.schema import name, require

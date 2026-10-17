@@ -157,7 +157,7 @@ class Tracker:
         )
 
     def evaluation(self, report, run, config, step):
-        from src.evaluation.benchmarks.monitor import scene_grids
+        from src.evaluation.monitoring.panels import scene_grids
 
         suite = report["suite"]
         metadata = json.loads(

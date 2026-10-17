@@ -185,7 +185,7 @@ continues. Each checkpoint produces `exports/<view>`, a directory per suite,
 a `<suite>-blind` panel and `evaluation.json`.
 
 Standalone preparation and final assessments use local sampling configs under
-`data/` with `python -m src.evaluation.benchmarks.run --config <sampling config>`.
+`data/` with `python -m src.evaluation.monitoring.run --config <sampling config>`.
 These declare `sampling`, `execution`, `evaluation`, `scoring` and `arms`.
 Each arm names its checkpoint asset, weight view, steps, guidance and shift.
 `evaluation.suite` supplies the prompt manifest for the chosen `--suite`

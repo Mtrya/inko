@@ -9,13 +9,14 @@ confirmation split remains unused.
 
 ## Evaluation ownership
 
-Benchmark loaders, execution, scoring, and reports belong in
-`src/evaluation/benchmarks/`. They may reuse score clients from `src/posttrain/`
-without importing a trainer or inheriting its reward mixture and normalization.
-Evaluation must run independently against a selected checkpoint and saved config.
+Training diagnostics and the interval reward/LPIPS comparisons belong in
+`src/evaluation/monitoring/`. They reuse the posttrain scoring client and the
+shared generators in `src/evaluation/generation/`. Training owns their cadence
+and checkpoint selection. Independent benchmark evaluators belong in
+`src/evaluation/benchmarks/` and consume saved images separately from training.
 
-Existing [prompt panels](../src/evaluation/prompt_grid.py),
-[KID evaluation](../src/evaluation/kid_eval.py), and
+Existing [prompt panels](../src/evaluation/monitoring/prompt_grid.py),
+[KID evaluation](../src/evaluation/monitoring/kid_eval.py), and
 [blind comparison tooling](../scripts/eval/blind_panel.py) are starting assets.
 Their current preprocessing and sampling scope need qualification for each new
 benchmark. Tests verify evaluator mechanics, not model quality.

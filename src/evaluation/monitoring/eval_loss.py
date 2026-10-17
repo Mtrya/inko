@@ -43,7 +43,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from ..flow.paths import shift_timesteps
+from src.flow.paths import shift_timesteps
+
 # Eval-loss caption-length bins, uniform on the log2 scale - the same scale
 # the training-time length weighting's curve lives on.  Grouping the probe
 # loss by caption length answers "is the model worse on long captions"; the
@@ -57,7 +58,7 @@ LENGTH_BINS: Tuple[Tuple[str, int, int], ...] = (
     ("513_1024", 513, 1024),
     ("1025_2048", 1025, 2048),
 )
-from ..utils.encode_text import encode_text
+from src.utils.encode_text import encode_text
 
 
 def _autocast_ctx(device: torch.device):

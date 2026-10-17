@@ -5,9 +5,10 @@ import pytest
 import torch
 
 from scripts.posttrain.run_campaign import boundaries, evaluation_due
-from src.evaluation.benchmarks.config import Arm, Checkpoint, Diversity
-from src.evaluation.benchmarks.diversity import validate_panel
-from src.evaluation.benchmarks.prompts import load_evaluation_prompts
+from src.evaluation.generation.config import Arm, Checkpoint
+from src.evaluation.monitoring.config import Diversity
+from src.evaluation.monitoring.diversity import validate_panel
+from src.evaluation.monitoring.prompts import load_evaluation_prompts
 from src.posttrain.checkpoint import inspect, publish
 from src.posttrain.config import training_contract
 from src.posttrain.records import atomic_json

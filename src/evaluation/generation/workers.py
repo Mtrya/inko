@@ -1,4 +1,4 @@
-"""Resident generation and bounded HTTP acquisition, without backend dispatch."""
+"""Resident image generation with bounded queues and process recovery."""
 
 import multiprocessing as mp
 import os
@@ -8,14 +8,15 @@ import time
 import traceback
 
 from src.posttrain.artifacts import package_versions
-from src.posttrain.scoring.lifecycle import isolated_environment
 from src.utils.device import device_count
 
 
-def _worker(index, config, assets, incoming, outgoing):
-    paths = assets["learner"]["python_paths"]
+def _worker(index, sampling, execution, assets, incoming, outgoing):
+    paths = assets.get("python_paths", [])
     sys.path[:0] = paths
-    os.environ.update(isolated_environment(paths))
+    os.environ.update(
+        HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false"
+    )
     for key in (
         "RANK",
         "WORLD_SIZE",
@@ -28,11 +29,11 @@ def _worker(index, config, assets, incoming, outgoing):
     try:
         from src.utils.device import peak_memory, set_device, synchronize
 
-        from .generation import Generator
+        from .inko import Generator
 
         started = time.perf_counter()
-        device = set_device(assets["device_type"], index, config.execution.cpu_threads)
-        backend = Generator(config, assets, device)
+        device = set_device(assets["device_type"], index, execution.cpu_threads)
+        backend = Generator(sampling, assets, device)
         synchronize(device)
         outgoing.put(
             {
@@ -73,15 +74,16 @@ def _worker(index, config, assets, incoming, outgoing):
 
 
 class ResidentWorkers:
-    def __init__(self, config, assets):
-        self.config, self.assets = config, assets
+    def __init__(self, sampling, execution, assets):
+        self.execution = execution
         context = mp.get_context("spawn")
-        capacity = config.execution.max_inflight_batches
+        capacity = execution.max_inflight_batches
         self.incoming = context.Queue(maxsize=capacity)
         self.outgoing = context.Queue(maxsize=capacity + 32)
         self.processes = [
             context.Process(
-                target=_worker, args=(i, config, assets, self.incoming, self.outgoing)
+                target=_worker,
+                args=(i, sampling, execution, assets, self.incoming, self.outgoing),
             )
             for i in range(device_count(assets["device_type"]))
         ]
@@ -91,7 +93,7 @@ class ResidentWorkers:
         try:
             for p in self.processes:
                 p.start()
-            deadline = time.monotonic() + self.config.execution.startup_timeout
+            deadline = time.monotonic() + self.execution.startup_timeout
             for _ in self.processes:
                 message = self.receive(deadline)
                 if message["event"] != "ready":
@@ -147,12 +149,12 @@ class ResidentWorkers:
         self.close(graceful=exc[0] is None)
 
 
-def run_pipeline(tasks, workers, config, on_generated):
-    """Bound generation batches; the callback streams each result to scoring."""
+def run_pipeline(tasks, workers, execution, on_generated):
+    """Bound generation batches and pass completed records to the caller."""
     iterator = iter(tasks)
     inflight, exhausted, telemetry = {}, False, []
     while inflight or not exhausted:
-        while not exhausted and len(inflight) < config.execution.max_inflight_batches:
+        while not exhausted and len(inflight) < execution.max_inflight_batches:
             try:
                 task = next(iterator)
             except StopIteration:
@@ -161,7 +163,7 @@ def run_pipeline(tasks, workers, config, on_generated):
             key = task["task_id"]
             if key in inflight:
                 raise ValueError("duplicate generation task ID")
-            inflight[key] = (task, time.monotonic() + config.execution.task_timeout)
+            inflight[key] = (task, time.monotonic() + execution.task_timeout)
             workers.submit(task)
         if not inflight:
             continue

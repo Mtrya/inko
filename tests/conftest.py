@@ -4,14 +4,11 @@ from dataclasses import replace
 import pytest
 import torch
 
-from src.evaluation.benchmarks.config import (
-    Arm,
-    Checkpoint,
+from src.evaluation.generation.config import Arm, Checkpoint, Execution, Sampling
+from src.evaluation.monitoring.config import (
     Config,
     Diversity,
     Evaluation,
-    Execution,
-    Sampling,
 )
 from src.posttrain.config import (
     ART,

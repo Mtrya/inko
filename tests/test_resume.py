@@ -8,7 +8,7 @@ from PIL import Image
 from test_scoring import Backend, Endpoint
 
 from scripts.posttrain.run_campaign import committed_checkpoints
-from src.evaluation.benchmarks import run as benchmark
+from src.evaluation.monitoring import run as benchmark
 from src.models.inko import Inko
 from src.posttrain.art import round_guidance, update_art
 from src.posttrain.checkpoint import (
@@ -457,7 +457,7 @@ def test_config_only_external_service_collection_join_report_and_resume(
     class Workers:
         generated = 0
 
-        def __init__(self, config, assets):
+        def __init__(self, sampling, execution, assets):
             self.messages, self.startup = [], []
 
         def __enter__(self):
@@ -536,8 +536,8 @@ def test_config_only_external_service_collection_join_report_and_resume(
 def test_arm_checkpoint_is_loaded_and_cached(tmp_path, monkeypatch):
     import torch
 
-    from src.evaluation.benchmarks.config import Checkpoint
-    from src.evaluation.benchmarks.generation import Generator
+    from src.evaluation.generation.config import Checkpoint
+    from src.evaluation.generation.inko import Generator
     from src.models.inko import Inko
 
     calls = []
@@ -576,7 +576,7 @@ def test_arm_checkpoint_is_loaded_and_cached(tmp_path, monkeypatch):
 
 
 def test_strict_typed_configs_reject_unknown_and_invalid_fields(sampling_config):
-    from src.evaluation.benchmarks.config import Config
+    from src.evaluation.monitoring.config import Config
     from src.posttrain.schema import decode
 
     raw = asdict(sampling_config)

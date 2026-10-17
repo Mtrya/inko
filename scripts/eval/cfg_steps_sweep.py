@@ -3,7 +3,7 @@
 Every cell (steps, guidance) regenerates the whole suite with each prompt's
 own seed, so cells stay pairwise comparable. Each cell is written as a
 blind-panel arm directory: <out>/steps050-cfg10/<prompt_id>.png. Sampling and
-decoding follow the training-time monitor (src.evaluation.prompt_grid); the
+decoding follow the training-time monitor (src.evaluation.monitoring.prompt_grid); the
 guidance combination follows src.posttrain.roles.Velocity (conditional and
 unconditional velocities are combined in FP32, and guidance 1 skips the
 unconditional forward).
@@ -81,7 +81,7 @@ def run_chunk(model, text_encoder, tokenizer, vae, vae_mean, vae_std, device,
               shapes, chunk, exit_layer, out_root):
     from src.flow.solvers import sample_ode
     from src.utils.encode_text import encode_text
-    from src.evaluation.prompt_grid import resolved_prompt_seed
+    from src.evaluation.generation.prompts import resolved_prompt_seed
 
     steps, guidance, bucket_id, batch = chunk
     h_lat, w_lat = shapes[bucket_id]
@@ -143,7 +143,7 @@ def main() -> int:
     from diffusers import AutoencoderKLQwenImage
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from src.evaluation.prompt_grid import load_prompt_plan, resolved_prompt_seed
+    from src.evaluation.generation.prompts import load_prompt_plan, resolved_prompt_seed
     from src.models.inko import Inko
     from src.utils.vae_codec import get_vae_stats
 

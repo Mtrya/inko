@@ -1,24 +1,29 @@
 """Resident benchmark generation from exported model weights."""
 
 import time
-from dataclasses import asdict
+from contextlib import nullcontext
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
+from src.flow.solvers import sample_ode
 from src.posttrain.sampling import sample, time_grid
 from src.utils.device import peak_memory, synchronize
+from src.utils.encode_text import encode_text
+
+from .prompts import resolved_prompt_seed
 
 
 class Generator:
-    def __init__(self, config, assets, device):
+    def __init__(self, sampling, assets, device):
         from diffusers import AutoencoderKLQwenImage
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         from src.utils.vae_codec import get_vae_stats
 
-        self.device, self.config = device, config
-        self.dtype = getattr(torch, config.sampling.precision)
+        self.device, self.sampling = device, sampling
+        self.dtype = getattr(torch, sampling.precision)
         self.assets = assets
         self.model = None
         self.checkpoint = None
@@ -45,7 +50,6 @@ class Generator:
             .requires_grad_(False)
         )
         self.mean, self.std = get_vae_stats(assets["vae"], device)
-        self.select_checkpoint(config.arms[0].checkpoint)
 
     def select_checkpoint(self, checkpoint):
         from src.models.inko import Inko
@@ -86,7 +90,7 @@ class Generator:
             self.text,
             self.tokenizer,
             pooling=True,
-            exit_layer=self.config.sampling.text_exit_layer,
+            exit_layer=self.sampling.text_exit_layer,
         )
         unconditional = None
         if arm.guidance != 1:
@@ -95,12 +99,12 @@ class Generator:
                 self.text,
                 self.tokenizer,
                 pooling=True,
-                exit_layer=self.config.sampling.text_exit_layer,
+                exit_layer=self.sampling.text_exit_layer,
             )
             unconditional = (u_txt, u_pooled, u_mask)
         synchronize(self.device)
         text_end = time.perf_counter()
-        height, width = self.config.sampling.shapes[prompts[0]["aspect"]]
+        height, width = self.sampling.shapes[prompts[0]["aspect"]]
         shape = (16, height // 8, width // 8)
         shift = (
             max(1.0, ((shape[1] * shape[2] / 4) / 256) ** 0.5)
@@ -129,29 +133,15 @@ class Generator:
         synchronize(self.device)
         decode_end = time.perf_counter()
         records = []
-        for i, (prompt, image, sample_id) in enumerate(
-            zip(prompts, images, task["sample_ids"], strict=True)
+        for image, record, destination in zip(
+            images, task["records"], task["image_paths"], strict=True
         ):
-            directory = Path(task["output"]) / arm.name
-            directory.mkdir(parents=True, exist_ok=True)
-            image_path = directory / f"{prompt['id']}.png"
+            image_path = Path(destination)
+            image_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = image_path.with_suffix(".png.tmp")
             image.save(temporary, format="PNG")
             temporary.replace(image_path)
-            records.append(
-                {
-                    "sample_id": sample_id,
-                    "prompt": prompt,
-                    "arm": arm.name,
-                    "checkpoint": asdict(arm.checkpoint),
-                    "image_path": str(image_path),
-                    "grid": list(grid),
-                    "shape": list(shape),
-                    "seed": prompt["seed"],
-                    "conditioning_identity": task["conditioning_identity"],
-                    "policy_version": task["policy_version"],
-                }
-            )
+            records.append({**record, "grid": list(grid), "shape": list(shape)})
         return {
             "records": records,
             "timings": {
@@ -162,3 +152,93 @@ class Generator:
             },
             "peak_memory_bytes": peak_memory(self.device),
         }
+
+
+@torch.no_grad()
+def sample_prompt_images(
+    model: torch.nn.Module,
+    vae: torch.nn.Module,
+    vae_mean: torch.Tensor,
+    vae_std: torch.Tensor,
+    text_encoder,
+    tokenizer,
+    prompts: List[Dict[str, Any]],
+    shapes: Dict[int, Tuple[int, int]],
+    *,
+    batch_size: int,
+    ode_steps: int,
+    pooling: bool,
+    device: torch.device,
+    exit_layer: Optional[int] = None,
+    amp_context: Optional[Callable[[], Any]] = None,
+) -> List[Tuple[Dict[str, Any], torch.Tensor]]:
+    """Sample one deterministic image per prompt, grouped by resolution bucket.
+
+    This is the per-prompt sampling shared by the training-time prompt grid and
+    the offline blind-panel generator, so the same checkpoint and prompt yield
+    the same noise in both: the seed is explicit in the prompt record, the
+    sampler is ``sample_ode`` (Euler) from t=0 to t=1, text conditioning is
+    ``encode_text`` and latents are decoded with the VAE's own statistics.
+
+    Each prompt must carry its ``_bucket`` (see ``load_prompt_plan``) and every
+    bucket must appear in ``shapes``.
+
+    Args:
+        vae_mean, vae_std: latent statistics from ``get_vae_stats``, already
+            cast by the caller to the dtype used for decoding.
+        amp_context: zero-argument context-manager factory wrapped around the
+            solver call (e.g. ``accelerator.autocast``); ``None`` disables
+            autocasting.
+
+    Returns:
+        ``(prompt, image)`` pairs in bucket order, image a ``[3, H, W]``
+        float32 CPU tensor in [0, 1].
+    """
+    context_factory = amp_context if amp_context is not None else nullcontext
+
+    # Group prompts by bucket for batched generation
+    by_bucket: Dict[int, List[Dict[str, Any]]] = {}
+    for prompt in prompts:
+        by_bucket.setdefault(prompt["_bucket"], []).append(prompt)
+
+    results: List[Tuple[Dict[str, Any], torch.Tensor]] = []
+    for bucket_id, bucket_prompts in sorted(by_bucket.items()):
+        h_lat, w_lat = shapes[bucket_id]
+        for start in range(0, len(bucket_prompts), batch_size):
+            chunk = bucket_prompts[start : start + batch_size]
+            txt, txt_mask, txt_pooled = encode_text(
+                [p["text"] for p in chunk],
+                text_encoder,
+                tokenizer,
+                pooling,
+                exit_layer=exit_layer,
+            )
+            noise = torch.stack(
+                [
+                    torch.randn(
+                        (16, h_lat, w_lat),
+                        generator=torch.Generator(device="cpu").manual_seed(
+                            resolved_prompt_seed(p)
+                        ),
+                    )
+                    for p in chunk
+                ]
+            ).to(device, torch.bfloat16)
+
+            def model_fn(x, t, txt=txt, txt_pooled=txt_pooled, txt_mask=txt_mask):
+                if isinstance(t, float):
+                    t = torch.tensor(t, device=x.device).expand(x.shape[0])
+                return model(x, t, txt, txt_pooled, txt_mask)
+
+            with context_factory():
+                samples = sample_ode(
+                    model_fn, noise, steps=ode_steps, t_start=0.0, t_end=1.0
+                )
+
+            samples = samples.to(dtype=torch.bfloat16)
+            samples = samples * vae_std + vae_mean
+            images = vae.decode(samples.unsqueeze(2)).sample.squeeze(2)
+            images = torch.clamp((images + 1) / 2, 0, 1).cpu().float()
+            for prompt, image in zip(chunk, images):
+                results.append((prompt, image))
+    return results

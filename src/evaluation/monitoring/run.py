@@ -10,8 +10,8 @@ from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
-from src.evaluation.benchmarks.config import load_config
-from src.evaluation.benchmarks.workers import ResidentWorkers, run_pipeline
+from src.evaluation.generation.workers import ResidentWorkers, run_pipeline
+from src.evaluation.monitoring.config import load_config
 from src.posttrain.records import atomic_json, identity
 from src.posttrain.schema import require
 from src.posttrain.scoring.client import ScoreClient, Submissions, group_metadata
@@ -176,7 +176,22 @@ def _run(config, assets, prompts, output, *, visual_only, suite, reference_cache
                         "prompts": [p for p, _ in chunk],
                         "sample_ids": [key for _, key in chunk],
                         "arm": arm,
-                        "output": str(output),
+                        "records": [
+                            {
+                                "sample_id": key,
+                                "prompt": p,
+                                "arm": arm.name,
+                                "checkpoint": asdict(arm.checkpoint),
+                                "image_path": str(output / arm.name / f"{p['id']}.png"),
+                                "seed": p["seed"],
+                                "policy_version": policies[arm.name],
+                                "conditioning_identity": conditioning,
+                            }
+                            for p, key in chunk
+                        ],
+                        "image_paths": [
+                            str(output / arm.name / f"{p['id']}.png") for p, _ in chunk
+                        ],
                         "policy_version": policies[arm.name],
                         "conditioning_identity": conditioning,
                     }
@@ -264,9 +279,16 @@ def _run(config, assets, prompts, output, *, visual_only, suite, reference_cache
             generated(list(records.values()))
         telemetry, startup = [], []
         if tasks:
-            with ResidentWorkers(config, assets) as workers:
+            with ResidentWorkers(
+                config.sampling,
+                config.execution,
+                {
+                    **assets,
+                    "python_paths": assets.get("learner", {}).get("python_paths", []),
+                },
+            ) as workers:
                 startup = workers.startup
-                telemetry = run_pipeline(tasks, workers, config, generated)
+                telemetry = run_pipeline(tasks, workers, config.execution, generated)
         if submissions:
             submissions.close()
             submissions = None

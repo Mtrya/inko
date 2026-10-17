@@ -547,7 +547,7 @@ def test_generation_only_cli_logs_panels_and_diversity(
     tmp_path, monkeypatch, sdk, sampling_config
 ):
     from scripts.posttrain import readouts
-    from src.evaluation.benchmarks import run as benchmark
+    from src.evaluation.monitoring import run as benchmark
 
     source, assets, output = (
         tmp_path / "guidance.json",
@@ -641,7 +641,7 @@ def test_monitor_grids_preserve_arm_order_variant_order_and_seeds(
     import numpy as np
     from PIL import Image
 
-    from src.evaluation.benchmarks.monitor import scene_grids
+    from src.evaluation.monitoring.panels import scene_grids
 
     monitor_records(tmp_path, ("reference", "candidate"))
     grids = scene_grids(tmp_path, tuple(reversed(sampling_config.arms)), 17)

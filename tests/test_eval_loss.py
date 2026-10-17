@@ -6,7 +6,7 @@ import torch
 from datasets import Dataset
 
 from src.dataset.length_metadata import RowLengthMetadata, sidecar_path
-from src.evaluation import eval_loss
+from src.evaluation.monitoring import eval_loss
 
 
 class KnownErrorVelocity(torch.nn.Module):

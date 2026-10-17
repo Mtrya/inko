@@ -1,0 +1,30 @@
+# Matched Inko inference for base and exported posttrain EMA weights.
+[sampling]
+precision = "bfloat16"
+batch_size = 1
+text_exit_layer = 20
+
+[sampling.shapes]
+"1:1" = [896, 896]
+"3:4" = [1024, 768]
+"4:3" = [768, 1024]
+"16:9" = [672, 1184]
+"9:16" = [1184, 672]
+
+[execution]
+max_inflight_batches = 2
+startup_timeout = 600
+task_timeout = 600
+cpu_threads = 4
+
+[models.inko_pretrain]
+checkpoint = {asset = "inko_base", weights = "ema"}
+steps = 20
+guidance = 1.0
+shift = "shape"
+
+[models.inko_posttrain]
+checkpoint = {asset = "inko_posttrain", weights = "ema"}
+steps = 20
+guidance = 1.0
+shift = "shape"

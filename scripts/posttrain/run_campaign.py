@@ -9,12 +9,13 @@ from contextlib import nullcontext
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from src.evaluation.benchmarks.config import Checkpoint, benchmark_config
-from src.evaluation.benchmarks.prompts import (
+from src.evaluation.generation.config import Arm, Checkpoint, Execution, Sampling
+from src.evaluation.monitoring.config import Config, Diversity, Evaluation
+from src.evaluation.monitoring.prompts import (
     load_evaluation_prompts,
     load_rubric_prompts,
 )
-from src.evaluation.benchmarks.run import run
+from src.evaluation.monitoring.run import run
 from src.posttrain.checkpoint import inspect
 from src.posttrain.config import load_training_config
 from src.posttrain.prompts import load_rollout_prompts
@@ -23,6 +24,40 @@ from src.posttrain.schema import require
 
 from .export import export
 from .readouts import panel
+
+
+def monitor_config(training, world_size):
+    c, e, v = training.collection, training.execution, training.evaluation
+    return Config(
+        Sampling(e.precision, e.microbatch, c.text_exit_layer, v.shapes),
+        Execution(
+            2 * world_size,
+            e.startup_timeout,
+            e.round_timeout,
+            e.cpu_threads,
+        ),
+        Evaluation(
+            v.suite,
+            v.monitor_suite,
+            v.channels,
+            v.bootstrap_seed,
+            v.bootstrap_repeats,
+            v.confidence,
+            Diversity(("development",), v.diversity_asset, 2, e.cpu_threads),
+            v.prompt_limit,
+            v.draws_per_prompt,
+        ),
+        (
+            Arm(
+                "base",
+                Checkpoint(training.initialization.asset, "initial"),
+                v.steps,
+                v.guidance,
+                v.shift,
+            ),
+        ),
+        training.scoring,
+    )
 
 
 def boundaries(config, stop_after=None):
@@ -74,7 +109,7 @@ def _evaluate_checkpoint(checkpoint, training, assets, output, tracker):
         "evaluation checkpoint training config differs",
     )
     interval = training.evaluation
-    base = benchmark_config(training, manifest["contract"]["world_size"])
+    base = monitor_config(training, manifest["contract"]["world_size"])
     exports, arms = [], list(base.arms)
     mapped = dict(assets["checkpoints"])
     for view in interval.weights:
@@ -256,7 +291,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.validate_only:
         c = load_training_config(args.config)
-        benchmark_config(c, 1)
+        monitor_config(c, 1)
         stops = list(boundaries(c, args.stop_after))
         print(
             json.dumps(

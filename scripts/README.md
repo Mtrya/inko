@@ -16,7 +16,7 @@ where the data is mounted. Platform setup and credentials are in the local
 | `posttrain.readouts` | Join a completed blind ballot to benchmark scores; report comparable pairs and scorer/human disagreement. |
 
 The single-stage DiffusionART trainer is `python -m src.posttrain.train`; the standalone evaluation
-harness is `python -m src.evaluation.benchmarks.run`. Commands, config schema
+harness is `python -m src.evaluation.monitoring.run`. Commands, config schema
 and current limits are in [the posttraining recipe](../notes/posttrain_recipe.md)
 and [campaign guide](../notes/posttrain_campaign.md).
 
@@ -64,9 +64,29 @@ conform to this schema. Planner estimates require device validation.
 
 | Command | Purpose |
 |---|---|
+| `eval.run generate` | Generate Inko images from a prepared catalog; resume missing outputs without a trainer or scoring service. |
 | `eval.blind_panel panel` | Assemble blinded comparisons from directories of `<prompt_id>.png` images. |
 | `eval.blind_panel tally` | Count wins and ties from a completed ballot. |
 | `eval.cfg_steps_sweep` | Generate the prompt suite across a CFG x ODE-steps grid from one checkpoint, one arm directory per cell. |
+
+```bash
+python -m scripts.eval.run generate --config configs/evaluation.toml \
+  --assets data/evaluation/assets.toml --prompts data/evaluation/prompts.jsonl \
+  --model inko_pretrain --output runs/evaluation
+```
+
+The local asset TOML supplies `device_type`, `text_encoder`, `vae`, and a
+`[checkpoints]` table mapping model asset names to EMA or merged export files.
+Launch with the prepared evaluation interpreter; optional `python_paths` lists
+package overlays for its workers. Each prompt JSONL row contains `benchmark`,
+`split`, `prompt_id`, `variant`, `text`, `metadata` (including `aspect`), and an
+explicit `seeds` array, one entry per draw. Metadata retains native benchmark fields.
+
+Outputs are grouped by model, benchmark and split, with a prompt catalog,
+`samples.jsonl` and lossless images. Image paths resolve from the output root.
+Each model saves its inference settings and execution measurements. Repeating
+the command resumes missing images; changing image-affecting settings requires
+a new output directory. Later models can use the same output root.
 
 ## Caption production (`scripts/caption/`)
 

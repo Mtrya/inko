@@ -153,7 +153,7 @@ def load_prompt_records(path: str) -> Dict[str, Dict[str, Any]]:
     if not source.is_file():
         raise FileNotFoundError(f"prompt suite not found: {source}")
 
-    from src.evaluation.benchmarks.prompts import load_prompts
+    from src.evaluation.generation.prompts import load_prompts
 
     rows = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
     shapes = {row.get("aspect", "1:1"): (16, 16) for row in rows}

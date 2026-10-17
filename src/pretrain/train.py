@@ -48,9 +48,9 @@ from ..dataset.mix import parse_dataset_mix, get_dataset_weights
 from ..utils.encode_text import encode_text
 from ..utils.vae_codec import get_vae_stats
 from ..flow.paths import FlowMatchingOT, shift_timesteps
-from ..evaluation.eval_loss import EvalLossProbe
-from ..evaluation.prompt_grid import grid_due, run_prompt_grid_eval
-from ..evaluation.kid_eval import run_kid_eval
+from ..evaluation.monitoring.eval_loss import EvalLossProbe
+from ..evaluation.monitoring.prompt_grid import grid_due, run_prompt_grid_eval
+from ..evaluation.monitoring.kid_eval import run_kid_eval
 from .config import load_config, flatten
 from .tracking import (
     read_tracking_record,

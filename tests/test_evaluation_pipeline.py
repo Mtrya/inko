@@ -1,7 +1,7 @@
 import pytest
 
-from src.evaluation.benchmarks.report import build_report, paired_interval
-from src.evaluation.benchmarks.workers import run_pipeline
+from src.evaluation.monitoring.report import build_report, paired_interval
+from src.evaluation.generation.workers import run_pipeline
 
 
 def _shutdown_worker(incoming, ready, path):
@@ -15,7 +15,7 @@ def _shutdown_worker(incoming, ready, path):
 def test_completed_workers_exit_normally(tmp_path):
     import multiprocessing as mp
 
-    from src.evaluation.benchmarks.workers import ResidentWorkers
+    from src.evaluation.generation.workers import ResidentWorkers
 
     ctx = mp.get_context("spawn")
     incoming, outgoing, ready = ctx.Queue(2), ctx.Queue(2), ctx.Event()
@@ -65,7 +65,7 @@ class Workers:
 def test_generation_bound_and_out_of_order_completion(sampling_config):
     workers, generated = Workers(), []
     tasks = [{"task_id": str(i), "sample_ids": [str(i)]} for i in range(7)]
-    run_pipeline(tasks, workers, sampling_config, generated.extend)
+    run_pipeline(tasks, workers, sampling_config.execution, generated.extend)
     assert workers.max_unfinished == 2
     assert {r["sample_id"] for r in generated} == {str(i) for i in range(7)}
     assert not workers.unfinished
@@ -77,7 +77,7 @@ def test_wrong_sample_response_aborts_pipeline(sampling_config):
         run_pipeline(
             [{"task_id": "a", "sample_ids": ["a"]}],
             Workers(corrupt=True),
-            config,
+            config.execution,
             lambda rows: None,
         )
 
