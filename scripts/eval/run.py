@@ -1,4 +1,4 @@
-"""Prepare benchmark catalogs, generate images, and run official scorers."""
+"""Prepare catalogs, generate images, score benchmarks and assemble reports."""
 
 import argparse
 import json
@@ -20,6 +20,14 @@ def main():
     generate.add_argument("--prompts", type=Path, required=True)
     generate.add_argument("--model", required=True)
     generate.add_argument("--output", type=Path, required=True)
+    report = commands.add_parser("report", help="CPU comparison from saved judgments")
+    report.add_argument("--config", type=Path, required=True)
+    report.add_argument("--prompts", type=Path, action="append", required=True)
+    report.add_argument("--images", type=Path, required=True)
+    report.add_argument("--scores", type=Path, required=True)
+    report.add_argument("--model", action="append", required=True)
+    report.add_argument("--pending", action="append", default=[])
+    report.add_argument("--output", type=Path, required=True)
     for name in ("prepare", "score"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path, required=True)
@@ -34,6 +42,30 @@ def main():
             command.add_argument("--images", type=Path, required=True)
             command.add_argument("--model", required=True)
     args = parser.parse_args()
+
+    if args.command == "report":
+        from src.evaluation.records import load_catalog
+        from src.evaluation.report import build
+
+        with args.config.open("rb") as stream:
+            settings = tomllib.load(stream)["report"]
+        catalog = [r for path in args.prompts for r in load_catalog(path)]
+        result = build(
+            catalog,
+            args.images,
+            args.scores,
+            args.model,
+            args.pending,
+            settings,
+            args.output,
+        )
+        print(
+            json.dumps(
+                {"benchmarks": list(result["benchmarks"]), "output": str(args.output)},
+                indent=2,
+            )
+        )
+        return
 
     if args.command != "generate":
         from src.evaluation.benchmarks.run import prepare, score

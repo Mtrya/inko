@@ -67,6 +67,7 @@ conform to this schema. Planner estimates require device validation.
 | `eval.run prepare` | Materialize a released benchmark catalog with native metadata and draw seeds. |
 | `eval.run generate` | Generate Inko or external-model images from a prepared catalog; resume missing outputs. |
 | `eval.run score` | Score saved images with the benchmark's official judges and aggregation. |
+| `eval.run report` | Assemble CPU comparison tables, coverage and paired Inko differences from saved judgments. |
 | `eval.blind_panel panel` | Assemble blinded comparisons from directories of `<prompt_id>.png` images. |
 | `eval.blind_panel tally` | Count wins and ties from a completed ballot. |
 | `eval.cfg_steps_sweep` | Generate the prompt suite across a CFG x ODE-steps grid from one checkpoint, one arm directory per cell. |
@@ -107,7 +108,7 @@ python -m scripts.eval.run prepare --config configs/evaluation.toml \
 python -m scripts.eval.run score --config configs/evaluation.toml \
   --assets data/evaluation/scorers.toml --benchmark geneval \
   --images runs/evaluation --model inko_pretrain \
-  --output runs/evaluation/scores/inko_pretrain/geneval
+  --output runs/evaluation/scores/geneval/inko_pretrain
 ```
 
 The scorer asset TOML has a `[benchmarks.NAME]` table for each selected benchmark.
@@ -173,3 +174,5 @@ Uploads include every training source and the evaluation set in the selected
 stage. `--storage-root` selects the external data/model/output tree.
 Downloads fetch the selected repository. Credentials come from `HF_TOKEN`, or
 `MS_TOKEN` / `MODELSCOPE_TOKEN_PATH` for ModelScope.
+
+Benchmark comparison reports and interpretation are in [model evaluation](../notes/model_evaluation.md).

@@ -69,9 +69,6 @@ def conditioning_lengths(pipe, model, texts):
             for text in texts
         ]
         tokenizers = [("text_encoder", pipe.tokenizer, texts, limit)]
-    elif model.pipeline == "QwenImage21Pipeline":
-        texts = [pipe.prompt_template_t2i.format(text) for text in texts]
-        tokenizers = [("text_encoder", pipe.processor.tokenizer, texts, None)]
     else:
         tokenizers = [
             ("text_encoder", pipe.tokenizer, texts, pipe.tokenizer.model_max_length),

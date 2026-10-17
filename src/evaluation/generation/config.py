@@ -93,7 +93,6 @@ def validate_generation(s, e, arms):
                     "PixArtSigmaPipeline",
                     "StableDiffusion3Pipeline",
                     "MOSSImagePipeline",
-                    "QwenImage21Pipeline",
                 },
                 "unsupported external pipeline",
             )
@@ -128,6 +127,7 @@ def load_config(path):
     with Path(path).open("rb") as stream:
         raw = tomllib.load(stream)
     raw.pop("benchmarks", None)
+    raw.pop("report", None)
     models = tuple(
         decode(ExternalModel if "pipeline" in value else Arm, {"name": key, **value})
         for key, value in raw.pop("models").items()

@@ -1,4 +1,4 @@
-# Inko base/EMA use matched sampling; external models use their native recipes.
+# External models use native recipes; Inko entries use individually selected CFG.
 [sampling]
 precision = "bfloat16"
 batch_size = 1
@@ -17,13 +17,20 @@ startup_timeout = 600
 task_timeout = 600
 cpu_threads = 4
 
+[report]
+reference = "inko_pretrain"
+comparison = "inko_posttrain"
+bootstrap_samples = 1000
+seed = 42
+
 [models.inko_pretrain]
 checkpoint = {asset = "inko_base", weights = "ema"}
 steps = 20
-guidance = 1.0
+guidance = 5.0
 shift = "shape"
 
 [models.inko_posttrain]
+# Starting candidate; select guidance with a small sweep after posttrain finishes.
 checkpoint = {asset = "inko_posttrain", weights = "ema"}
 steps = 20
 guidance = 1.0
@@ -146,21 +153,3 @@ guidance_scale = 3.0
 negative_prompt = ""
 max_sequence_length = 4096
 uncond_skip_layers = [22]
-
-[models.qwen_image_21]
-pipeline = "QwenImage21Pipeline"
-asset = "qwen21"
-precision = "bfloat16"
-batch_size = 1
-
-[models.qwen_image_21.shapes]
-"1:1" = [2048, 2048]
-"3:4" = [2304, 1792]
-"4:3" = [1792, 2304]
-"16:9" = [1536, 2688]
-"9:16" = [2688, 1536]
-
-[models.qwen_image_21.parameters]
-num_inference_steps = 40
-true_cfg_scale = 1.0
-use_kv_cache = true

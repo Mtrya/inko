@@ -275,3 +275,36 @@ def test_scoring_restart_reuses_published_judgments(tmp_path, monkeypatch):
     run.main()
     assert (tmp_path / "scores.jsonl").read_bytes().startswith(published)
     assert len(read_jsonl(tmp_path / "scores.jsonl")) == 3
+
+
+def test_upstream_processes_read_released_utf8_text(tmp_path, monkeypatch):
+    row = prompt("geneval", "original", "2", "a blue café", {}, [3])
+    source = tmp_path / "images"
+    directory = source / "model/_geneval/_original"
+    directory.mkdir(parents=True)
+    append_jsonl(directory / "prompts.jsonl", [row])
+    append_jsonl(directory / "samples.jsonl", images(source, row))
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setattr(
+        run, "adapter", lambda _: SimpleNamespace(layout=lambda groups, root: None)
+    )
+    calls = []
+
+    def subprocess(command, *, env, check):
+        assert env["PYTHONUTF8"] == "1"
+        calls.append(command[-1])
+        request = json.loads((tmp_path / "scores/request.json").read_text())
+        if "--dimension" in command:
+            append_jsonl(
+                tmp_path / "scores/scores.jsonl",
+                [{**request["groups"][0], "dimension": "detector", "native": []}],
+            )
+        else:
+            write_json(tmp_path / "scores/summary.json", {"evaluated": 1})
+
+    monkeypatch.setattr(run.subprocess, "run", subprocess)
+    result = run.score(
+        "geneval", {}, {"python": "/judge/python"}, "model", source, tmp_path / "scores"
+    )
+    assert result == {"evaluated": 1}
+    assert calls == ["detector", "--summarize"]

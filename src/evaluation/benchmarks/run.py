@@ -94,7 +94,7 @@ def score(name, settings, assets, model, images, output):
         }
         if len(done) != len(records) or done - expected:
             raise ValueError("duplicate or unexpected benchmark result")
-        env = {**os.environ, **assets.get("env", {})}
+        env = {**os.environ, **assets.get("env", {}), "PYTHONUTF8": "1"}
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
         for dimension in sorted({key[-1] for key in expected - done}):
             python = (
