@@ -71,7 +71,10 @@ python -m scripts.posttrain.prepare_prompts --config configs/posttrain.toml \
 
 The five rubric rewards encode win/tie/loss as `1/.5/0`, after merging both
 presentation orders. They use `none` standardization. HPSv3 and VQAScore use
-`round` standardization; each of the seven coefficients starts at 1/7.
+`round` standardization. The coefficients are 0.16 per rubric channel, 0.15
+for VQAScore and 0.05 for HPSv3, rebalanced from equal weights after the
+first arm's round-50 evaluation: the rubric family is the target behavior,
+while HPSv3 was the fastest-moving and most hackable direction.
 
 A round is `prompts_per_round * draws_per_prompt` samples that must divide
 evenly into two windows per visible learner. Shape-compatible microbatches may

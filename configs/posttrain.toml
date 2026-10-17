@@ -80,40 +80,44 @@ timeout = 60.0
 attempts = 3
 max_pending = 4
 
-# Pairwise rubric channels keep their 0/0.5/1 scale. Auxiliary scores are
-# standardized across the round before the seven equally weighted rewards mix.
+# Pairwise rubric channels keep their 0/0.5/1 scale and carry the target
+# behavior; auxiliary scores are round-standardized. Measured over rounds 0-53
+# of the equal-weight arm, the rubric family already held ~68% of within-group
+# direction energy; HPSv3's within-group std is only ~0.38 (85% of its variance
+# sits between prompts), yet it was the fastest-moving metric at round-50
+# evaluation. Weights: rubric 0.16 each, VQAScore 0.15, HPSv3 0.05.
 
 [[rewards.channels]]
 channel = "rubric.content_alignment"
-weight = 0.14285714285714285
+weight = 0.16
 standardization = "none"
 
 [[rewards.channels]]
 channel = "rubric.form_structure"
-weight = 0.14285714285714285
+weight = 0.16
 standardization = "none"
 
 [[rewards.channels]]
 channel = "rubric.aesthetics"
-weight = 0.14285714285714285
+weight = 0.16
 standardization = "none"
 
 [[rewards.channels]]
 channel = "rubric.style_medium"
-weight = 0.14285714285714285
+weight = 0.16
 standardization = "none"
 
 [[rewards.channels]]
 channel = "rubric.artifacts"
-weight = 0.14285714285714285
+weight = 0.16
 standardization = "none"
 
 [[rewards.channels]]
 channel = "hpsv3.mu"
-weight = 0.14285714285714285
+weight = 0.05
 standardization = "round"
 
 [[rewards.channels]]
 channel = "vqascore.probability"
-weight = 0.14285714285714285
+weight = 0.15
 standardization = "round"
