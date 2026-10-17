@@ -4,7 +4,12 @@ import re
 
 import pytest
 
-from src.posttrain.scoring.backends.rubric import RubricJudge, merge_orders, parse_lines
+from src.posttrain.scoring.backends.rubric import (
+    DRAW_BASIS,
+    RubricJudge,
+    merge_orders,
+    parse_lines,
+)
 
 FORWARD = """content_alignment|A|A has the requested tree.
 form_structure|B|B has coherent branches.
@@ -94,3 +99,61 @@ def test_judge_constrains_final_format_and_keeps_thinking(monkeypatch):
 def test_incomplete_final_block_does_not_reuse_an_earlier_draft(suffix):
     with pytest.raises(ValueError):
         parse_lines(FORWARD + suffix)
+
+
+RUBRIC = {
+    category: [{"text": "Compare visible details.", "weight": "high"}]
+    for category in (
+        "content_alignment",
+        "form_structure",
+        "aesthetics",
+        "style_medium",
+        "artifacts",
+    )
+}
+
+
+def test_judge_without_five_verdict_lines_is_a_draw(monkeypatch):
+    def completion(endpoint, route, timeout, payload):
+        return {
+            "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+            "usage": {"completion_tokens": payload["max_tokens"]},
+        }
+
+    monkeypatch.setattr("src.posttrain.scoring.client.http_json", completion)
+    result = RubricJudge("http://fixture", "judge", timeout=1, max_tokens=100).judge(
+        "A tree", RUBRIC, ["candidate-a", "candidate-b"]
+    )
+    assert {category: d["verdict"] for category, d in result["decisions"].items()} == {
+        category: "tie"
+        for category in (
+            "content_alignment",
+            "form_structure",
+            "aesthetics",
+            "style_medium",
+            "artifacts",
+        )
+    }
+    assert result["decisions"]["artifacts"]["basis"] == DRAW_BASIS
+    assert result["usage"] == {"completion_tokens": 100}
+    values, _ = merge_orders(result["decisions"], parse_lines(REVERSE), ("l", "r"))
+    assert values == [
+        {f"rubric.{category}": 0.5 for category in result["decisions"]},
+        {f"rubric.{category}": 0.5 for category in result["decisions"]},
+    ]
+
+
+def test_judge_with_unparseable_answer_is_a_draw(monkeypatch):
+    def completion(endpoint, route, timeout, payload):
+        return {
+            "choices": [{"finish_reason": "stop", "message": {"content": "no lines"}}]
+        }
+
+    monkeypatch.setattr("src.posttrain.scoring.client.http_json", completion)
+    result = RubricJudge("http://fixture", "judge", timeout=1, max_tokens=100).judge(
+        "A tree", RUBRIC, ["candidate-a", "candidate-b"]
+    )
+    assert all(
+        decision == {"verdict": "tie", "basis": DRAW_BASIS}
+        for decision in result["decisions"].values()
+    )

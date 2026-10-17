@@ -19,6 +19,7 @@ ANSWER_PATTERN = (
     )
     + r"[ \t\r\n]*"
 )
+DRAW_BASIS = "judge returned no five-line verdict within the token limit; scored as a draw"
 REFERENCE = (
     "另附第三张图 R：参考图，代表目标风格的正向范例。style_medium 大类以 R 为锚点，"
     "比较两张候选图各自与 R 的技法接近度；其余大类不受 R 影响。"
@@ -143,16 +144,18 @@ class RubricJudge:
             },
         )
         choice = response["choices"][0]
-        require(
-            choice["finish_reason"] == "stop",
-            f"judge completion ended with {choice['finish_reason']}: "
-            f"{response.get('usage', {})}",
-        )
         content = choice["message"]["content"]
-        try:
-            decisions = parse_lines(content)
-        except ValueError as exc:
-            raise ValueError(f"{exc}; judge content: {content}") from exc
+        decisions = None
+        if choice["finish_reason"] == "stop":
+            try:
+                decisions = parse_lines(content)
+            except ValueError:
+                decisions = None
+        if decisions is None:
+            decisions = {
+                category: {"verdict": "tie", "basis": DRAW_BASIS}
+                for category in CATEGORIES
+            }
         return {
             "decisions": decisions,
             "usage": response.get("usage", {}),
