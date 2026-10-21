@@ -96,7 +96,9 @@ def split_rows(rows, metadata, *, heldout, seed, excluded_texts):
     return splits, [r["id"] for group in rejected for r in group]
 
 
-def prepare(source, metadata_path, output, shapes, *, heldout, seed, benchmarks):
+def prepare(
+    source, metadata_path, output, shapes, *, heldout, seed, benchmarks, split="train"
+):
     import pyarrow.parquet as pq
 
     metadata_rows = read_jsonl(metadata_path)
@@ -105,8 +107,9 @@ def prepare(source, metadata_path, output, shapes, *, heldout, seed, benchmarks)
     output = Path(output)
     references = output / "references"
     references.mkdir(parents=True, exist_ok=True)
-    paths = sorted(Path(source).rglob("*.parquet"))
-    require(bool(paths), "no Hub parquet shards found")
+    name(split)
+    paths = sorted(Path(source).rglob(f"{split}-*.parquet"))
+    require(bool(paths), f"no Hub parquet shards found for split {split}")
     rows, seen = [], set()
     for path in paths:
         for batch in pq.ParquetFile(path).iter_batches(batch_size=32):
@@ -161,8 +164,8 @@ def prepare(source, metadata_path, output, shapes, *, heldout, seed, benchmarks)
     splits, excluded = split_rows(
         rows, metadata, heldout=heldout, seed=seed, excluded_texts=excluded_texts
     )
-    for split, selected in splits.items():
-        path = output / f"{split}.jsonl"
+    for output_split, selected in splits.items():
+        path = output / f"{output_split}.jsonl"
         with path.open("w") as stream:
             for row in sorted(selected, key=lambda r: r["id"]):
                 stream.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -221,7 +224,9 @@ def main():
         from huggingface_hub import snapshot_download
 
         source = snapshot_download(
-            config.collection.dataset, repo_type="dataset", allow_patterns="*.parquet"
+            config.collection.dataset,
+            repo_type="dataset",
+            allow_patterns=f"data/{config.collection.split}-*.parquet",
         )
     print(
         json.dumps(
@@ -233,6 +238,7 @@ def main():
                 heldout=args.heldout,
                 seed=args.seed,
                 benchmarks=args.exclude,
+                split=config.collection.split,
             ),
             ensure_ascii=False,
             indent=2,

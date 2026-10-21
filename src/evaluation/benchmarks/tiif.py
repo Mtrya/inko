@@ -101,10 +101,17 @@ def evaluate(groups, assets, settings, root, emit):
         # Make the released random template selection stable across interruption.
         random.seed(row["seeds"][0])
         text = native.format_questions_prompt(native.raw_prompt, questions)
-        response = native.generate_with_prompt(
-            text, group["samples"][0]["image_path"], client, model=settings["judge"]
-        )
-        predictions = native.extract_yes_no(response, questions)
+        # The released harness retries OutputFormatError; bound the retries.
+        for attempt in range(8):
+            response = native.generate_with_prompt(
+                text, group["samples"][0]["image_path"], client, model=settings["judge"]
+            )
+            try:
+                predictions = native.extract_yes_no(response, questions)
+                break
+            except native.OutputFormatError:
+                if attempt == 7:
+                    raise
         result = {
             "attribute": meta["type"],
             "desc": f"{row['variant']}_description",

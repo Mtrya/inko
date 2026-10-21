@@ -13,6 +13,7 @@ targets = "attention"
 
 [collection]
 dataset = "kaupane/inko-rollout-25k"
+split = "train"
 prompts_per_round = 64
 draws_per_prompt = 16
 # The base model's ODE quality is flat between 20 and 50 steps at CFG 1.
@@ -50,7 +51,7 @@ deterministic_algorithms = true
 
 [training]
 seed = 1729
-rounds = 500
+rounds = 300
 checkpoint_every = 20
 checkpoint_keep_last = 2
 ema_decay = 0.999

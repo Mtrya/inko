@@ -79,6 +79,7 @@ class Collection:
     steps: int
     shift: str
     text_exit_layer: int
+    split: str = "train"
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,7 @@ class TrainingConfig:
             self.training,
         )
         name(self.initialization.asset)
+        name(c.split)
         require(
             s.mode in {"full", "lora"}
             and s.rank > 0

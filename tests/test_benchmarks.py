@@ -1,6 +1,7 @@
 """Catalog joins, native layouts, dependencies and interrupted scoring."""
 
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -200,6 +201,91 @@ def test_tiif_weights_questions_within_attribute_then_groups():
     scores = tiif.summarize(rows, {})["short"]
     assert scores["groups"]["Basic_Attribute"] == 0.5
     assert scores["overall"] == 0.75
+
+
+class Emitter:
+    def __init__(self):
+        self.rows = []
+
+    def loaded(self):
+        pass
+
+    def __call__(self, group, dimension, result):
+        self.rows.append((dimension, result))
+
+
+def tiif_vlm_group():
+    return {
+        "prompt": {
+            "metadata": {
+                "type": "style",
+                "index": 0,
+                "questions": {
+                    "yn_question_list": ["Q1?", "Q2?"],
+                    "yn_answer_list": ["Yes", "No"],
+                },
+            },
+            "seeds": [3],
+            "variant": "short",
+        },
+        "samples": [{"model": "model", "image_path": "image.png"}],
+    }
+
+
+def stub_tiif_judge(monkeypatch, failures):
+    class FormatError(Exception):
+        pass
+
+    calls = []
+
+    def generate(text, image, client, model):
+        calls.append(text)
+        return f"response-{len(calls)}"
+
+    def extract(response, questions):
+        if len(calls) <= failures:
+            raise FormatError("mismatch")
+        return ["yes"] * len(questions)
+
+    native = SimpleNamespace(
+        raw_prompt="template",
+        OutputFormatError=FormatError,
+        format_questions_prompt=lambda template, questions: template,
+        generate_with_prompt=generate,
+        extract_yes_no=extract,
+    )
+    monkeypatch.setattr(tiif, "load_source", lambda _: native)
+    monkeypatch.setitem(
+        sys.modules, "openai", SimpleNamespace(OpenAI=lambda **kwargs: None)
+    )
+    return FormatError, calls
+
+
+def test_tiif_retries_judge_format_failures_with_stable_prompt(monkeypatch, tmp_path):
+    _, calls = stub_tiif_judge(monkeypatch, failures=2)
+    emitter = Emitter()
+    tiif.evaluate(
+        [tiif_vlm_group()],
+        {"source": str(tmp_path), "base_url": "http://localhost"},
+        {"dimension": "vlm", "judge": "judge"},
+        tmp_path / "scores",
+        emitter,
+    )
+    assert calls == ["template"] * 3
+    assert emitter.rows[0][1]["model_pred"] == ["yes", "yes"]
+
+
+def test_tiif_gives_up_after_bounded_retries(monkeypatch, tmp_path):
+    error, calls = stub_tiif_judge(monkeypatch, failures=100)
+    with pytest.raises(error):
+        tiif.evaluate(
+            [tiif_vlm_group()],
+            {"source": str(tmp_path), "base_url": "http://localhost"},
+            {"dimension": "vlm", "judge": "judge"},
+            tmp_path / "scores",
+            Emitter(),
+        )
+    assert len(calls) == 8
 
 
 def test_qwen_preserves_id_and_explicit_english_field(tmp_path):

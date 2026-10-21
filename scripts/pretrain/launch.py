@@ -191,6 +191,8 @@ def main():
             command += ["--resume", str(resume)]
         if args.new_experiment:
             command.append("--new-experiment")
+        if args.init_weights:
+            command += ["--init-weights", str(Path(args.init_weights).resolve())]
         for name in (
             "verify_resume_state",
             "step_breakdown",

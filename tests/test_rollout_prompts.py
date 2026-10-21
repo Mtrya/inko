@@ -27,7 +27,8 @@ def rubric():
     }
 
 
-def test_prepare_reads_hub_images_and_preserves_joined_aspects(tmp_path):
+@pytest.mark.parametrize("hub_split", ["train", "specialized"])
+def test_prepare_reads_hub_images_and_preserves_joined_aspects(tmp_path, hub_split):
     source = tmp_path / "source"
     source.mkdir()
     encoded = io.BytesIO()
@@ -56,12 +57,26 @@ def test_prepare_reads_hub_images_and_preserves_joined_aspects(tmp_path):
                 "img2": {"dataset": "scenes", "shard": 0, "row": index},
             }
         )
-    pq.write_table(pa.Table.from_pylist(rows), source / "rows.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(rows), source / f"{hub_split}-00000-of-00001.parquet"
+    )
+    other_split = "specialized" if hub_split == "train" else "train"
+    pq.write_table(
+        pa.Table.from_pylist([{"row_id": "other-pool"}]),
+        source / f"{other_split}-00000-of-00001.parquet",
+    )
     meta = tmp_path / "metadata.jsonl"
     meta.write_text("\n".join(json.dumps(row) for row in metadata))
     output = tmp_path / "prepared"
     result = prepare(
-        source, meta, output, {"portrait": (32, 16)}, heldout=1, seed=23, benchmarks=[]
+        source,
+        meta,
+        output,
+        {"portrait": (32, 16)},
+        heldout=1,
+        seed=23,
+        benchmarks=[],
+        split=hub_split,
     )
     assert result["rows"] == 8 and result["references"] == 8
     prepared = [
@@ -91,6 +106,7 @@ def test_prepare_reads_hub_images_and_preserves_joined_aspects(tmp_path):
             heldout=1,
             seed=23,
             benchmarks=[],
+            split=hub_split,
         )
 
 

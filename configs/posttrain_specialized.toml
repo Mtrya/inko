@@ -1,0 +1,120 @@
+# Specialized-arm DiffusionART recipe: 60 rounds on a 3,840-row pool enriched
+# for counting, position and people (data/posttrain/specialized/train.jsonl,
+# built by scripts/posttrain/build_specialized_pool.py), plus 200 synthetic
+# short prompts. Initializes from the main run's round-300 EMA weights merged
+# into the base (the campaign's own round-300 EMA export); the LoRA starts
+# fresh on that merged base. Narrow channel weights concentrate the pairwise
+# signal: content/form/artifacts carry counting, position and anatomy.
+
+[initialization]
+asset = "r300ema"
+
+[student]
+mode = "lora"
+rank = 64
+alpha = 64.0
+targets = "attention"
+
+[collection]
+dataset = "kaupane/inko-rollout-25k"
+split = "specialized"
+prompts_per_round = 64
+draws_per_prompt = 16
+steps = 20
+shift = "shape"
+text_exit_layer = 20
+
+[collection.shapes]
+"1:1" = [896, 896]
+"4:3" = [768, 1024]
+"3:4" = [1024, 768]
+
+[art]
+reference_coefficient = 0.0
+
+[student_optimizer]
+kind = "muon_adamw"
+lr = 1e-05
+muon_lr = 0.001
+
+[execution]
+microbatch = 4
+cpu_threads = 4
+collective_timeout = 600
+startup_timeout = 1800
+round_timeout = 3600
+precision = "bfloat16"
+activation_checkpointing = false
+intra_host_roce = true
+deterministic_algorithms = true
+
+[training]
+seed = 1729
+rounds = 60
+checkpoint_every = 20
+checkpoint_keep_last = 2
+ema_decay = 0.999
+
+[evaluation]
+every = 20
+suite = "configs/prompts/drawbench.jsonl"
+monitor_suite = "configs/prompts/monitor.jsonl"
+prompt_limit = 100
+rubric_prompt_limit = 32
+draws_per_prompt = 4
+steps = 20
+guidance = 1.0
+shift = "shape"
+channels = ["hpsv3.mu", "vqascore.probability"]
+diversity_asset = "lpips_alex"
+
+[evaluation.shapes]
+"1:1" = [896, 896]
+"16:9" = [672, 1184]
+"9:16" = [1184, 672]
+"4:3" = [768, 1024]
+"3:4" = [1024, 768]
+
+[scoring]
+timeout = 60.0
+attempts = 3
+max_pending = 4
+
+# Narrow weights: the three rubric channels that carry the target abilities
+# (content = counting/position, form = anatomy, artifacts = defect suppression)
+# hold 0.60 combined; aesthetics/style are demoted to 0.06 each; VQAScore stays
+# a strong pointwise anchor at 0.22; HPSv3 keeps a small 0.06 prior.
+[[rewards.channels]]
+channel = "rubric.content_alignment"
+weight = 0.20
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.form_structure"
+weight = 0.20
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.artifacts"
+weight = 0.20
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.aesthetics"
+weight = 0.06
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.style_medium"
+weight = 0.06
+standardization = "none"
+
+[[rewards.channels]]
+channel = "vqascore.probability"
+weight = 0.22
+standardization = "round"
+
+[[rewards.channels]]
+channel = "hpsv3.mu"
+weight = 0.06
+standardization = "round"
