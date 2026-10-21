@@ -19,6 +19,12 @@ The single-stage DiffusionART trainer is `python -m src.posttrain.train`; the st
 harness is `python -m src.evaluation.monitoring.run`. Commands, config schema
 and current limits are in [the posttraining recipe](../notes/posttrain_recipe.md)
 and [campaign guide](../notes/posttrain_campaign.md).
+## Model release
+
+`python -m scripts.export_model --checkpoint <weights> --output <directory>`
+exports pretrained EMA or merged posttraining weights to the public pipeline
+format and verifies an exact weight reload. Sampling defaults come from
+`configs/inference.json`. The Gradio app and Space metadata are in `demo/`.
 
 ## Pretraining (`scripts/pretrain/`)
 

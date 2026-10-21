@@ -119,6 +119,11 @@ def get_vae_stats(
         (mean, std) tuple of tensors with shape [1, C, 1, 1]
     """
     config = AutoencoderKLQwenImage.load_config(vae_path, local_files_only=True)
+    return vae_stats_from_config(config, device)
+
+
+def vae_stats_from_config(config, device=None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Read explicit latent statistics from a loaded VAE configuration."""
     channels = config.get("z_dim")
     if type(channels) is not int or channels < 1:
         raise ValueError("VAE config requires a positive z_dim")

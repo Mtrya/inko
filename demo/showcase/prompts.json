@@ -1,0 +1,44 @@
+{
+  "height": 896,
+  "width": 896,
+  "num_inference_steps": 20,
+  "guidance_scale": 1.0,
+  "examples": [
+    {
+      "name": "misty-mountains",
+      "title": "Misty mountains · 水墨山水",
+      "prompt": "中国传统水墨山水画，淡墨晕染的层峦叠嶂在晨雾中渐渐远去。画面左下角一株苍劲的松树生长在岩石上，弯曲的树干伸向江面；江上有一叶小舟，舟中一位戴斗笠的渔翁。右侧和上方留有大片空白，远处的山峰只用几笔淡灰色墨痕勾勒。宣纸细腻的纤维质感，干湿浓淡相间的笔触，静谧悠远的意境，简洁而富有层次的构图。",
+      "seed": 42
+    },
+    {
+      "name": "harbor",
+      "title": "Harbor at dawn · 晨光港湾",
+      "prompt": "A luminous watercolor painting of a small Mediterranean fishing harbor at dawn. Three wooden fishing boats rest on pale turquoise water in the foreground, their reflections broken into loose washes of blue and rose. Cream and ochre houses with terracotta roofs climb a gentle hill behind the quay. The sky glows softly with peach and pale lavender light. Delicate pencil lines show through transparent pigments, with wet-on-wet edges, visible cold-pressed paper texture, and generous areas of light. The composition feels quiet, airy, and inviting.",
+      "seed": 7
+    },
+    {
+      "name": "garden",
+      "title": "Spring garden · 春日庭院",
+      "prompt": "一幅清新明亮的水彩画，春日江南庭院，一扇圆形月洞门通向安静的花园。门边一株粉色桃花正在盛开，细小的花瓣散落在青石小径上。白墙与深灰色瓦檐被柔和的阳光照亮，小径尽头有一张木椅，旁边摆着蓝白瓷花盆。透明的水彩颜料自然晕染，浅绿色、粉红色与温暖的米白色相互映衬，画纸纹理清晰可见，构图通透，气氛宁静而温柔。",
+      "seed": 73
+    },
+    {
+      "name": "bookshop",
+      "title": "The evening bookshop",
+      "prompt": "A cozy gouache illustration of a tiny bookshop on a narrow cobblestone street at dusk. Warm amber light spills from a large arched display window filled with colorful books and a small potted fern. A sleeping ginger cat curls up on the doorstep under a dark green awning. The wet cobblestones reflect the glowing window, while the surrounding buildings fade into muted blue and mauve shadows. Hand-painted shapes, soft opaque colors, gentle paper texture, and small thoughtful details create the feeling of a welcoming storybook scene.",
+      "seed": 31
+    },
+    {
+      "name": "portrait",
+      "title": "A quiet portrait",
+      "prompt": "A painterly oil portrait of a young woman in a simple ivory blouse, shown from the shoulders up in three-quarter view. Her dark brown hair is loosely gathered at the back of her head, with a few strands framing her face. She looks calmly toward a window just outside the frame. Soft natural light falls on one cheek and catches the warm brown of her eyes. The background is a muted terracotta and olive wash. Natural facial proportions, subtle skin tones, visible expressive brushwork, and a restrained earthy palette, like an intimate study painted from life.",
+      "seed": 57
+    },
+    {
+      "name": "lemons",
+      "title": "Lemons in afternoon light",
+      "prompt": "An intimate oil painting of a still life on a rustic wooden table. A deep cobalt-blue ceramic jug stands beside a shallow white bowl filled with ripe yellow lemons, with one cut lemon and a small leafy branch resting on a folded linen cloth. Warm afternoon sunlight enters from the left, casting soft long shadows across the table. The background is a muted sage-green wall. Thick, confident brushstrokes and subtle impasto give the lemons and pottery a tactile surface. A balanced, simple composition with rich blue and yellow color contrasts.",
+      "seed": 23
+    }
+  ]
+}
