@@ -1,0 +1,124 @@
+# Single-stage DiffusionART recipe; optimizer defaults live in src/posttrain/config.py.
+# Model, service, endpoint and storage paths live in the --assets JSON.
+# The base is the 600k pretrain EMA; see notes/posttrain_recipe.md.
+
+[initialization]
+asset = "initial"
+
+[student]
+mode = "lora"
+rank = 64
+alpha = 64.0
+targets = "attention"
+
+[collection]
+dataset = "kaupane/inko-rollout-25k"
+split = "train"
+prompts_per_round = 64
+draws_per_prompt = 16
+# The base model's ODE quality is flat between 20 and 50 steps at CFG 1.
+steps = 20
+shift = "shape"
+text_exit_layer = 20
+
+[collection.shapes]
+"1:1" = [896, 896]
+"4:3" = [768, 1024]
+"3:4" = [1024, 768]
+
+# One optimizer update per disjoint half of the round's (draw, step) items;
+# the cached rollout prediction is the anchor, so there is no old policy.
+# The completed algorithm comparison has no reference anchor.
+# The anchor-on comparison uses 1e-4.
+[art]
+reference_coefficient = 0.0
+
+[student_optimizer]
+kind = "muon_adamw"
+lr = 1e-05
+muon_lr = 0.001
+
+[execution]
+microbatch = 4
+cpu_threads = 4
+collective_timeout = 600
+startup_timeout = 1800
+round_timeout = 3600
+precision = "bfloat16"
+activation_checkpointing = false
+intra_host_roce = true
+deterministic_algorithms = true
+
+[training]
+seed = 1729
+rounds = 300
+checkpoint_every = 20
+checkpoint_keep_last = 2
+ema_decay = 0.999
+
+[evaluation]
+every = 50
+suite = "configs/prompts/drawbench.jsonl"
+monitor_suite = "configs/prompts/monitor.jsonl"
+prompt_limit = 100
+rubric_prompt_limit = 32
+draws_per_prompt = 4
+steps = 20
+guidance = 1.0
+shift = "shape"
+channels = ["hpsv3.mu", "vqascore.probability"]
+diversity_asset = "lpips_alex"
+
+[evaluation.shapes]
+"1:1" = [896, 896]
+"16:9" = [672, 1184]
+"9:16" = [1184, 672]
+"4:3" = [768, 1024]
+"3:4" = [1024, 768]
+
+[scoring]
+timeout = 60.0
+attempts = 3
+max_pending = 4
+
+# Pairwise rubric channels keep their 0/0.5/1 scale and carry the target
+# behavior; auxiliary scores are round-standardized. Measured over rounds 0-53
+# of the equal-weight arm, the rubric family already held ~68% of within-group
+# direction energy; HPSv3's within-group std is only ~0.38 (85% of its variance
+# sits between prompts), yet it was the fastest-moving metric at round-50
+# evaluation. Weights: rubric 0.16 each, VQAScore 0.15, HPSv3 0.05.
+
+[[rewards.channels]]
+channel = "rubric.content_alignment"
+weight = 0.16
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.form_structure"
+weight = 0.16
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.aesthetics"
+weight = 0.16
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.style_medium"
+weight = 0.16
+standardization = "none"
+
+[[rewards.channels]]
+channel = "rubric.artifacts"
+weight = 0.16
+standardization = "none"
+
+[[rewards.channels]]
+channel = "hpsv3.mu"
+weight = 0.05
+standardization = "round"
+
+[[rewards.channels]]
+channel = "vqascore.probability"
+weight = 0.15
+standardization = "round"

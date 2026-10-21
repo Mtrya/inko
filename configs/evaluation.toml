@@ -1,0 +1,156 @@
+# External models use native recipes; Inko entries use individually selected CFG.
+[sampling]
+precision = "bfloat16"
+batch_size = 1
+text_exit_layer = 20
+
+[sampling.shapes]
+"1:1" = [896, 896]
+"3:4" = [1024, 768]
+"4:3" = [768, 1024]
+"16:9" = [672, 1184]
+"9:16" = [1184, 672]
+
+[execution]
+max_inflight_batches = 2
+startup_timeout = 600
+task_timeout = 600
+cpu_threads = 4
+
+[report]
+reference = "inko_pretrain"
+comparison = "inko_posttrain"
+bootstrap_samples = 1000
+seed = 42
+
+[models.inko_pretrain]
+checkpoint = {asset = "inko_base", weights = "ema"}
+steps = 20
+guidance = 5.0
+shift = "shape"
+
+[models.inko_posttrain]
+# Starting candidate; select guidance with a small sweep after posttrain finishes.
+checkpoint = {asset = "inko_posttrain", weights = "ema"}
+steps = 20
+guidance = 1.0
+shift = "shape"
+
+[benchmarks.geneval]
+seed = 42
+
+[benchmarks.dpg]
+seed = 42
+
+[benchmarks.oneig]
+seed = 42
+
+[benchmarks.tiif]
+seed = 42
+judge = "Qwen2.5-VL-72B-Instruct"
+
+[benchmarks.qwen_image]
+seed = 42
+batch_size = 1
+processes = 8
+
+[models.dreamlite_base]
+pipeline = "DreamLitePipeline"
+asset = "dreamlite"
+precision = "bfloat16"
+batch_size = 1
+
+[models.dreamlite_base.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.dreamlite_base.parameters]
+num_inference_steps = 28
+guidance_scale = 3.5
+negative_prompt = ""
+max_sequence_length = 200
+
+[models.sana_06b]
+pipeline = "SanaPipeline"
+asset = "sana"
+precision = "float16"
+batch_size = 1
+
+[models.sana_06b.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.sana_06b.parameters]
+num_inference_steps = 20
+guidance_scale = 4.5
+negative_prompt = ""
+max_sequence_length = 300
+clean_caption = false
+use_resolution_binning = true
+
+[models.pixart_sigma]
+pipeline = "PixArtSigmaPipeline"
+asset = "pixart"
+precision = "float16"
+batch_size = 1
+
+[models.pixart_sigma.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.pixart_sigma.parameters]
+num_inference_steps = 20
+guidance_scale = 4.5
+negative_prompt = ""
+max_sequence_length = 300
+clean_caption = true
+use_resolution_binning = true
+eta = 0.0
+
+[models.sd35_medium]
+pipeline = "StableDiffusion3Pipeline"
+asset = "sd35"
+precision = "bfloat16"
+batch_size = 1
+
+[models.sd35_medium.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.sd35_medium.parameters]
+num_inference_steps = 40
+guidance_scale = 4.5
+negative_prompt = ""
+max_sequence_length = 512
+
+[models.moss_image_sft]
+pipeline = "MOSSImagePipeline"
+asset = "moss"
+precision = "bfloat16"
+batch_size = 1
+
+[models.moss_image_sft.shapes]
+"1:1" = [1024, 1024]
+"3:4" = [1152, 896]
+"4:3" = [896, 1152]
+"16:9" = [768, 1344]
+"9:16" = [1344, 768]
+
+[models.moss_image_sft.parameters]
+num_inference_steps = 50
+guidance_scale = 3.0
+negative_prompt = ""
+max_sequence_length = 4096
+uncond_skip_layers = [22]

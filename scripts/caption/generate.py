@@ -218,7 +218,7 @@ async def run(args) -> None:
                         data = Path(index[image_id]["thumb_path"]).read_bytes()
                         settings = {"max_tokens": job["max_tokens"],
                                     "temperature": args.temperature, **extra}
-                        key = client.request_key(data, job["request"].prompt(),
+                        key = client.request_key([data], job["request"].prompt(),
                                                  job["request"].prompt_version, settings)
                         job["request_key"] = key
                         payloads.append({

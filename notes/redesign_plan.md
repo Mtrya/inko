@@ -16,12 +16,22 @@ telemetry and generations establish training behavior under the mixture.
 - [Pretraining infrastructure](infra_pretrain.md): measured execution gains and
   qualification limits.
 - [Dataset plan](dataset_plan.md): domains, caption contract and eligible pools.
-- [Post-training preflight](posttrain_preflight.md): judge/scorer evidence,
-  throughput accounting, reward-pipeline requirements and qualification.
+- [Posttraining contract](posttrain_contract.md): mathematical conventions,
+  objectives, model roles, update clocks, and recovery requirements.
+- [Posttraining data plan](posttrain_data.md): self-produced prompt/rubric
+  pipeline, marginal distributions, rubric contract, acceptance and pilot design.
+- [Posttraining evaluation](posttrain_evaluation.md): benchmark protocol,
+  prompt splits, comparison evidence, and cost accounting.
+- [Posttraining recipe](posttrain_recipe.md): provisional two-stage baseline,
+  open selections, and the eventual selected recipe with supporting evidence.
 
 Platform accounts, images, storage roots, secrets and job submission details
 live in the machine-local `INSPIRE.md`. Completed experiment records with
 useful additional evidence remain locally in the gitignored `notes/archive/`.
+Working posttraining experiments and Stage 6 sub-stage progress live in
+gitignored `notes/internal/posttrain_experiments.md` and
+`notes/internal/posttrain_progress.md`. Selected findings and their rationale
+are incorporated into the tracked notes so published decisions are self-contained.
 The maintained notes contain the evidence needed to act on the current design.
 
 ## Design decisions
@@ -61,7 +71,7 @@ one strict run config covering the entire resolution curriculum.
 | 3.5: captions and buckets | Complete | Multi-caption row sampling, length curriculum and variable-aspect planning. |
 | 4: Ascend qualification | Reference workloads and 640p restart verified | 16×910B2C plans, native transitions, recovery and monitoring; the 640p continuation passes all-rank restore and initial updates. The configured 896p pool needs its own qualification. |
 | 5: pretraining | 640p continuation | Migrated 480k input, audited source weights, explicit sampler rebuild and exact all-rank restoration in `inko`; monitor through the 570k boundary. |
-| 6: post-training | Preparation | Ascend execution/reward qualification, 640p pilot, then 896p cold start and joint DMD+RL. |
+| 6: post-training | Layer 1: full specification closed; sampling/scoring qualification next | Independently reviewed design includes full/LoRA training and independent scorer services; qualify implementation before variant selection, hardware efficiency, real-run preparation, and the monitored run. |
 | 7: publication | Pending completed training | Final inference pipeline, model release and demo. |
 
 The following measurements explain retained choices; their experimental
@@ -105,87 +115,55 @@ loss/gradient/functional monitoring through subsequent resolution transitions.
 Review the fixed bilingual panel, live/EMA losses and internal stability
 telemetry at the recipe's cadence. Follow the evidence-based review and
 recovery rules in [the training recipe](pretrain_recipe.md). A final capability
-benchmark at 600k (form pending) determines the Stage-6 SFT go/no-go.
+benchmark at 600k (form pending) determines the Stage-6 go/no-go.
 
 Exit: a complete pretraining checkpoint, verified sampling and resolution transitions,
 measured compute/exposure, and a record of observed abilities and limitations.
 
 ## Stage 6 — Ascend post-training
 
-The release target is an **8-step student**, trained through optional targeted
-SFT, a DMD2 cold start, and joint distribution matching plus RL. The method
-follows [DMD2](https://arxiv.org/abs/2405.14867) and
-[DMDR](https://arxiv.org/abs/2511.13649). Distribution matching regularizes
-reward optimization against the teacher while the reward term supplies the
-preference signal:
+Post-training is a **single DiffusionNFT reinforcement stage** on the full-step
+model; the earlier distillation/DMD direction is closed. The
+[recipe](posttrain_recipe.md) trains the 600k EMA base at 896p with 20-step
+CFG-free rollouts against the HPSv3/VQAScore reward stack.
 
-`L = L_dmd + λ_rl L_rl`.
+The exact loss and state transitions are specified in the
+[contract](posttrain_contract.md); benchmark and generation evidence determine
+the remaining choices under the
+[evaluation protocol](posttrain_evaluation.md).
 
-### Execution and qualification
+Organize Stage 6 into four work layers:
 
-Use Ascend for the teacher, student, fake-score network and training updates.
-The shared VLM judge remains a remote API; place local reward scorers according
-to measured support, memory and throughput on the Ascend allocation. CPU
-weight-loading evidence is recorded in [preflight](posttrain_preflight.md).
+1. Algorithm implementation, experiments, and comparisons to select the
+   algorithm, including a small initial prompt suite, scorer, and benchmark.
+2. An infrastructure pass to optimize the complete pipeline on target hardware.
+3. Real-run prompt/evaluation suite and scorer preparation, with infrastructure
+   recalibration where scorer throughput or workload shape changes.
+4. Launch the real run, monitor/recover it, and perform final evaluation.
 
-Write the DMD, joint-loss, NFT and reward components per the method notes in
-`literature/`, then qualify the real workload: rollout sampling, VAE decode,
-fake-score/GAN backward passes, distributed updates, checkpoint/resume, and
-reward failure handling. Reuse the qualified
-Ascend attention, normalization and launch mechanisms where applicable.
+Current work is layer 1. The single-stage trainer is implemented; the
+experiment campaign in the internal plan selects the recipe.
+Core logic, including reward/score clients, belongs in `src/posttrain/`;
+benchmarks belong in `src/evaluation/benchmarks/`; rollout prompts belong in
+`configs/prompts/`. The planned trainer uses complete explicit configs.
 
-Embed one measurement pass in this bring-up, covering device memory and time
-spent in rollout, teacher/fake-score forwards, backward, synchronization,
-optimizer and reward waiting. Then run a 640p pilot using the 570k pretrained model
-endpoint, followed by the 896p main line using the final 600k checkpoint.
-Record end-to-end wall time and NPU-hours for the selected topology before
-setting the main-run and ablation budgets. Workload measurements on the
-target hardware are required for these estimates.
+Start with a preserved checkpoint and the small evaluation protocol. Full-run
+data preparation and completion of a particular pretraining endpoint do not
+block algorithm development. Keep each comparison's teacher and evaluation
+conditions fixed; qualify transfer when changing resolution or teacher.
 
-### Method and decisions
+Layer 1 establishes resident learner/scorer groups and explicit rank allocation,
+including enough timing/memory and recovery evidence to run sound experiments.
+Layer 2 tunes end-to-end throughput, including rollout/decode,
+score waiting, training, and synchronization. Layer 3 prepares the intended
+real workload and repeats affected measurements before setting the main budget.
+The final run uses the selected completed-pretraining teacher and recipe.
 
-1. **CFG study, after pretraining completion:** compare CFG 1 / 1.5 / 2 / 3 using
-   conditional/unconditional loss, empty-caption behavior, KID, reward and
-   fixed grids. Compare live and stored EMA weights. Use training/evaluation
-   sampling helpers while the public generation pipeline awaits Stage 7.
-2. **Optional targeted SFT:** the 600k final capability benchmark decides
-   the go/no-go and identifies what targeted data could fix. Composition,
-   anatomy and texture improvement belong to DMD+RL. Review the
-   synthetic teacher and samples before including them.
-3. **DMD2 cold start at native 896p:** initialize from the pretrained model; train an online
-   fake-score copy on student outputs. Add a classification head on its
-   bottleneck, using noise-injected latents, a non-saturating GAN objective and
-   real precomputed latents. Start with five fake-score updates per generator
-   update. Select the 8-step timestep grid on the final teacher before locking
-   the distillation configuration.
-4. **Joint DMD+RL:** compare ReFL and DiffusionNFT. Start the λ_rl study near 1
-   and adjust using held-out reward and KID; a reward plateau with KID
-   regression calls for reducing the RL contribution. Validate the loss-scale
-   assumption in the actual implementation. NFT permits asynchronous terminal
-   image rollouts/rewards and works with the 8-step student.
-5. **Rewards:** combine aesthetic, HPSv2 and VLM rubric signals, with explicit
-   criteria for anatomy, prompt adherence and over-smoothed artifacts. Keep
-   a separately monitored reward outside the optimized ensemble. Final
-   composition and weights are selected in the pilot.
-6. **Domain coverage:** mirror the pretrained model mix in rollout prompts. Inspect fixed
-   canary grids for Chinese painting, Western painting, people and world
-   content; track train/held-out reward divergence and diversity. Human image
-   review assesses whether the output looks over-optimized.
-
-Ablation axes are RL algorithm, λ_rl, reward composition/domain weights,
-rollout group size G=16/24 and prompts per iteration (initial candidate 48).
-This produces 768/1,152 images per iteration; judge throughput can dominate
-wall time. Use the demand accounting in [preflight](posttrain_preflight.md).
-
-Decide the cold-start → joint promotion rule with the 640p pilot. Promotion
-must leave room for joint learning before distillation converges. Build a
-small 5k-prompt pool for bring-up; finalize the roughly 20k pool through
-review at the 640p checkpoint. Memory measurements set backward-simulation
-micro-batches. Main algorithm/λ studies use the completed pretrained model.
-
-Exit: an 8-step student with improved reward and panel review, preserved
-KID/diversity, recorded reward/λ configuration, domain comparison grids and
-measured Ascend costs.
+Exit: a selected posttrained checkpoint with reproducible config and inference
+settings, held-out benchmarks and image review, domain/diversity evidence,
+measured cost, recovery qualification, and a recipe explaining the decisions
+and limitations. The internal ledger and progress log track ongoing work;
+selected evidence is preserved in the public notes.
 
 ## Stage 7 — Publication
 
@@ -198,13 +176,13 @@ Published model links, inference metadata and repository coordinates must
 consistently identify the release. Artifact provenance retains exact source
 experiment identities.
 
-Publish the selected 8-step student to Hugging Face with weights, inference
+Publish the selected posttrained checkpoint to Hugging Face with weights, inference
 configuration, model card, provenance/license constraints, evaluation and
 limitations. Deploy and smoke-test a Hugging Face Space. Write the README with
 installation, minimal inference/training examples and a navigable document map;
 verify its quickstart in a clean environment.
 
-Publish self-contained explanations of Flow Matching and DMD2/DMDR/NFT,
+Publish self-contained explanations of Flow Matching and DiffusionNFT,
 including equations, training/sampling procedures, implementation mapping and
 limitations. Explain methods directly; private run nicknames or unavailable
 discussions cannot carry the explanation. Estimate publication and hosting
@@ -218,6 +196,6 @@ costs before deployment.
 - Caption/judge provider changes: cache responses and record exact request
   identity; measure limits again on the intended workload.
 - Reward hacking and diversity loss: keep held-out signals and domain review
-  throughout joint training.
+  throughout posttraining.
 - Source restrictions: preserve provenance and separate restricted entries;
   release permissions depend on the selected data and artifacts.

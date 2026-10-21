@@ -1,0 +1,671 @@
+import shutil
+from dataclasses import asdict, replace
+from pathlib import Path
+
+import pytest
+import torch
+from PIL import Image
+from test_scoring import Backend, Endpoint
+
+from scripts.posttrain.run_campaign import committed_checkpoints
+from src.evaluation.monitoring import run as benchmark
+from src.models.inko import Inko
+from src.posttrain.art import round_guidance, update_art
+from src.posttrain.checkpoint import (
+    assert_exact,
+    cpu_state,
+    inspect,
+    load,
+    publish,
+    restore_rng,
+    rng_state,
+)
+from src.posttrain.rollout import PromptCursor, art_window, collect_art
+from src.posttrain.state import Clock, TrainingState
+
+
+def test_committed_round_state_round_trips_through_a_checkpoint(
+    new_roles, tmp_path, training_config, small_model
+):
+    torch.set_num_threads(1)
+    torch.manual_seed(21)
+    config = training_config
+    base = small_model()
+    roles = new_roles(config, base)
+    state = TrainingState(config, roles, None, Clock())
+    cond = (torch.zeros(1, 2, 1024), torch.zeros(1, 1024), torch.ones(1, 2))
+    rollouts = [
+        collect_art(
+            roles.student_field,
+            config,
+            [{"id": f"p{slot}", "aspect": "1:1"}],
+            [f"0:{slot}:{draw}"],
+            [slot * 2 + draw],
+            0,
+            0,
+            cond,
+            "cpu",
+        )
+        for slot in range(2)
+        for draw in range(2)
+    ]
+    values = {r.sample_ids[0]: float(i) for i, r in enumerate(rollouts)}
+    guidance = round_guidance(config, rollouts, values, [(16, 2, 2), (16, 2, 2)])
+    state.last_reward = values
+    for window in (0, 1):
+        update_art(
+            config,
+            roles,
+            roles.student_field,
+            rollouts,
+            guidance,
+            state.student_optimizer,
+            0,
+            window,
+        )
+        state.clock.update(config)
+        with pytest.raises(ValueError, match="clocks differ"):
+            state.state_dict()
+    state.commit_round()
+    point = publish(
+        tmp_path / "checkpoints",
+        state.clock.step,
+        {"case": "art"},
+        state.state_dict(),
+        {"cursor": 7},
+        0,
+        torch.device("cpu"),
+        keep_last=0,
+    )
+    committed, rank_state = load(point, {"case": "art"}, 0)
+    assert rank_state["cursor"] == 7 and inspect(point)["step"] == 2
+    recovered = TrainingState(config, new_roles(config, base), None, Clock())
+    recovered.load_state_dict(committed)
+    assert_exact(state.state_dict(), recovered.state_dict())
+    with pytest.raises(ValueError, match="clocks differ"):
+        recovered.load_state_dict(dict(committed, skipped_rounds=9))
+
+
+def test_checkpoint_publication_is_all_or_nothing(tmp_path, monkeypatch):
+    import src.posttrain.checkpoint as module
+
+    previous = publish(
+        tmp_path,
+        0,
+        {},
+        {"step": 0, "committed_rounds": 0},
+        {},
+        0,
+        torch.device("cpu"),
+        keep_last=1,
+    )
+
+    def fail(*args, **kwargs):
+        raise OSError("publication fault")
+
+    monkeypatch.setattr(module, "atomic_json", fail)
+    with pytest.raises(OSError):
+        publish(
+            tmp_path,
+            1,
+            {},
+            {"step": 1, "committed_rounds": 1},
+            {},
+            0,
+            torch.device("cpu"),
+            keep_last=1,
+        )
+    assert not (tmp_path / "round-000001").exists()
+    assert load(previous, {}, 0)[0] == {"step": 0, "committed_rounds": 0}
+
+
+def test_retention_counts_collected_rounds_and_leaves_preserved_copies(tmp_path):
+    root = tmp_path / "run/checkpoints"
+    device = torch.device("cpu")
+    first = publish(
+        root,
+        0,
+        {},
+        {"step": 0, "committed_rounds": 1},
+        {},
+        0,
+        device,
+        keep_last=2,
+    )
+    preserved = tmp_path / "keep/selected"
+    shutil.copytree(first, preserved)
+    incomplete = root / ".incomplete-000004"
+    incomplete.mkdir()
+    for number in (2, 3):
+        publish(
+            root,
+            0,
+            {},
+            {"step": 0, "committed_rounds": number},
+            {},
+            0,
+            device,
+            keep_last=2,
+        )
+    assert sorted(p.name for p in root.glob("round-*")) == [
+        "round-000002",
+        "round-000003",
+    ]
+    assert load(preserved, {}, 0)[0] == {"step": 0, "committed_rounds": 1}
+    assert load(root / "round-000003", {}, 0)[0] == {
+        "step": 0,
+        "committed_rounds": 3,
+    }
+    assert incomplete.exists()
+
+
+def test_manifest_in_staging_is_not_a_published_checkpoint(tmp_path):
+    device = torch.device("cpu")
+    committed = publish(
+        tmp_path,
+        1,
+        {"case": "publication"},
+        {"step": 1, "committed_rounds": 1},
+        {},
+        0,
+        device,
+        keep_last=0,
+    )
+    with pytest.raises(ValueError, match="overwrite"):
+        publish(
+            tmp_path,
+            1,
+            {"case": "publication"},
+            {"step": 1, "committed_rounds": 1},
+            {},
+            0,
+            device,
+            keep_last=0,
+        )
+    staging = next(tmp_path.glob(".incomplete-*"))
+    assert (staging / "manifest.json").exists()
+    with pytest.raises(ValueError, match="unpublished"):
+        inspect(staging)
+    assert inspect(committed)["step"] == 1
+
+
+def test_prompt_cursor_and_rank_rng_restore_exactly(tmp_path):
+    cursor = PromptCursor(5, 123)
+    cursor.take(4)
+    state = cursor.state_dict()
+    expected = cursor.take(7)
+    cursor.load_state_dict(state)
+    assert cursor.take(7) == expected
+    device = torch.device("cpu")
+    torch.manual_seed(5)
+    saved = rng_state(device)
+    first = [torch.rand(3) for _ in range(2)]
+    restore_rng(saved, device)
+    assert all(
+        torch.equal(a, b)
+        for a, b in zip(first, [torch.rand(3) for _ in range(2)], strict=True)
+    )
+
+
+@pytest.mark.parametrize(
+    "mode,view", [("full", "live"), ("full", "ema"), ("lora", "live"), ("lora", "ema")]
+)
+def test_export_materializes_the_requested_weight_view(
+    new_roles, tmp_path, training_config, small_model, mode, view
+):
+    from dataclasses import asdict as to_dict
+
+    from scripts.posttrain.export import export
+    from src.posttrain.adapters import merge_student
+
+    config = replace(
+        training_config, student=replace(training_config.student, mode=mode)
+    )
+    roles = new_roles(config, small_model())
+    with torch.no_grad():
+        for parameter in roles.student.parameters():
+            if parameter.requires_grad:
+                parameter.add_(0.01)
+    architecture = roles.student.get_config()
+    path = publish(
+        tmp_path / "checkpoints",
+        2,
+        {"config": to_dict(config)},
+        {
+            "student": roles.student.state_dict(),
+            "ema": roles.ema,
+            "architecture": architecture,
+            "step": 2,
+            "committed_rounds": 2,
+        },
+        {},
+        0,
+        torch.device("cpu"),
+        keep_last=0,
+    )
+    export(path, view, tmp_path / "export")
+    model = Inko.from_single_file(str(tmp_path / "export" / "weights.pt"))
+    if view == "ema":
+        with torch.no_grad():
+            for name, parameter in roles.student.named_parameters():
+                if name in roles.ema:
+                    parameter.copy_(roles.ema[name])
+    assert_exact(merge_student(roles.student).state_dict(), model.state_dict())
+
+
+@pytest.mark.parametrize("optimizer", ["adamw", "muon_adamw"])
+def test_art_skip_preserves_momentum_ema_and_updates_across_resume(
+    new_roles, tmp_path, training_config, small_model, optimizer
+):
+    torch.set_num_threads(1)
+    torch.manual_seed(31)
+    config = replace(
+        training_config,
+        art=replace(training_config.art, reference_coefficient=0.0),
+        student_optimizer=replace(training_config.student_optimizer, kind=optimizer),
+        training=replace(training_config.training, rounds=4),
+    )
+    base = small_model()
+    state = TrainingState(config, new_roles(config, base), None, Clock())
+    cursor = PromptCursor(5, 123)
+    cond = (
+        torch.full((1, 1, 1024), 0.01),
+        torch.full((1, 1024), 0.01),
+        torch.ones(1, 1),
+    )
+
+    def collect(current, prompts):
+        r = current.clock.committed_rounds
+        return [
+            collect_art(
+                current.roles.student_field,
+                config,
+                [{"id": f"p{prompt}", "aspect": "1:1"}],
+                [f"{r}:{slot}:{draw}"],
+                [slot * 2 + draw],
+                r,
+                current.clock.step,
+                cond,
+                "cpu",
+            )
+            for slot, prompt in enumerate(prompts)
+            for draw in range(2)
+        ]
+
+    def update(current, batches):
+        rewards = {r.sample_ids[0]: float(i) for i, r in enumerate(batches)}
+        guidance = round_guidance(config, batches, rewards, [(16, 2, 2), (16, 2, 2)])
+        assert not current.skip_inactive_art_round(guidance)
+        for window in (0, 1):
+            update_art(
+                config,
+                current.roles,
+                current.roles.student_field,
+                batches,
+                guidance,
+                current.student_optimizer,
+                current.clock.committed_rounds,
+                window,
+            )
+            current.clock.update(config)
+        current.commit_round()
+
+    update(state, collect(state, cursor.take(2)))
+    batches = collect(state, cursor.take(2))
+    tied = round_guidance(
+        config,
+        batches,
+        {r.sample_ids[0]: 0.1 for r in batches},
+        [(16, 2, 2), (16, 2, 2)],
+    )
+    before = cpu_state(state.state_dict())
+    assert state.skip_inactive_art_round(tied)
+    after = state.state_dict()
+    for name in ("student", "ema", "student_optimizer"):
+        assert_exact(before[name], after[name])
+    assert (
+        state.clock.step,
+        state.clock.committed_rounds,
+        state.clock.skipped_rounds,
+    ) == (2, 2, 1)
+    assert state.clock.samples_scored == 8 and state.clock.samples_used == 8
+    state.clock.validate(config)
+    following = collect(state, cursor.take(2))
+    assert following[0].seeds != batches[0].seeds
+    update(state, following)
+    point = publish(
+        tmp_path / "checkpoints",
+        4,
+        {"case": "art-skip"},
+        state.state_dict(),
+        {"cursor": cursor.state_dict()},
+        0,
+        torch.device("cpu"),
+        keep_last=0,
+    )
+    assert inspect(point)["committed_rounds"] == 3
+    saved, rank_saved = load(point, {"case": "art-skip"}, 0)
+    recovered = TrainingState(config, new_roles(config, base), None, Clock())
+    recovered.load_state_dict(saved)
+    recovered_cursor = PromptCursor(5, 123)
+    recovered_cursor.load_state_dict(rank_saved["cursor"])
+    restore_rng(rank_saved["rng"], torch.device("cpu"))
+    following = collect(state, cursor.take(2))
+    replay = collect(recovered, recovered_cursor.take(2))
+    for expected, actual in zip(following, replay, strict=True):
+        assert (
+            expected.sample_ids == actual.sample_ids and expected.seeds == actual.seeds
+        )
+        assert torch.equal(expected.states, actual.states)
+        assert torch.equal(expected.predictions, actual.predictions)
+    for window in (0, 1):
+        expected = [r.sample_ids[i] for r, i in art_window(config, following, window)]
+        actual = [r.sample_ids[i] for r, i in art_window(config, replay, window)]
+        assert expected == actual
+    update(state, following)
+    update(recovered, replay)
+    assert_exact(state.state_dict(), recovered.state_dict())
+    assert_exact(cursor.state_dict(), recovered_cursor.state_dict())
+
+
+def test_art_reference_penalty_remains_active_without_reward_guidance(
+    new_roles, training_config, small_model
+):
+    from src.posttrain.art import GroupGuidance
+
+    state = TrainingState(
+        training_config, new_roles(training_config, small_model()), None, Clock()
+    )
+    before = cpu_state(state.state_dict())
+    guidance = GroupGuidance(
+        torch.zeros(2, 16, 2, 2), torch.zeros(2), torch.zeros(2, dtype=torch.bool)
+    )
+    assert not state.skip_inactive_art_round(guidance)
+    assert_exact(before, state.state_dict())
+
+
+@pytest.mark.parametrize("paired", (False, True))
+def test_config_only_external_service_collection_join_report_and_resume(
+    tmp_path, monkeypatch, sampling_config, paired
+):
+    import base64
+    import io
+
+    categories = (
+        "content_alignment",
+        "form_structure",
+        "aesthetics",
+        "style_medium",
+        "artifacts",
+    )
+
+    class Judge:
+        def judge(self, prompt, rubric, images):
+            assert len(images) == 3
+            red = []
+            for image in images[:2]:
+                with Image.open(
+                    io.BytesIO(base64.b64decode(image.split(",", 1)[1]))
+                ) as picture:
+                    red.append(picture.getpixel((0, 0))[0])
+            return {
+                "decisions": {
+                    key: {
+                        "verdict": "A" if red[0] > red[1] else "B",
+                        "basis": "fixture verdict",
+                    }
+                    for key in categories
+                }
+            }
+
+    config = sampling_config
+    backend = Backend()
+    if paired:
+        config = replace(
+            config,
+            evaluation=replace(
+                config.evaluation,
+                channels=("hpsv3.mu", *(f"rubric.{key}" for key in categories)),
+            ),
+        )
+    endpoint = Endpoint(
+        tmp_path, {"hpsv3": backend, **({"rubric": Judge()} if paired else {})}
+    )
+    artifacts = {"checkpoints": {}, "text_encoder": "encoder", "vae": "vae"}
+    monkeypatch.setattr(benchmark, "verify_assets", lambda *args: artifacts)
+    prompts = [
+        {
+            "id": "p",
+            "scene_id": "p",
+            "aspect": "1:1",
+            "text": "text",
+            "seed": 4,
+        }
+    ]
+
+    if paired:
+        reference = tmp_path / "reference.jpg"
+        Image.new("RGB", (9, 7), "white").save(reference)
+        prompts[0].update(
+            reference=str(reference),
+            rubric={
+                key: [{"weight": "high", "text": "fixture criterion"}]
+                for key in categories
+            },
+        )
+
+    class Workers:
+        generated = 0
+
+        def __init__(self, sampling, execution, assets):
+            self.messages, self.startup = [], []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def submit(self, task):
+            Workers.generated += 1
+            directory = tmp_path / task["arm"].name
+            directory.mkdir(exist_ok=True)
+            image = directory / "image.png"
+            Image.new(
+                "RGB",
+                (8, 8),
+                (200 if task["arm"].name == "candidate" else 20, 100, 200),
+            ).save(image)
+            result = {
+                "records": [
+                    {
+                        "sample_id": task["sample_ids"][0],
+                        "prompt": prompts[0],
+                        "arm": task["arm"].name,
+                        "image_path": str(image),
+                    }
+                ],
+                "timings": {},
+            }
+
+            self.messages.append(
+                {
+                    "event": "result",
+                    "task_id": task["task_id"],
+                    "role": "learner",
+                    "result": result,
+                }
+            )
+
+        def receive(self, deadline):
+            return self.messages.pop()
+
+    monkeypatch.setattr(benchmark, "ResidentWorkers", Workers)
+    assets = {"scoring": {"endpoint": endpoint.url}}
+    try:
+        first = benchmark.run(config, assets, prompts, tmp_path / "run")
+        second = benchmark.run(config, assets, prompts, tmp_path / "run")
+        assert first == second and Workers.generated == 2
+        assert first["arms"]["reference"]["hpsv3.mu"]["mean_on_successes"] == 0.75
+        assert first["paired"]["candidate"]["hpsv3.mu"]["mean_delta"] == 0.0
+        if paired:
+            readout = first["paired"]["candidate"]["rubric.content_alignment"]
+            assert (
+                readout["wins"],
+                readout["ties"],
+                readout["losses"],
+                readout["win_credit"],
+            ) == (1, 0, 0, 1.0)
+        assert len(backend.calls) == 2
+        # Missing scores are reacquired without regenerating images.
+        next((tmp_path / "run/scores").glob("*.json")).unlink()
+        assert benchmark.run(config, assets, prompts, tmp_path / "run") == first
+        assert Workers.generated == 2
+        assert len(backend.calls) == (4 if paired else 3)
+        with pytest.raises(ValueError, match="identity changed"):
+            benchmark.run(
+                config, assets, [dict(prompts[0], text="another")], tmp_path / "run"
+            )
+        artifacts["checkpoints"] = {"candidate": "/another/model.pt"}
+        with pytest.raises(ValueError, match="identity changed"):
+            benchmark.run(config, assets, prompts, tmp_path / "run")
+    finally:
+        endpoint.close()
+
+
+def test_arm_checkpoint_is_loaded_and_cached(tmp_path, monkeypatch):
+    import torch
+
+    from src.evaluation.generation.config import Checkpoint
+    from src.evaluation.generation.inko import Generator
+    from src.models.inko import Inko
+
+    calls = []
+
+    def load(path):
+        calls.append(path)
+        model = torch.nn.Linear(1, 1, bias=False)
+        with torch.no_grad():
+            model.weight.fill_(float(Path(path).read_text()))
+        return model
+
+    monkeypatch.setattr(Inko, "from_single_file", load)
+    worker = Generator.__new__(Generator)
+    worker.device, worker.dtype, worker.checkpoint = (
+        torch.device("cpu"),
+        torch.float32,
+        None,
+    )
+    worker.assets = {"checkpoints": {}}
+    checkpoints = []
+    for asset, value, weights in (("first", "2", "ema"), ("trained", "7", "live")):
+        directory = tmp_path / asset
+        directory.mkdir()
+        path = directory / (
+            "ema_weights.pt" if weights == "ema" else "model.safetensors"
+        )
+        path.write_text(value)
+        worker.assets["checkpoints"][asset] = str(path)
+        checkpoints.append(Checkpoint(asset, weights))
+    worker.select_checkpoint(checkpoints[0])
+    assert worker.model(torch.ones(1, 1)).item() == 2
+    worker.select_checkpoint(checkpoints[1])
+    assert worker.model(torch.ones(1, 1)).item() == 7
+    worker.select_checkpoint(checkpoints[1])
+    assert len(calls) == 2
+
+
+def test_strict_typed_configs_reject_unknown_and_invalid_fields(sampling_config):
+    from src.evaluation.monitoring.config import Config
+    from src.posttrain.schema import decode
+
+    raw = asdict(sampling_config)
+    raw["execution"]["hpsv3_devices"] = [1]
+    with pytest.raises(ValueError, match="unknown"):
+        decode(Config, raw)
+    del raw["execution"]["hpsv3_devices"]
+    raw["sampling"]["batch_size"] = True
+    with pytest.raises(ValueError, match="int"):
+        decode(Config, raw)
+
+
+def test_evaluation_identity_uses_resolved_model_assets(tmp_path, sampling_config):
+    weights = tmp_path / "model.pt"
+    weights.write_bytes(b"checkpoint fixture")
+    checkpoint = sampling_config.arms[0].checkpoint
+    config = replace(
+        sampling_config, arms=(replace(sampling_config.arms[0], checkpoint=checkpoint),)
+    )
+    assets = {
+        "device_type": "npu",
+        "learner": {"python_paths": []},
+        "checkpoints": {checkpoint.asset: str(weights)},
+        "text_encoder": str(tmp_path),
+        "vae": str(tmp_path),
+    }
+    before = benchmark.verify_assets(config, assets)
+    assert before == {
+        "checkpoints": {"reference": str(weights)},
+        "text_encoder": str(tmp_path),
+        "vae": str(tmp_path),
+    }
+    assets["checkpoints"][checkpoint.asset] = str(tmp_path / "other.pt")
+    assert benchmark.verify_assets(config, assets) != before
+
+
+def test_typed_config_defaults_and_explicit_overrides():
+    from dataclasses import dataclass
+
+    from src.posttrain.schema import decode
+
+    @dataclass
+    class Settings:
+        required: int
+        scale: float = 0.25
+
+    assert asdict(decode(Settings, {"required": 7})) == {"required": 7, "scale": 0.25}
+    assert asdict(decode(Settings, {"required": 7, "scale": 0.75})) == {
+        "required": 7,
+        "scale": 0.75,
+    }
+    with pytest.raises(ValueError, match="missing"):
+        decode(Settings, {"scale": 0.75})
+    with pytest.raises(ValueError, match="unknown"):
+        decode(Settings, {"required": 7, "typo": 0.75})
+
+
+def test_skipped_rounds_reach_budget_and_publish_distinct_recovery_points(
+    tmp_path, training_config
+):
+    config = replace(
+        training_config, training=replace(training_config.training, rounds=3)
+    )
+    clock = Clock()
+    device = torch.device("cpu")
+    points = []
+    for round_number in range(4):
+        if round_number:
+            clock.skip_round(config)
+        clock.validate(config)
+        points.append(
+            publish(
+                tmp_path, clock.step, {}, clock.state_dict(), {}, 0, device, keep_last=0
+            )
+        )
+    assert [p.name for p in points] == [
+        "round-000000",
+        "round-000001",
+        "round-000002",
+        "round-000003",
+    ]
+    assert clock.next_action(config) == "done"
+    assert clock.step == 0 and clock.skipped_rounds == 3
+    assert clock.samples_scored == 12 and clock.samples_used == 0
+    saved, _ = load(points[-1], {}, 0)
+    recovered = Clock.from_state(saved)
+    recovered.validate(config)
+    assert recovered.next_action(config) == "done"
+    with pytest.raises(ValueError, match="unfinished ART"):
+        recovered.skip_round(config)
+    assert committed_checkpoints(tmp_path) == list(enumerate(points))
+    assert all(inspect(p)["step"] == 0 for p in points)

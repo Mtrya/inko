@@ -5,6 +5,20 @@ Each command documents its arguments through `--help`. Run corpus processing
 where the data is mounted. Platform setup and credentials are in the local
 `INSPIRE.md`; training settings come from one complete run TOML.
 
+## Posttraining preparation (`scripts/posttrain/`)
+
+| Command | Purpose |
+|---|---|
+| `posttrain.prepare_assets` | Download or verify one scorer's source and weights, record checksum inventories, and write local service assets. |
+| `posttrain.prepare_metric` | Produce the LPIPS diversity metric asset on a machine with download access. |
+| `posttrain.export` | Materialize live or EMA student weights from a complete checkpoint, merge weight LoRA, and verify reload. |
+| `posttrain.run_campaign` | Drive one training run with interval evaluations: resume committed segments, export weight views, benchmark suites and assemble blind panels. |
+| `posttrain.readouts` | Join a completed blind ballot to benchmark scores; report comparable pairs and scorer/human disagreement. |
+
+The single-stage DiffusionART trainer is `python -m src.posttrain.train`; the standalone evaluation
+harness is `python -m src.evaluation.monitoring.run`. Commands, config schema
+and current limits are in [the posttraining recipe](../notes/posttrain_recipe.md)
+and [campaign guide](../notes/posttrain_campaign.md).
 ## Model release
 
 `python -m scripts.export_model --checkpoint <weights> --output <directory>`
@@ -56,8 +70,72 @@ conform to this schema. Planner estimates require device validation.
 
 | Command | Purpose |
 |---|---|
+| `eval.run prepare` | Materialize a released benchmark catalog with native metadata and draw seeds. |
+| `eval.run generate` | Generate Inko or external-model images from a prepared catalog; resume missing outputs. |
+| `eval.run score` | Score saved images with the benchmark's official judges and aggregation. |
+| `eval.run report` | Assemble CPU comparison tables, coverage and paired Inko differences from saved judgments. |
 | `eval.blind_panel panel` | Assemble blinded comparisons from directories of `<prompt_id>.png` images. |
 | `eval.blind_panel tally` | Count wins and ties from a completed ballot. |
+| `eval.cfg_steps_sweep` | Generate the prompt suite across a CFG x ODE-steps grid from one checkpoint, one arm directory per cell. |
+
+```bash
+python -m scripts.eval.run generate --config configs/evaluation.toml \
+  --assets data/evaluation/assets.toml --prompts data/evaluation/prompts.jsonl \
+  --model inko_pretrain --output runs/evaluation
+```
+
+The local asset TOML supplies `device_type`, `text_encoder`, `vae`, and a
+`[checkpoints]` table mapping model asset names to EMA or merged export files.
+Launch with the prepared evaluation interpreter; optional `python_paths` lists
+package overlays for its workers. Each prompt JSONL row contains `benchmark`,
+`split`, `prompt_id`, `variant`, `text`, `metadata` (including `aspect`), and an
+explicit `seeds` array, one entry per draw. Metadata retains native benchmark fields.
+
+External models use `[models.ASSET]` entries with a local pipeline `path` and
+isolated `python` interpreter. Optional `[models.ASSET.env]` values locate caches.
+The command launches that interpreter automatically. Model entries in
+`configs/evaluation.toml` preserve native precision, dimensions and pipeline
+arguments. Sample records include token counts and truncation; execution records
+include component sizes, scheduler settings and peak device/host memory.
+
+Outputs are grouped by model, benchmark and split, with a prompt catalog,
+`samples.jsonl` and lossless images. Image paths resolve from the output root.
+Each model saves its inference settings and execution measurements. Repeating
+the command resumes missing images; changing image-affecting settings requires
+a new output directory. Different models can generate concurrently into the
+same output root.
+
+Benchmark commands accept `--benchmark geneval|dpg|oneig|tiif|qwen_image`:
+
+```bash
+python -m scripts.eval.run prepare --config configs/evaluation.toml \
+  --assets data/evaluation/scorers.toml --benchmark geneval \
+  --output data/evaluation/geneval.jsonl
+python -m scripts.eval.run score --config configs/evaluation.toml \
+  --assets data/evaluation/scorers.toml --benchmark geneval \
+  --images runs/evaluation --model inko_pretrain \
+  --output runs/evaluation/scores/geneval/inko_pretrain
+```
+
+The scorer asset TOML has a `[benchmarks.NAME]` table for each selected benchmark.
+Each table supplies an official checkout `source`, an isolated `python`
+interpreter, and the assets below. Optional `env` entries locate model caches.
+
+| Benchmark | Prepared catalog / draws | Additional assets |
+|---|---|---|
+| [GenEval](https://github.com/djghosh13/geneval) | Original 553 prompts / four | `detector` directory, `model_config`; OpenAI CLIP ViT-L/14 in its native cache. |
+| [DPG](https://github.com/TencentQQGYLab/ELLA/tree/main/dpg_bench) | Released 1,065 prompts / four | `model`: released mPLUG checkpoint directory. |
+| [OneIG](https://github.com/OneIG-Bench/OneIG-Benchmark) | English 1,120 prompts / four | `qwen`, `csd`, `style_encoder`, `dreamsim`, `clip_processor`, `llm2clip_vision`, `llm2clip_text`. |
+| [TIIF](https://github.com/A113N-W3I/TIIF-Bench) | Testmini 277 scenes, short and long / one per description | `base_url` for Qwen2.5-VL-72B; `ocr_python` and `ocr_options` for PaddleOCR. |
+| [Qwen-Image-Bench](https://github.com/QwenLM/Qwen-Image-Bench) | Released 1,000 IDs, English / one | `data`: released prompt JSONL; `model`: Q-Judger checkpoint directory. |
+
+Scoring constructs native layouts from saved image records. It writes
+`scores.jsonl` with the prompt, draw records, raw judgments and elapsed time.
+`summary.json` contains native aggregates and expected/evaluated prompt-dimension
+counts; `execution.jsonl` records scorer load time and peak CUDA allocation.
+Resume skips published prompt-dimension results. Missing images or scorer
+failures stop scoring before a complete summary is published. Use a new score
+directory when changing the judge or its settings; generation is independent.
 
 ## Caption production (`scripts/caption/`)
 
@@ -102,3 +180,5 @@ Uploads include every training source and the evaluation set in the selected
 stage. `--storage-root` selects the external data/model/output tree.
 Downloads fetch the selected repository. Credentials come from `HF_TOKEN`, or
 `MS_TOKEN` / `MODELSCOPE_TOKEN_PATH` for ModelScope.
+
+Benchmark comparison reports and interpretation are in [model evaluation](../notes/model_evaluation.md).

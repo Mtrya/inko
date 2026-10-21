@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from src.evaluation.prompt_grid import load_prompt_suite, resolved_prompt_seed
+from src.evaluation.generation.prompts import load_prompt_suite, resolved_prompt_seed
 
 
 @pytest.mark.parametrize("seed", [None, True, -1, 2**63, "42"])

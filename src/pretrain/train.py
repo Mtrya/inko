@@ -48,9 +48,9 @@ from ..dataset.mix import parse_dataset_mix, get_dataset_weights
 from ..utils.encode_text import encode_text
 from ..utils.vae_codec import get_vae_stats
 from ..flow.paths import FlowMatchingOT, shift_timesteps
-from ..evaluation.eval_loss import EvalLossProbe
-from ..evaluation.prompt_grid import grid_due, run_prompt_grid_eval
-from ..evaluation.kid_eval import run_kid_eval
+from ..evaluation.monitoring.eval_loss import EvalLossProbe
+from ..evaluation.monitoring.prompt_grid import grid_due, run_prompt_grid_eval
+from ..evaluation.monitoring.kid_eval import run_kid_eval
 from .config import load_config, flatten
 from .tracking import (
     read_tracking_record,
@@ -66,7 +66,7 @@ from .stage_control import (
     write_checkpoint_record,
     verify_restored_rng,
 )
-from .muon import build_param_groups as build_muon_param_groups
+from src.optim.muon import build_param_groups as build_muon_param_groups
 from .health import (
     ema_rel_distance,
     qk_gain_stats,
@@ -241,6 +241,11 @@ def parse_args():
         "--new-experiment", action="store_true",
         help="Restore training state but start a new SwanLab experiment in the configured project",
     )
+    parser.add_argument(
+        "--init-weights",
+        action=OneValue,
+        help="Fresh run whose model starts from a single-file export (weights.pt with adjacent transformer_config.json); mutually exclusive with --resume",
+    )
     parser.add_argument("--step_breakdown", action="store_true")
     parser.add_argument("--cpu_wall_profile", action="store_true")
     parser.add_argument("--log_shapes", action="store_true")
@@ -270,6 +275,8 @@ def main():
         return
     if args.verify_resume_state and not args.resume:
         raise ValueError("--verify_resume_state requires --resume")
+    if args.init_weights and args.resume:
+        raise ValueError("--init-weights starts a fresh run; it cannot combine with --resume")
     tracking_kwargs = tracker_init_kwargs(
         args.resume, args.swanlab_project, new_experiment=args.new_experiment
     )
@@ -346,6 +353,8 @@ def main():
             "stage": cli.stage,
             "active_bucket_plan": bucket_contents,
         }
+        if args.init_weights:
+            tracking_config["init_weights"] = str(Path(args.init_weights).resolve())
         if args.new_experiment:
             tracking_config["forked_from"] = dict(
                 read_tracking_record(args.resume), global_step=resume_step,
@@ -386,6 +395,9 @@ def main():
     # Load Model
     accelerator.print("Initializing Inko Model...")
     model = Inko(**asdict(config.model))
+    if args.init_weights:
+        accelerator.print(f"Initializing weights from {args.init_weights}")
+        model.load_state_dict(Inko.from_single_file(args.init_weights).state_dict())
     # Print model statistics
     accelerator.print(
         f"Model params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}"

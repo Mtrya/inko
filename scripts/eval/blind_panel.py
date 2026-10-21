@@ -153,9 +153,11 @@ def load_prompt_records(path: str) -> Dict[str, Dict[str, Any]]:
     if not source.is_file():
         raise FileNotFoundError(f"prompt suite not found: {source}")
 
-    from src.evaluation.prompt_grid import load_prompt_suite
+    from src.evaluation.generation.prompts import load_prompts
 
-    return {record["id"]: record for record in load_prompt_suite(str(source))}
+    rows = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
+    shapes = {row.get("aspect", "1:1"): (16, 16) for row in rows}
+    return {record["id"]: record for record in load_prompts(source, shapes)}
 
 
 def panel_choices(arm_count: int) -> List[str]:
@@ -204,8 +206,6 @@ def cmd_panel(args: argparse.Namespace) -> int:
         metadata = []
         if record.get("tags"):
             metadata.append(", ".join(str(tag) for tag in record["tags"]))
-        if record.get("domain"):
-            metadata.append(str(record["domain"]))
         if record.get("aspect"):
             metadata.append(f"aspect {record['aspect']}")
         if metadata:
