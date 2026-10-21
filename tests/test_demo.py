@@ -1,6 +1,9 @@
 """Demo request routing without a GPU or external service."""
 
 import importlib
+import runpy
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -12,6 +15,7 @@ pytest.importorskip("spaces")
 
 @pytest.fixture
 def app(monkeypatch):
+    monkeypatch.setenv("INKO_MODEL_ID", "local-export")
     pipe = Mock(config={"num_inference_steps": 20, "guidance_scale": 1})
     pipe.to.return_value = pipe
     monkeypatch.setattr(
@@ -22,11 +26,37 @@ def app(monkeypatch):
     return module
 
 
+def test_demo_requires_explicit_model_source_before_loading(monkeypatch):
+    monkeypatch.delenv("INKO_MODEL_ID", raising=False)
+    load = Mock(side_effect=AssertionError("Unexpected model load"))
+    monkeypatch.setattr("src.pipeline.InkoPipeline.from_pretrained", load)
+    with pytest.raises(RuntimeError, match="INKO_MODEL_ID"):
+        runpy.run_path(str(Path(__file__).resolve().parents[1] / "demo/app.py"))
+    load.assert_not_called()
+
+
 def test_enhancement_off_does_not_contact_deepseek(app, monkeypatch):
     post = Mock(side_effect=AssertionError("Unexpected network call"))
     monkeypatch.setattr(app.requests, "post", post)
     assert app.prepare_prompt("  An ink landscape.  ", False) == "An ink landscape."
     post.assert_not_called()
+
+
+def test_gallery_prompt_uses_loaded_model_sampling_defaults(app, monkeypatch):
+    monkeypatch.setattr(
+        app.pipe, "config", {"num_inference_steps": 13, "guidance_scale": 3.25}
+    )
+    monkeypatch.setattr(
+        app,
+        "SHOWCASE",
+        {
+            "width": 640,
+            "height": 896,
+            "examples": [{"prompt": "A lake", "seed": 123, "name": "lake"}],
+        },
+    )
+    selected = app.select_example(SimpleNamespace(index=0))
+    assert selected[:9] == ("A lake", 640, 896, 123, False, 13, 3.25, False, "A lake")
 
 
 def test_enhancement_uses_server_secret_and_returns_prompt(app, monkeypatch):
@@ -87,11 +117,11 @@ def test_generation_forwards_dimensions_and_resolved_seed(
     gpu = Mock(return_value="generated image")
     monkeypatch.setattr(app, "run_pipeline", gpu)
     monkeypatch.setattr(app.secrets, "randbelow", lambda n: 1234567)
-    assert app.generate("A garden", 480, 1600, 42, randomize, 20, 0) == (
+    assert app.generate("A garden", 480, 2560, 42, randomize, 20, 0) == (
         "generated image",
         expected_seed,
     )
-    gpu.assert_called_once_with("A garden", 480, 1600, expected_seed, 20, 0)
+    gpu.assert_called_once_with("A garden", 480, 2560, expected_seed, 20, 0)
 
 
 @pytest.mark.parametrize(
@@ -100,7 +130,7 @@ def test_generation_forwards_dimensions_and_resolved_seed(
         {"prompt": " "},
         {"width": 479},
         {"width": 481},
-        {"height": 1616},
+        {"height": 2576},
         {"guidance": -0.1},
         {"guidance": 10.1},
         {"guidance": float("nan")},

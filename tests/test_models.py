@@ -51,3 +51,32 @@ def test_model_file_roundtrip_preserves_predictions(tmp_path, double, single):
     (tmp_path / "transformer_config.json").write_text(json.dumps(model.get_config()))
     restored = Inko.from_single_file(str(path))
     torch.testing.assert_close(restored(*inputs), expected)
+
+
+@pytest.mark.parametrize("real_rope", [False, True])
+def test_dynamic_rope_batched_times_match_independent_images(small_model, real_rope):
+    from src.models.dit_blocks import MSRoPE, set_real_rope
+
+    torch.manual_seed(82)
+    model = small_model().eval().requires_grad_(False)
+    set_real_rope(model, real_rope)
+    for module in model.modules():
+        if isinstance(module, MSRoPE):
+            module.reference_hw = (1, 1)
+    x, times = torch.randn(2, 16, 4, 4), torch.tensor([0.2, 0.8])
+    text, pooled = torch.randn(2, 3, 1024), torch.randn(2, 1024)
+    mask = torch.tensor([[1, 1, 0], [1, 1, 1]])
+    batched = model(x, times, text, pooled, mask)
+    independent = torch.cat(
+        [
+            model(
+                x[i : i + 1],
+                times[i : i + 1],
+                text[i : i + 1],
+                pooled[i : i + 1],
+                mask[i : i + 1],
+            )
+            for i in range(2)
+        ]
+    )
+    torch.testing.assert_close(batched, independent, rtol=2e-5, atol=2e-6)

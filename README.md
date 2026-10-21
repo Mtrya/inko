@@ -13,14 +13,15 @@ Inko is a bilingual text-to-image model for paintings and illustrations. Its
 532M-parameter flow-matching transformer brings together a curated art corpus,
 caption and resolution curricula, chunked Muon optimization, and Ascend training.
 
-**Current release: 600k pretrained EMA.** Explore its images below, then follow
-the recipe from data preparation through pretraining and posttraining.
+**Current model: final round-60 RL EMA**, built on the 600k pretrained EMA.
+Inference uses automatic Dy-YaRN scaling, with a maximum of 2560 pixels per axis.
+The gallery below shows the pretrained model.
 
 ## Gallery
 
 From quiet ink landscapes to sunlit watercolors and textured oils. These are
-selected images from the released checkpoint. Click an image to see it at full
-resolution, or choose its prompt in the demo and make it your own.
+selected images from the 600k pretrained checkpoint. Click an image to see it
+at full resolution, or choose its prompt in the demo and make it your own.
 
 <table>
   <tr>
@@ -132,7 +133,7 @@ cosine decay, global gradient clipping, and an EMA updated at every optimizer st
 | Feed-forward layers | Gated SiLU, width 3072 |
 | Conditioning | Frozen Qwen3-0.6B, early exit after layer 20; pooled text and time conditioning |
 | Latents | 16 channels, 8× spatial compression, 2×2 latent patches |
-| Positions | Centered image-grid rotary embeddings |
+| Positions | Centered image/text RoPE; automatic Dy-YaRN scaling during inference |
 | Objective | Rectified flow, integrated from noise at time 0 to image latents at time 1 |
 | Pretraining | Variable-aspect 256p → 640p → 896p curriculum; 600,000 optimizer updates |
 | Precision | FP32 solver state and times; BF16 model forwards and VAE decode |
@@ -205,9 +206,9 @@ operator checks, memory probes, and recovery evidence.
 
 ### Posttraining: preference and prompt alignment
 
-Posttraining is developed on
+The posttraining development record is on
 [`feat/posttrain`](https://github.com/Mtrya/inko/tree/feat/posttrain).
-The selected approach is **DiffusionART with attention LoRA**, starting from
+The approach is **DiffusionART with attention LoRA**, starting from
 the 600k EMA. It combines HPSv3 preference and VQAScore alignment rewards after
 per-round standardization. The recipe uses rank-64 LoRA, Muon updates, a slow
 EMA, and 20-step Euler rollouts at CFG 1.
@@ -216,27 +217,16 @@ Selection considers generated images, prompt adherence, and diversity alongside
 reward scores. Fixed bilingual panels, DrawBench prompts, and held-out
 comparisons provide different views of the model. The
 [posttraining recipe and observations](https://github.com/Mtrya/inko/blob/feat/posttrain/notes/posttrain_recipe.md)
-record both gains and failure cases. **The public checkpoint and gallery on
-this page are still the pretrained release.** Posttrained weights and their
-examples will be published together.
+record both gains and failure cases. The Hub default contains the final
+round-60 RL EMA. The gallery on this page uses the pretrained base, available
+at the [`pretrain-base` tag](https://huggingface.co/kaupane/Inko/tree/pretrain-base).
 
 ## Generate an image
 
-[Open the demo](https://huggingface.co/spaces/kaupane/Inko) to start with a short
-idea or a gallery prompt. DeepSeek can expand your description, and the app
-shows the prompt used. Seeds randomize by default. Width and height can each
-range from 480 to 1600 in multiples of 16; CFG ranges from 0 to 10. Selecting a
-gallery image restores its saved settings with enhancement and randomization off.
-
-Use Python 3.12 and a CUDA GPU. The Space repository contains the inference
-source and its dependencies:
+Use Python 3.12 and a CUDA GPU. Install this checkout:
 
 ```bash
-git clone https://huggingface.co/spaces/kaupane/Inko inko-demo
-cd inko-demo
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ```python
@@ -249,12 +239,19 @@ pipe = InkoPipeline.from_pretrained(
 
 image = pipe(
     "中国水墨画，远山笼罩在薄雾中，近处一棵松树伸向江面，一叶小舟停在岸边。",
+    width=2560,
+    height=1440,
     generator=torch.Generator(device="cpu").manual_seed(42),
 ).images[0]
 image.save("inko.png")
 ```
 
-The default is 896 × 896, 20 Euler steps, and CFG 1.
+The final RL EMA defaults are 896 × 896, 20 Euler steps, and CFG 4.5.
+Width and height must be multiples of 16, with a maximum of 2560 each.
+Dy-YaRN scaling applies automatically above the 1184-pixel training reference
+on each axis. Its frequency correction decreases during denoising. Requests
+above 2048 pixels use tiled VAE decoding with 2048-pixel tiles and a 1536-pixel
+stride. Smaller requests use full-image decoding.
 
 <details>
 <summary>Batch generation and local model files</summary>
@@ -266,7 +263,7 @@ Use `text_encoder_path` and `vae_path` for local copies of the frozen models,
 and `local_files_only=True` to disable downloads.
 
 Sampling uses resolution-dependent time shifting. Custom dimensions must be
-multiples of 16.
+multiples of 16 and no greater than 2560 per axis.
 
 ```python
 images = pipe(
@@ -277,7 +274,7 @@ images = pipe(
     width=1152,
     height=704,
     num_inference_steps=20,
-    guidance_scale=1.0,
+    guidance_scale=4.5,
     generator=[torch.Generator().manual_seed(seed) for seed in (7, 8)],
 ).images
 ```
@@ -306,14 +303,20 @@ python -m scripts.pretrain.launch --help
 
 ```bash
 pip install -r demo/requirements.txt
-python -m demo.app
+INKO_MODEL_ID=kaupane/Inko python -m demo.app
 ```
 
 Set `DEEPSEEK_API_KEY` in the server environment or Space secrets to enable
 prompt enhancement with `deepseek-flash`. Enhancement runs before GPU allocation;
 if the service is unavailable, the app uses the original prompt and shows a
-notice. `INKO_MODEL_ID` selects a different Hub model or local export.
-`INKO_DEVICE=cpu` runs in FP32 on CPU.
+notice. Set `INKO_MODEL_ID` to the final RL EMA export directory or an explicit
+model repository. The demo requires this setting at startup. `INKO_DEVICE=cpu`
+runs in FP32 on CPU.
+
+The demo accepts 480–2560 pixels per axis in steps of 16, CFG 0–10, and 10–50
+sampling steps. Selecting a gallery prompt uses the loaded model's sampling
+defaults and the saved seed, with enhancement and randomization off. The static
+gallery images show the earlier 600k pretrained model.
 
 The hosted demo uses [ZeroGPU](https://huggingface.co/docs/hub/spaces-zerogpu).
 Its app, dependencies and Space metadata live together in [`demo/`](demo/).
@@ -321,12 +324,12 @@ Its app, dependencies and Space metadata live together in [`demo/`](demo/).
 ### Export a checkpoint
 
 The exporter reads a weight file and its adjacent `transformer_config.json`.
-Use the pretrained EMA file, or merged weights exported by posttraining:
+For the final model, use the merged RL EMA file exported by posttraining:
 
 ```bash
 python -m scripts.export_model \
-  --checkpoint /path/to/checkpoint/ema_weights.pt \
-  --output models/Inko
+  --checkpoint /path/to/final-rl-ema/weights.pt \
+  --output models/InkoFinal
 ```
 
 The output contains `model.safetensors`, `transformer_config.json` and
