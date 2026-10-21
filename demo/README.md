@@ -16,7 +16,14 @@ short_description: Generate artistic paintings from text prompts
 
 # Inko
 
-English and Chinese text-to-image generation with the 600k pretrained Inko model.
+English and Chinese text-to-image generation with the final RL EMA export.
+Width and height each support 480–2560 pixels, in multiples of 16.
+RoPE scaling and VAE tiling follow the requested dimensions automatically.
 
-[Model and usage](https://huggingface.co/kaupane/Inko) ·
+Set `INKO_MODEL_ID=kaupane/Inko` for the published final RL EMA, or use a local
+export directory. Start `python -m demo.app` from the source checkout for local use. The loaded export supplies
+the sampling defaults: 20 Euler steps and CFG 4.5 for the final RL EMA.
+The gallery pictures are from the earlier pretrained model; selecting a prompt
+uses the loaded model's defaults and the saved seed.
+
 [Source](https://github.com/Mtrya/inko)

@@ -1,7 +1,6 @@
 """Attention, positional features and native Inko transformer blocks."""
 
 from typing import Tuple, Optional, Sequence
-import functools
 import math
 
 import torch
@@ -32,9 +31,7 @@ class RMSNorm(nn.RMSNorm):
         # the learned gain before casting back. Casting the gain to BF16 just
         # to use a fused kernel would change that computation.
         eps = self.eps if self.eps is not None else torch.finfo(x.dtype).eps
-        y, _ = torch_npu.npu_rms_norm(
-            x.float(), self.weight.float(), epsilon=eps
-        )
+        y, _ = torch_npu.npu_rms_norm(x.float(), self.weight.float(), epsilon=eps)
         return y.to(x.dtype)
 
 
@@ -196,7 +193,7 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     Apply rotary embeddings
     Args:
         x: Input tensor [B, S, H, D]
-        freqs_cis: Complex frequency tensor [S, D/2]
+        freqs_cis: Complex frequencies [S, D/2] or [B, S, D/2]
     Returns:
         Tensor with rotary embeddings applied [B, S, H, D]
     """
@@ -204,7 +201,9 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     x_complex = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
 
     # Reshape for broadcasting: [S, D/2] -> [1, S, 1,  D/2]
-    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)
+    if freqs_cis.ndim == 2:
+        freqs_cis = freqs_cis.unsqueeze(0)
+    freqs_cis = freqs_cis.unsqueeze(2)
 
     # Apply rotation
     x_rotated = x_complex * freqs_cis
@@ -223,7 +222,10 @@ def apply_rotary_emb_real(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Ten
     """
     pairs = x.float().reshape(*x.shape[:-1], -1, 2)
     real, imag = pairs.unbind(-1)
-    cosine, sine = torch.view_as_real(freqs_cis)[None, :, None].unbind(-1)
+    freqs_real = torch.view_as_real(freqs_cis)
+    if freqs_real.ndim == 3:
+        freqs_real = freqs_real.unsqueeze(0)
+    cosine, sine = freqs_real.unsqueeze(2).unbind(-1)
     rotated = torch.stack(
         (real * cosine - imag * sine, real * sine + imag * cosine), dim=-1
     )
@@ -235,14 +237,16 @@ def apply_rotary_emb_realfreq(
 ) -> torch.Tensor:
     """apply_rotary_emb_real taking an already-real frequency tensor.
 
-    freqs_real is [S, D/2, 2] float32 (cos, sin pairs) — the view_as_real of
+    freqs_real is [S, D/2, 2] or [B, S, D/2, 2] float32 (cos, sin pairs), the view_as_real of
     the complex table, materialized OUTSIDE compiled regions so no
     complex-typed tensor crosses the graph boundary (torchair/GE has no
     complex dtype support).
     """
     pairs = x.float().reshape(*x.shape[:-1], -1, 2)
     real, imag = pairs.unbind(-1)
-    cosine, sine = freqs_real[None, :, None].unbind(-1)
+    if freqs_real.ndim == 3:
+        freqs_real = freqs_real.unsqueeze(0)
+    cosine, sine = freqs_real.unsqueeze(2).unbind(-1)
     rotated = torch.stack(
         (real * cosine - imag * sine, real * sine + imag * cosine), dim=-1
     )
@@ -263,24 +267,32 @@ def set_real_rope(model: nn.Module, enabled: bool) -> None:
 
 
 class MSRoPE(nn.Module):
-    """Multimodal Scalable RoPE for 2D images and text"""
+    """Image/text RoPE with automatic Dy-YaRN inference scaling.
+
+    The 896p training buckets reach 1184 pixels on either axis, or 74 patches
+    at 16 pixels per patch. Training always uses the original frequencies.
+    DyPE follows https://arxiv.org/html/2510.20766v2, equations 9 and 13–17.
+    """
 
     def __init__(
         self,
         theta: int = 10000,
         axes_dim: list = [64, 64],
-        scaling_type: str = "none",
-        scaling_factor: float = 1.0,
+        reference_hw: tuple[int, int] = (74, 74),
         centered: bool = False,
+        decay_exponent: float = 2.0,
+        yarn_alpha: float = 1.0,
+        yarn_beta: float = 32.0,
     ):
         super().__init__()
         self.theta = theta
         self.axes_dim = axes_dim
-        self.scaling_type = scaling_type
-        self.scaling_factor = scaling_factor
+        self.reference_hw = reference_hw
+        self.decay_exponent = decay_exponent
+        self.yarn_alpha = yarn_alpha
+        self.yarn_beta = yarn_beta
         # centered: image coords symmetric around 0 ([-(n-1)/2, (n-1)/2]) instead of
-        # 0-based from the corner; text stays pinned to a fixed diagonal beyond the
-        # image range in both modes.
+        # 0-based from the corner. Text starts at max(height, width) on both axes.
         self.centered = centered
 
         # Precompute frequency tables for both spatial axes
@@ -290,108 +302,205 @@ class MSRoPE(nn.Module):
             "pos_freqs", torch.view_as_real(self._build_frequency_table(pos_index))
         )
 
-        # LRU cache for image frequency computation
+        # Retain only the latest geometry/mode on each instance.
         self._cache = {}
 
-    def rope_params(self, index: torch.Tensor, dim: int) -> torch.Tensor:
+    def needs_time(self, img_hw: tuple[int, int]) -> bool:
+        return not self.training and any(
+            size > reference for size, reference in zip(img_hw, self.reference_hw)
+        )
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        if self.pos_freqs.dtype != torch.float32:
+            # Rebuild instead of promoting already-rounded BF16/FP16 rotations.
+            self.pos_freqs = torch.view_as_real(
+                self._build_frequency_table(torch.arange(self.pos_freqs.shape[0]))
+            ).to(self.pos_freqs.device)
+        self._cache.clear()
+        return self
+
+    def rope_params(
+        self,
+        index: torch.Tensor,
+        dim: int,
+        scaling_factor: float = 1.0,
+        *,
+        reference: int,
+        kappa: float = 1.0,
+    ) -> torch.Tensor:
         """
         Generate RoPE parameters for given dimensions
         Args:
             index: Position indices [S]
             dim: Embedding dimension for this axis
+            scaling_factor: Spatial extension along this axis
         Returns:
-            Complex frequency tensor [S, dim]
+            Complex frequency tensor [S, dim/2]
         """
         assert dim % 2 == 0
 
-        # Apply scaling
-        if self.scaling_type == "linear":
-            index = index / self.scaling_factor
-            theta = self.theta
-        elif self.scaling_type == "ntk":
-            theta = self.theta * (self.scaling_factor ** (dim / (dim - 2)))
-        else:
-            theta = self.theta
-
         # Compute frequency components: 1/ theta^(2i/dim)
-        freqs = torch.outer(
-            index,
-            1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float32).div(dim)),
+        powers = torch.arange(0, dim, 2, dtype=torch.float32, device=index.device).div(
+            dim
         )
+        inverse_freqs = 1.0 / torch.pow(self.theta, powers)
+        if scaling_factor > 1.0 and kappa > 0.0:
+            rotations = reference * inverse_freqs / (2 * math.pi)
+            ramp = (
+                (rotations - self.yarn_alpha * kappa)
+                / ((self.yarn_beta - self.yarn_alpha) * kappa)
+            ).clamp(0, 1)
+            inverse_freqs = inverse_freqs * (ramp + (1 - ramp) / scaling_factor)
+        freqs = torch.outer(index.float(), inverse_freqs)
 
         # Convert to complex polar form: e^(i*freqs)
         return torch.polar(torch.ones_like(freqs), freqs)
 
-    def _build_frequency_table(self, pos_index: torch.Tensor) -> torch.Tensor:
+    def _build_frequency_table(
+        self,
+        pos_index: torch.Tensor,
+        scaling_factors: tuple[float, float] = (1.0, 1.0),
+        *,
+        kappa: float = 1.0,
+    ) -> torch.Tensor:
         """Build frequency table for both height and width axes"""
-        height_freqs = self.rope_params(pos_index, self.axes_dim[0])
-        width_freqs = self.rope_params(pos_index, self.axes_dim[1])
+        height_freqs = self.rope_params(
+            pos_index,
+            self.axes_dim[0],
+            scaling_factors[0],
+            kappa=kappa,
+            reference=self.reference_hw[0],
+        )
+        width_freqs = self.rope_params(
+            pos_index,
+            self.axes_dim[1],
+            scaling_factors[1],
+            kappa=kappa,
+            reference=self.reference_hw[1],
+        )
 
-        # Concatenate height and width frequencies: [S, height_dim+width_dim]
+        # Concatenate height and width frequencies: [S, (height_dim+width_dim)/2]
         return torch.cat([height_freqs, width_freqs], dim=1)
 
     def forward(
-        self, img_hw: Tuple[int, int], txt_seq_len: int, device
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self,
+        img_hw: tuple[int, int],
+        txt_seq_len: int,
+        device,
+        *,
+        time: tuple[float, ...] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute frequency tensors for image and text sequences
         Args:
-            img_hw: Image dimensions (height, width)
+            img_hw: Image patch-grid dimensions (height, width)
             txt_seq_len: Length of text sequence
             device: Device for tensor placement
+            time: Flow time per image (0 noise, 1 image); required for active DyPE
         Returns:
-            Tuple of (image_freqs, text_freqs) tensors
+            Image/text frequencies, with a batch dimension when times differ
         """
         height, width = img_hw
+        device = torch.device(device)
+        scaling_factors = (1.0, 1.0)
+        if not self.training:
+            scaling_factors = tuple(
+                max(1.0, size / reference)
+                for size, reference in zip(img_hw, self.reference_hw)
+            )
+        scaled = scaling_factors != (1.0, 1.0)
+        kappas = (1.0,)
+        if self.needs_time(img_hw):
+            if time is None:
+                raise ValueError("dynamic RoPE requires the current flow time")
+            # Inko runs from t=0 noise to t=1 image, opposite to the paper.
+            kappas = tuple((1 - t) ** self.decay_exponent for t in time)
+            if len(set(kappas)) == 1:
+                kappas = kappas[:1]
 
-        # Check if we need to expand the frequency table
+        # Keep the checkpoint's base table unscaled.
         max_needed = max(height, width) + txt_seq_len
         current_max = self.pos_freqs.shape[0]
-
         if max_needed > current_max:
-            # Expand by 2x or to max_needed, whichever is larger
             new_max = max(max_needed, current_max * 2)
-            # print(f"Expanding RoPE frequency table from {current_max} to {new_max}")
-            pos_index = torch.arange(new_max, device=device)
-            self.pos_freqs = torch.view_as_real(self._build_frequency_table(pos_index))
-
-        # Ensure frequencies are on correct device
+            self.pos_freqs = torch.view_as_real(
+                self._build_frequency_table(torch.arange(new_max))
+            )
         if self.pos_freqs.device != device:
             self.pos_freqs = self.pos_freqs.to(device)
 
-        # Get cached image frequencies or compute new ones
-        cache_key = (height, width)
+        cache_key = (
+            height,
+            width,
+            txt_seq_len,
+            scaling_factors,
+            kappas,
+            self.reference_hw,
+            self.yarn_alpha,
+            self.yarn_beta,
+            self.centered,
+            device,
+        )
         if cache_key in self._cache:
-            img_freqs = self._cache[cache_key]
-        else:
-            img_freqs = self._compute_image_freqs(height, width)
-            self._cache[cache_key] = img_freqs
-        img_freqs = img_freqs.to(device)
+            return self._cache[cache_key]
 
-        # Text frequencies start after maximum image position
+        images, texts = [], []
         max_img_pos = max(height, width)
-        # View as complex for slicing (must be float32 — view_as_complex doesn't support bf16)
-        pos_freqs_complex = torch.view_as_complex(self.pos_freqs.float())
-        txt_freqs = pos_freqs_complex[
-            max_img_pos : max_img_pos + txt_seq_len, :
-        ]  # placing text tokens on a diagonal in the 2D position space
+        for kappa in kappas:
+            images.append(
+                self._compute_image_freqs(
+                    height, width, scaling_factors, kappa=kappa
+                ).to(device)
+            )
+            # Share the image basis without relocating the text diagonal.
+            texts.append(
+                torch.view_as_complex(self.pos_freqs)[max_img_pos:max_needed]
+                if not scaled
+                else self._build_frequency_table(
+                    torch.arange(max_img_pos, max_needed),
+                    scaling_factors,
+                    kappa=kappa,
+                ).to(device)
+            )
+        img_freqs = images[0] if len(images) == 1 else torch.stack(images)
+        txt_freqs = texts[0] if len(texts) == 1 else torch.stack(texts)
+        if scaled:
+            # Eq. 9 multiplies logits by tau. Multiplying BOTH Q/K rotations by
+            # sqrt(tau) applies it in every attention backend and RoPE layout.
+            amplitude = math.sqrt(1 + 0.1 * math.log(max(scaling_factors)))
+            img_freqs = img_freqs * amplitude
+            txt_freqs = txt_freqs * amplitude
 
+        self._cache.clear()
+        self._cache[cache_key] = (img_freqs, txt_freqs)
         return img_freqs, txt_freqs
 
     def prepare_freqs(
-        self, img_hw: Tuple[int, int], txt_seq_len: int, device
+        self,
+        img_hw: tuple[int, int],
+        txt_seq_len: int,
+        device,
+        *,
+        time: tuple[float, ...] | None = None,
     ) -> torch.Tensor:
-        """Concatenated [S_img + S_txt, D/2] complex freqs, reusable across blocks.
+        """Concatenated [S_img + S_txt, D/2] freqs, optionally batched.
 
         Identical to applying ``forward()`` and concatenating the two halves;
         hoisting it out of the block loop removes one table lookup and two
         concatenations per layer.
         """
-        img_freqs, txt_freqs = self.forward(img_hw, txt_seq_len, device)
-        return torch.cat([img_freqs, txt_freqs], dim=0)
+        img_freqs, txt_freqs = self.forward(img_hw, txt_seq_len, device, time=time)
+        return torch.cat([img_freqs, txt_freqs], dim=-2)
 
-    @functools.lru_cache(maxsize=None)
-    def _compute_image_freqs(self, height: int, width: int) -> torch.Tensor:
+    def _compute_image_freqs(
+        self,
+        height: int,
+        width: int,
+        scaling_factors: tuple[float, float],
+        *,
+        kappa: float = 1.0,
+    ) -> torch.Tensor:
         """
         Compute frequency tensor for 2D image grid
         Args:
@@ -400,24 +509,31 @@ class MSRoPE(nn.Module):
         Returns:
             Frequency tensor [height*width, total_dim] (complex)
         """
-        # Split precomputed frequencies by axis
-        # pos_freqs is [S, D, 2] (real) — cast to float32 for view_as_complex
         h_dim, w_dim = self.axes_dim
-
+        h_idx = torch.arange(height, dtype=torch.float32)
+        w_idx = torch.arange(width, dtype=torch.float32)
         if self.centered:
             # Symmetric (possibly half-integer) coordinates around the origin.
-            h_idx = torch.arange(height, dtype=torch.float32) - (height - 1) / 2.0
-            w_idx = torch.arange(width, dtype=torch.float32) - (width - 1) / 2.0
-            # rope_params returns complex [N, dim//2]; store as real pairs
-            h_freqs = torch.view_as_real(self.rope_params(h_idx, h_dim))
-            w_freqs = torch.view_as_real(self.rope_params(w_idx, w_dim))
-        else:
-            pos_freqs = self.pos_freqs.float()
-            h_freqs, w_freqs = pos_freqs.split([h_dim // 2, w_dim // 2], dim=1)
-
-            # Select frequencies for the current height and width
-            h_freqs = h_freqs[:height, :]  # [H, h_dim//2, 2]
-            w_freqs = w_freqs[:width, :]  # [W, w_dim//2, 2]
+            h_idx = h_idx - (height - 1) / 2.0
+            w_idx = w_idx - (width - 1) / 2.0
+        h_freqs = torch.view_as_real(
+            self.rope_params(
+                h_idx,
+                h_dim,
+                scaling_factors[0],
+                kappa=kappa,
+                reference=self.reference_hw[0],
+            )
+        )
+        w_freqs = torch.view_as_real(
+            self.rope_params(
+                w_idx,
+                w_dim,
+                scaling_factors[1],
+                kappa=kappa,
+                reference=self.reference_hw[1],
+            )
+        )
 
         # Broadcast to create the grid
         # Expand to [H, W, dim, 2]
@@ -476,8 +592,6 @@ class DoubleStreamAttention(nn.Module):
         qkv_bias: bool = True,
         rope_theta: int = 10000,
         rope_axes_dim: list = [64, 64],
-        rope_scaling_type: str = "none",
-        rope_scaling_factor: float = 1.0,
         rope_centered: bool = False,
     ):
         super().__init__()
@@ -497,8 +611,6 @@ class DoubleStreamAttention(nn.Module):
         self.rope = MSRoPE(
             theta=rope_theta,
             axes_dim=rope_axes_dim,
-            scaling_type=rope_scaling_type,
-            scaling_factor=rope_scaling_factor,
             centered=rope_centered,
         )
 
@@ -514,6 +626,7 @@ class DoubleStreamAttention(nn.Module):
         txt_attention_mask: Optional[torch.Tensor] = None,
         attn_metadata=None,
         rope_freqs: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        rope_time: tuple[float, ...] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         B, S_img, C = img_tokens.shape
         _, S_txt, _ = txt_tokens.shape
@@ -542,7 +655,7 @@ class DoubleStreamAttention(nn.Module):
 
         # RoPE
         img_freqs, txt_freqs = (
-            self.rope(img_hw, txt_seq_len, img_tokens.device)
+            self.rope(img_hw, txt_seq_len, img_tokens.device, time=rope_time)
             if rope_freqs is None
             else rope_freqs
         )
@@ -636,8 +749,6 @@ class DoubleStreamDiTBlock(nn.Module):
             True,
             rope_theta,
             rope_axes_dim,
-            rope_scaling_type="none",
-            rope_scaling_factor=1.0,
             rope_centered=True,
         )
 
@@ -659,6 +770,7 @@ class DoubleStreamDiTBlock(nn.Module):
         txt_attention_mask: Optional[torch.Tensor] = None,
         attn_metadata=None,
         rope_freqs: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        rope_time: tuple[float, ...] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Modulation
         # c: [B, c_dim]
@@ -691,6 +803,7 @@ class DoubleStreamDiTBlock(nn.Module):
             txt_attention_mask,
             attn_metadata=attn_metadata,
             rope_freqs=rope_freqs,
+            rope_time=rope_time,
         )
 
         img_attn = self.norm_msa_img_out(img_attn)
@@ -727,8 +840,6 @@ class SingleStreamAttention(nn.Module):
         qkv_bias: bool = True,
         rope_theta: int = 10000,
         rope_axes_dim: list = [64, 64],
-        rope_scaling_type: str = "none",
-        rope_scaling_factor: float = 1.0,
         rope_centered: bool = False,
     ):
         super().__init__()
@@ -744,8 +855,6 @@ class SingleStreamAttention(nn.Module):
         self.rope = MSRoPE(
             theta=rope_theta,
             axes_dim=rope_axes_dim,
-            scaling_type=rope_scaling_type,
-            scaling_factor=rope_scaling_factor,
             centered=rope_centered,
         )
 
@@ -760,6 +869,7 @@ class SingleStreamAttention(nn.Module):
         rope_freqs: Optional[torch.Tensor] = None,
         attn_bias: Optional[torch.Tensor] = None,
         attn_metadata=None,
+        rope_time: tuple[float, ...] | None = None,
     ) -> torch.Tensor:
         B, S, C = x.shape
 
@@ -793,7 +903,9 @@ class SingleStreamAttention(nn.Module):
             q_txt = q[:, :, S_img:, :]
             k_txt = k[:, :, S_img:, :]
 
-            img_freqs, txt_freqs = self.rope(img_hw, txt_seq_len, x.device)
+            img_freqs, txt_freqs = self.rope(
+                img_hw, txt_seq_len, x.device, time=rope_time
+            )
 
             q_img = rotate(q_img.transpose(1, 2), img_freqs).transpose(1, 2)
             k_img = rotate(k_img.transpose(1, 2), img_freqs).transpose(1, 2)
@@ -869,8 +981,6 @@ class SingleStreamDiTBlock(nn.Module):
             True,
             rope_theta,
             rope_axes_dim,
-            rope_scaling_type="none",
-            rope_scaling_factor=1.0,
             rope_centered=True,
         )
 
@@ -891,6 +1001,7 @@ class SingleStreamDiTBlock(nn.Module):
         rope_freqs: Optional[torch.Tensor] = None,
         attn_bias: Optional[torch.Tensor] = None,
         attn_metadata=None,
+        rope_time: tuple[float, ...] | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Modulation
         # c: [B, c_dim]
@@ -916,6 +1027,7 @@ class SingleStreamDiTBlock(nn.Module):
             rope_freqs=rope_freqs,
             attn_bias=attn_bias,
             attn_metadata=attn_metadata,
+            rope_time=rope_time,
         )
 
         x_attn = self.norm_msa_out(x_attn)

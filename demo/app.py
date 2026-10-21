@@ -1,4 +1,4 @@
-"""Gradio demo for the public Inko checkpoint, including ZeroGPU hosting."""
+"""Gradio demo for an explicit Inko export, including ZeroGPU hosting."""
 
 import json
 import math
@@ -14,9 +14,13 @@ import gradio as gr
 import requests
 import torch
 
-from src.pipeline import InkoPipeline
+from src.pipeline import MAX_IMAGE_SIZE, InkoPipeline
 
-MODEL_ID = os.environ.get("INKO_MODEL_ID", "kaupane/Inko")
+MODEL_ID = os.environ.get("INKO_MODEL_ID")
+if not MODEL_ID:
+    raise RuntimeError(
+        "Set INKO_MODEL_ID to the final RL EMA export directory or repository."
+    )
 DEVICE = os.environ.get("INKO_DEVICE", "cuda")
 pipe = InkoPipeline.from_pretrained(
     MODEL_ID,
@@ -45,8 +49,8 @@ def select_example(event: gr.SelectData):
         SHOWCASE["height"],
         item["seed"],
         False,
-        SHOWCASE["num_inference_steps"],
-        SHOWCASE["guidance_scale"],
+        pipe.config["num_inference_steps"],
+        pipe.config["guidance_scale"],
         False,
         item["prompt"],
         str(SHOWCASE_DIR / f"{item['name']}.png"),
@@ -103,8 +107,10 @@ def prepare_prompt(prompt, enhance):
 def generate(prompt, width, height, seed, randomize_seed, steps, guidance):
     if not prompt.strip():
         raise gr.Error("Enter a prompt in English or Chinese.")
-    if any(not 480 <= n <= 1600 or n % 16 for n in (width, height)):
-        raise gr.Error("Width and height must be multiples of 16 from 480 to 1600.")
+    if any(not 480 <= n <= MAX_IMAGE_SIZE or n % 16 for n in (width, height)):
+        raise gr.Error(
+            f"Width and height must be multiples of 16 from 480 to {MAX_IMAGE_SIZE}."
+        )
     if not 0 <= guidance <= 10:
         raise gr.Error("CFG must be from 0 to 10.")
     if not 10 <= steps <= 50 or steps != int(steps):
@@ -117,10 +123,11 @@ def generate(prompt, width, height, seed, randomize_seed, steps, guidance):
 
 
 def gpu_duration(prompt, width, height, seed, steps, guidance, progress=PROGRESS):
-    # Measured 896px and 1600px runs leave room for startup and VAE decode.
-    area_scale = (width * height / 896**2) ** 1.5
+    # Attention cost grows with squared area. H200 panel timings at 1600/2048
+    # leave headroom here for startup and tiled VAE decoding.
+    area_scale = (width * height / 896**2) ** 2
     forwards = steps * (1 if guidance == 1 else 2)
-    return 20 + math.ceil(0.16 * forwards * area_scale)
+    return 20 + math.ceil(0.025 * forwards * area_scale)
 
 
 @spaces.GPU(duration=gpu_duration)
@@ -143,9 +150,8 @@ with gr.Blocks(title="Inko") as demo:
     gr.Markdown(
         "# Inko\n"
         "Generate paintings and illustrations from English or Chinese prompts.\n\n"
-        "[Model](https://huggingface.co/kaupane/Inko) · "
         "[Source](https://github.com/Mtrya/inko)\n\n"
-        "This demo uses the 600k pretrained checkpoint. Posttraining is in progress."
+        "Generate images up to 2560 pixels on each side."
     )
     with gr.Row():
         with gr.Column():
@@ -158,9 +164,11 @@ with gr.Blocks(title="Inko") as demo:
                 info="Adds visual detail. When enabled, your prompt is sent to DeepSeek.",
             )
             with gr.Row():
-                width = gr.Slider(480, 1600, value=896, step=16, label="Width (pixels)")
+                width = gr.Slider(
+                    480, MAX_IMAGE_SIZE, value=896, step=16, label="Width (pixels)"
+                )
                 height = gr.Slider(
-                    480, 1600, value=896, step=16, label="Height (pixels)"
+                    480, MAX_IMAGE_SIZE, value=896, step=16, label="Height (pixels)"
                 )
             generate_button = gr.Button("Generate", variant="primary")
             with gr.Accordion("Generation settings", open=False):

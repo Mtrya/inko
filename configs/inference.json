@@ -5,5 +5,5 @@
   "height": 896,
   "width": 896,
   "num_inference_steps": 20,
-  "guidance_scale": 1.0
+  "guidance_scale": 4.5
 }

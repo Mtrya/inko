@@ -121,6 +121,10 @@ class Inko(nn.Module, PyTorchModelHubMixin):
         )
         img_hw = (height // 2, width // 2)
         txt_seq_len = txt.shape[1]
+        rope_time = None
+        if any(block.attn.rope.needs_time(img_hw) for block in self.blocks):
+            # One host transfer per forward; support different times per image.
+            rope_time = tuple(t.detach().float().cpu().tolist())
 
         # Single-stream layers share geometry and padding. Build these tensors
         # once per forward, keeping their math identical to the per-layer path.
@@ -128,7 +132,7 @@ class Inko(nn.Module, PyTorchModelHubMixin):
         if self.single_stream_depth:
             first_single = self.blocks[self.double_stream_depth]
             rope_freqs = first_single.attn.rope.prepare_freqs(
-                img_hw, txt_seq_len, x.device
+                img_hw, txt_seq_len, x.device, time=rope_time
             )
             if first_single.attn.real_rope:
                 rope_freqs = torch.view_as_real(rope_freqs)
@@ -153,7 +157,14 @@ class Inko(nn.Module, PyTorchModelHubMixin):
                 from torch.utils.checkpoint import checkpoint
 
                 x, txt = checkpoint(
-                    block, x, txt, c, img_hw, txt_seq_len, txt_mask,
+                    block,
+                    x,
+                    txt,
+                    c,
+                    img_hw,
+                    txt_seq_len,
+                    txt_mask,
+                    rope_time=rope_time,
                     use_reentrant=False,
                 )
                 continue
@@ -167,9 +178,12 @@ class Inko(nn.Module, PyTorchModelHubMixin):
                     txt_mask,
                     rope_freqs=rope_freqs,
                     attn_bias=attn_bias,
+                    rope_time=rope_time,
                 )
             else:
-                x, txt = block(x, txt, c, img_hw, txt_seq_len, txt_mask)
+                x, txt = block(
+                    x, txt, c, img_hw, txt_seq_len, txt_mask, rope_time=rope_time
+                )
         return self.unpatchify(self.final_layer(x), height, width)
 
     def get_config(self) -> dict:

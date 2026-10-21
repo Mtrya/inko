@@ -1,6 +1,7 @@
 """Inference state flow and export round trips; these do not assess image quality."""
 
 import json
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,12 @@ class RecordingVAE(torch.nn.Module):
             "latents_mean": [0.25] * 16,
             "latents_std": [2.0] * 16,
         }
+
+    def enable_tiling(self, **kwargs):
+        self.use_tiling = True
+
+    def disable_tiling(self):
+        self.use_tiling = False
 
     def decode(self, x):
         self.decoded = x.clone()
@@ -109,6 +116,8 @@ def test_per_image_generators_preserve_batch_order_and_global_rng(pipe):
         {"prompt": []},
         {"height": 31},
         {"width": 0},
+        {"width": 2576},
+        {"height": 2576},
         {"num_inference_steps": 0},
         {"num_inference_steps": 2.5},
         {"guidance_scale": float("nan")},
@@ -131,6 +140,63 @@ def test_to_keeps_latent_statistics_in_fp32(pipe):
         next(model.parameters()).dtype == torch.bfloat16
         for model in (pipe.transformer, pipe.text_encoder, pipe.vae)
     )
+
+
+def test_requested_dimensions_drive_both_block_types_and_isolate_requests(
+    pipe, small_model, monkeypatch
+):
+    from src.models.dit_blocks import MSRoPE
+
+    pipe.transformer = small_model().eval().requires_grad_(False)
+    for module in pipe.transformer.modules():
+        if isinstance(module, MSRoPE):
+            module.reference_hw = (2, 3)
+    calls = []
+    forward = MSRoPE.forward
+
+    def record(self, img_hw, txt_seq_len, device, *, time=None):
+        image, text = forward(self, img_hw, txt_seq_len, device, time=time)
+        calls.append((img_hw, image[0].clone(), text[0].clone()))
+        return image, text
+
+    monkeypatch.setattr(MSRoPE, "forward", record)
+    pipe(
+        "positive",
+        height=32,
+        width=32,
+        num_inference_steps=1,
+        generator=torch.Generator().manual_seed(7),
+    )
+    small = pipe.vae.decoded.clone()
+    calls.clear()
+    pipe(
+        "positive",
+        height=64,
+        width=96,
+        num_inference_steps=1,
+        generator=torch.Generator().manual_seed(7),
+    )
+    assert len(calls) == 2  # One double-stream and one single-stream block.
+    for img_hw, image, text in calls:
+        assert img_hw == (4, 6)  # Each patch spans 16 output pixels.
+        torch.testing.assert_close(
+            image,
+            math.sqrt(1 + 0.1 * math.log(2))
+            * torch.exp(1j * torch.tensor([-0.75, -0.0075, -1.25, -0.0125])),
+        )
+        torch.testing.assert_close(
+            text,
+            math.sqrt(1 + 0.1 * math.log(2))
+            * torch.exp(1j * torch.tensor([3.0, 0.03, 3.0, 0.03])),
+        )
+    pipe(
+        "positive",
+        height=32,
+        width=32,
+        num_inference_steps=1,
+        generator=torch.Generator().manual_seed(7),
+    )
+    torch.testing.assert_close(pipe.vae.decoded, small, rtol=0, atol=0)
 
 
 def test_export_preserves_weights_and_loads_as_pipeline(tmp_path, monkeypatch, pipe):
@@ -166,3 +232,51 @@ def test_export_preserves_weights_and_loads_as_pipeline(tmp_path, monkeypatch, p
         )
     assert not restored.transformer.training
     assert not any(p.requires_grad for p in restored.transformer.parameters())
+
+
+def test_dynamic_rope_receives_current_solver_time(pipe, small_model, monkeypatch):
+    from src.models.dit_blocks import MSRoPE
+
+    pipe.transformer = small_model().eval().requires_grad_(False)
+    for module in pipe.transformer.modules():
+        if isinstance(module, MSRoPE):
+            module.reference_hw = (2, 3)
+    calls = []
+    forward = MSRoPE.forward
+
+    def record(self, img_hw, txt_seq_len, device, *, time=None):
+        calls.append(time)
+        return forward(self, img_hw, txt_seq_len, device, time=time)
+
+    def sample(velocity, noise, **kwargs):
+        for time in (0.25, 0.75):
+            velocity(noise, torch.full((noise.shape[0],), time))
+        return noise
+
+    monkeypatch.setattr(MSRoPE, "forward", record)
+    monkeypatch.setattr("src.pipeline.sample_ode", sample)
+    pipe("positive", height=64, width=96)
+    assert calls == [(0.25,), (0.25,), (0.75,), (0.75,)]
+    calls.clear()
+    pipe("positive", height=32, width=32)
+    assert calls == [None] * 4
+
+
+def test_vae_tiling_follows_each_request_dimensions(pipe, monkeypatch):
+    monkeypatch.setattr("src.pipeline.sample_ode", lambda velocity, noise, **kw: noise)
+    tiling = []
+
+    def decode(latents, vae):
+        tiling.append(vae.use_tiling)
+        return []
+
+    monkeypatch.setattr("src.pipeline.decode_latents", decode)
+    for width, height in (
+        (896, 896),
+        (2560, 512),
+        (512, 2560),
+        (2560, 2560),
+        (896, 896),
+    ):
+        pipe("positive", width=width, height=height)
+    assert tiling == [False, True, True, True, False]
