@@ -154,12 +154,19 @@ class Generator:
             prompts, rng = texts[0], generators[0]
         else:
             prompts, rng = texts, generators
+        parameters = dict(self.model.parameters)
+        if self.model.pipeline == "StableDiffusionPipeline" and isinstance(
+            parameters.get("negative_prompt"), str
+        ):
+            parameters["negative_prompt"] = [parameters["negative_prompt"]] * len(
+                texts
+            )
         images = self.pipe(
             prompt=prompts,
             height=height,
             width=width,
             generator=rng,
-            **self.model.parameters,
+            **parameters,
         ).images
         synchronize(self.device)
         generation_end = time.perf_counter()
