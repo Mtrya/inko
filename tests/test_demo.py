@@ -9,8 +9,6 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from src.pipeline import MAX_IMAGE_SIZE
-
 pytest.importorskip("gradio", minversion="6.13")
 pytest.importorskip("spaces")
 
@@ -119,11 +117,11 @@ def test_generation_forwards_dimensions_and_resolved_seed(
     gpu = Mock(return_value="generated image")
     monkeypatch.setattr(app, "run_pipeline", gpu)
     monkeypatch.setattr(app.secrets, "randbelow", lambda n: 1234567)
-    assert app.generate("A garden", 480, MAX_IMAGE_SIZE, 42, randomize, 20, 0) == (
+    assert app.generate("A garden", 480, 1920, 42, randomize, 20, 0) == (
         "generated image",
         expected_seed,
     )
-    gpu.assert_called_once_with("A garden", 480, MAX_IMAGE_SIZE, expected_seed, 20, 0)
+    gpu.assert_called_once_with("A garden", 480, 1920, expected_seed, 20, 0)
 
 
 def test_generation_api_keeps_existing_inputs_without_rope_choice(app):
@@ -149,8 +147,8 @@ def test_generation_api_keeps_existing_inputs_without_rope_choice(app):
         {"prompt": " "},
         {"width": 479},
         {"width": 481},
-        {"width": MAX_IMAGE_SIZE + 16},
-        {"height": MAX_IMAGE_SIZE + 16},
+        {"width": 1936},
+        {"height": 1936},
         {"guidance": -0.1},
         {"guidance": 10.1},
         {"guidance": float("nan")},

@@ -14,6 +14,8 @@ from src.evaluation.records import path_component, prompt_key, read_jsonl, sampl
 def scores_match(published, native):
     """Aggregates recomputed from judgments may differ from the published
     summary by float summation-order noise; compare within tolerance."""
+    if isinstance(published, bool) or isinstance(native, bool):
+        return type(published) is type(native) and published == native
     if isinstance(published, dict) and isinstance(native, dict):
         return published.keys() == native.keys() and all(
             scores_match(published[key], native[key]) for key in published

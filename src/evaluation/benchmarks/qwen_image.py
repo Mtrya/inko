@@ -71,21 +71,59 @@ def judge_batch(native, judge, batch, batch_size):
     )
     meta = pd.DataFrame([group["prompt"]["metadata"] for group in batch])
     # The released harness does not retry parse failures; bound the retries.
+    results = []
+    scores = [{} for _ in batch]
+    all_rows_scored = False
     for _ in range(8):
-        results, failures, _, image_failures = native._run_batch_inference(
-            judge, SimpleNamespace(batch_size=batch_size), inputs, meta, "Q-Judger"
+        attempted, failures, attempted_scores, image_failures = (
+            native._run_batch_inference(
+                judge, SimpleNamespace(batch_size=batch_size), inputs, meta, "Q-Judger"
+            )
         )
-        if not failures and not image_failures:
-            return results
         if image_failures:
             # Broken images do not heal by resampling.
             break
+        if not results:
+            results = [dict(row) for row in attempted]
+        for saved, latest, kept, incoming in zip(
+            results, attempted, scores, attempted_scores, strict=True
+        ):
+            for dimension, score in incoming.items():
+                if kept.get(dimension) is None:
+                    column = native.DIM_OUTPUT_MAP[dimension]
+                    saved[column] = latest[column]
+                    kept[dimension] = (
+                        score
+                        if isinstance(score, dict)
+                        and native.compute_dimension_score(score)["level1_score"]
+                        is not None
+                        else None
+                    )
+            parsed = {
+                dimension: score
+                for dimension, score in kept.items()
+                if score is not None
+            }
+            saved["judge_model_output"] = (
+                json.dumps(parsed, ensure_ascii=False) if parsed else None
+            )
+        all_rows_scored = all(
+            any(score is not None for score in row.values()) for row in scores
+        )
+        if all_rows_scored and (
+            not failures
+            or all(
+                row and all(score is not None for score in row.values())
+                for row in scores
+            )
+        ):
+            return results
     # Native aggregation omits missing dimensions. Keep partial scores after
     # bounded retries, but reject rows with no parsed dimensions.
-    if not image_failures and all(result["judge_model_output"] for result in results):
+    if not image_failures and all_rows_scored:
         return results
     raise ValueError(
-        f"Q-Judger failed to evaluate IDs {inputs['ID'].tolist()}: {results}"
+        f"Q-Judger failed to evaluate IDs {inputs['ID'].tolist()}: {attempted}"
     )
 
 

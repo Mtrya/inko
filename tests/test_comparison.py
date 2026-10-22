@@ -177,6 +177,15 @@ def test_published_aggregate_mismatch_fails(tmp_path):
         report(tmp_path, [row], ["base"])
 
 
+@pytest.mark.parametrize(
+    "published,native", [(True, 1.0), (False, 0), (1, True), (0.0, False)]
+)
+def test_score_comparison_rejects_boolean_numeric_mismatch(published, native):
+    from src.evaluation.report import scores_match
+
+    assert not scores_match({"overall": published}, {"overall": native})
+
+
 @pytest.mark.parametrize("change", ["judge", "inference", "prompt", "seed"])
 def test_incompatible_comparisons_fail(tmp_path, change):
     row = prompt("geneval", "original", "2", "two cats", {}, [11, 13])

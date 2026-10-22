@@ -9,7 +9,7 @@ import torch
 
 from scripts.export_model import export_model
 from src.models import Inko
-from src.pipeline import MAX_IMAGE_SIZE, InkoPipeline
+from src.pipeline import InkoPipeline
 
 
 class ConstantVelocity(torch.nn.Module):
@@ -110,8 +110,8 @@ def test_per_image_generators_preserve_batch_order_and_global_rng(pipe):
         {"prompt": []},
         {"height": 31},
         {"width": 0},
-        {"width": MAX_IMAGE_SIZE + 16},
-        {"height": MAX_IMAGE_SIZE + 16},
+        {"width": 1936},
+        {"height": 1936},
         {"num_inference_steps": 0},
         {"num_inference_steps": 2.5},
         {"guidance_scale": float("nan")},
@@ -258,7 +258,7 @@ def test_dynamic_rope_receives_current_solver_time(pipe, small_model, monkeypatc
 
 @pytest.mark.parametrize(
     "width,height",
-    [(MAX_IMAGE_SIZE, 512), (512, MAX_IMAGE_SIZE), (MAX_IMAGE_SIZE, MAX_IMAGE_SIZE)],
+    [(1920, 512), (512, 1920), (1920, 1920)],
 )
 def test_dimension_limit_is_accepted_on_either_axis(pipe, monkeypatch, width, height):
     monkeypatch.setattr("src.pipeline.sample_ode", lambda velocity, noise, **kw: noise)
