@@ -33,12 +33,6 @@ class RecordingVAE(torch.nn.Module):
             "latents_std": [2.0] * 16,
         }
 
-    def enable_tiling(self, **kwargs):
-        self.use_tiling = True
-
-    def disable_tiling(self):
-        self.use_tiling = False
-
     def decode(self, x):
         self.decoded = x.clone()
         pixels = torch.nn.functional.interpolate(x[:, :3, 0], scale_factor=8)
@@ -116,8 +110,8 @@ def test_per_image_generators_preserve_batch_order_and_global_rng(pipe):
         {"prompt": []},
         {"height": 31},
         {"width": 0},
-        {"width": 2576},
-        {"height": 2576},
+        {"width": 1936},
+        {"height": 1936},
         {"num_inference_steps": 0},
         {"num_inference_steps": 2.5},
         {"guidance_scale": float("nan")},
@@ -262,21 +256,18 @@ def test_dynamic_rope_receives_current_solver_time(pipe, small_model, monkeypatc
     assert calls == [None] * 4
 
 
-def test_vae_tiling_follows_each_request_dimensions(pipe, monkeypatch):
+@pytest.mark.parametrize(
+    "width,height",
+    [(1920, 512), (512, 1920), (1920, 1920)],
+)
+def test_dimension_limit_is_accepted_on_either_axis(pipe, monkeypatch, width, height):
     monkeypatch.setattr("src.pipeline.sample_ode", lambda velocity, noise, **kw: noise)
-    tiling = []
+    shapes = []
 
     def decode(latents, vae):
-        tiling.append(vae.use_tiling)
+        shapes.append(tuple(latents.shape))
         return []
 
     monkeypatch.setattr("src.pipeline.decode_latents", decode)
-    for width, height in (
-        (896, 896),
-        (2560, 512),
-        (512, 2560),
-        (2560, 2560),
-        (896, 896),
-    ):
-        pipe("positive", width=width, height=height)
-    assert tiling == [False, True, True, True, False]
+    pipe("positive", width=width, height=height)
+    assert shapes == [(1, 16, height // 8, width // 8)]

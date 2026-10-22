@@ -50,13 +50,13 @@ def test_factor_one_uses_original_fp32_rotations_after_dtype_cast(dtype, restore
 
 
 @pytest.mark.parametrize("centered", [False, True])
-def test_yarn_scales_each_axis_and_keeps_text_diagonal(centered):
+def test_yarn_shares_maximum_factor_and_keeps_text_diagonal(centered):
     rope = MSRoPE(axes_dim=[4, 4], reference_hw=(2, 3), centered=centered).eval()
     image, text = rope((4, 9), 2, "cpu", time=(0.0,))
     tau = 1 + 0.1 * math.log(3)
     grid = image.reshape(4, 9, 4)
     # Both frequency pairs fall below the interpolation ramp at time zero.
-    height_angles = torch.tensor([0.5, 0.005])
+    height_angles = torch.tensor([1 / 3, 0.01 / 3])
     width_angles = torch.tensor([1 / 3, 0.01 / 3])
     torch.testing.assert_close(
         (grid[1, 0] * grid[0, 0].conj())[:2] / tau,
@@ -105,7 +105,7 @@ def test_training_and_smaller_requests_cannot_reuse_scaled_tables():
 def test_dynamic_yarn_moves_frequency_bands_and_retains_temperature():
     rope = MSRoPE(
         axes_dim=[8, 8],
-        reference_hw=(64, 1),
+        reference_hw=(64, 64),
         decay_exponent=2,
         yarn_alpha=0.2,
         yarn_beta=2,
@@ -124,13 +124,12 @@ def test_dynamic_yarn_moves_frequency_bands_and_retains_temperature():
             (image[1] * image[0].conj())[:4] / tau,
             torch.exp(1j * torch.tensor(angles)),
         )
-        # The short width axis keeps its frequencies; global temperature
-        # multiplies both axes, image and text, even when phases return to base.
+        # Both axes share the same basis despite the short width. Temperature
+        # multiplies image and text even when phases return to base.
         torch.testing.assert_close(image.abs().square(), torch.full((128, 8), tau))
         torch.testing.assert_close(
             text[0],
-            math.sqrt(tau)
-            * torch.exp(1j * 128 * torch.tensor(angles + [1.0, 0.1, 0.01, 0.001])),
+            math.sqrt(tau) * torch.exp(1j * 128 * torch.tensor(angles + angles)),
             rtol=1e-5,
             atol=1e-5,
         )
@@ -205,3 +204,18 @@ def test_yarn_ramp_and_schedule_changes_invalidate_cache():
             image[1, :4] / math.sqrt(1 + 0.1 * math.log(2)),
             torch.exp(1j * torch.tensor([1.0, middle_angle, 0.005, 0.0005])),
         )
+
+
+@pytest.mark.parametrize("img_hw", [(2, 6), (6, 2)])
+def test_uniform_scaling_also_scales_the_axis_below_reference(img_hw):
+    rope = MSRoPE(axes_dim=[4, 4], reference_hw=(3, 3), centered=True).eval()
+    image, text = rope(img_hw, 1, "cpu", time=(0.0,))
+    grid = image.reshape(*img_hw, 4)
+    tau = 1 + 0.1 * math.log(2)
+    expected = torch.exp(1j * torch.tensor([0.5, 0.005]))
+    torch.testing.assert_close((grid[1, 0] * grid[0, 0].conj())[:2] / tau, expected)
+    torch.testing.assert_close((grid[0, 1] * grid[0, 0].conj())[2:] / tau, expected)
+    torch.testing.assert_close(
+        text[0] / math.sqrt(tau),
+        torch.exp(1j * torch.tensor([3.0, 0.03, 3.0, 0.03])),
+    )

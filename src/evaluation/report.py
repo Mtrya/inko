@@ -1,6 +1,7 @@
 """CPU comparison tables from saved images and native benchmark judgments."""
 
 import json
+import math
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -8,6 +9,24 @@ from pathlib import Path
 from src.evaluation.benchmarks.common import write_json
 from src.evaluation.benchmarks.run import adapter, dimensions, result_key
 from src.evaluation.records import path_component, prompt_key, read_jsonl, sample_key
+
+
+def scores_match(published, native):
+    """Aggregates recomputed from judgments may differ from the published
+    summary by float summation-order noise; compare within tolerance."""
+    if isinstance(published, bool) or isinstance(native, bool):
+        return type(published) is type(native) and published == native
+    if isinstance(published, dict) and isinstance(native, dict):
+        return published.keys() == native.keys() and all(
+            scores_match(published[key], native[key]) for key in published
+        )
+    if isinstance(published, list) and isinstance(native, list):
+        return len(published) == len(native) and all(
+            scores_match(a, b) for a, b in zip(published, native)
+        )
+    if isinstance(published, (int, float)) and isinstance(native, (int, float)):
+        return math.isclose(published, native, rel_tol=1e-9, abs_tol=1e-12)
+    return published == native
 
 
 def flatten(value, prefix=""):
@@ -176,7 +195,7 @@ def build(catalog, images, scores, models, pending, settings, output):
                 published
                 and len(rows) == len(all_rows)
                 and set(keys) == expected
-                and published["scores"] != native
+                and not scores_match(published["scores"], native)
             ):
                 raise ValueError(f"published aggregate differs from judgments: {root}")
             scored = {(*prompt_key(s), s["draw"]) for r in rows for s in r["samples"]}

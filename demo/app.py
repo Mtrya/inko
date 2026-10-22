@@ -151,7 +151,7 @@ with gr.Blocks(title="Inko") as demo:
         "# Inko\n"
         "Generate paintings and illustrations from English or Chinese prompts.\n\n"
         "[Source](https://github.com/Mtrya/inko)\n\n"
-        "Generate images up to 2560 pixels on each side."
+        f"Generate images up to {MAX_IMAGE_SIZE} pixels on each side."
     )
     with gr.Row():
         with gr.Column():

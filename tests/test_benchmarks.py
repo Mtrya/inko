@@ -288,6 +288,204 @@ def test_tiif_gives_up_after_bounded_retries(monkeypatch, tmp_path):
     assert len(calls) == 8
 
 
+def qwen_vlm_group():
+    return {
+        "prompt": {
+            "metadata": {"ID": 44, "dims_en": "Quality / Detail / Noise"},
+            "text": "A medical science infographic poster.",
+        },
+        "samples": [{"model": "model", "image_path": "image.png"}],
+    }
+
+
+QWEN_QUALITY = {"Detail": {"Noise": {"score": 2}}}
+QWEN_ALIGNMENT = {"Attributes": {"Quantity": {"score": 1}}}
+QWEN_COLUMNS = {
+    "Quality": "quality_judge_output",
+    "Alignment": "alignment_judge_output",
+}
+
+
+def qwen_result(scores):
+    parsed = {
+        dimension: score for dimension, score in scores.items() if score is not None
+    }
+    return {
+        "judge_model_output": json.dumps(parsed) if parsed else None,
+        **{
+            column: json.dumps(scores[dimension]) if dimension in scores else None
+            for dimension, column in QWEN_COLUMNS.items()
+        },
+    }
+
+
+def qwen_native_namespace(run_batch):
+    numeric_scores = [
+        (QWEN_QUALITY, 100.0),
+        (QWEN_ALIGNMENT, 60.0),
+        ({"Detail": {"Noise": {"score": 0}}}, 0.0),
+    ]
+    return SimpleNamespace(
+        _run_batch_inference=run_batch,
+        DIM_OUTPUT_MAP=QWEN_COLUMNS,
+        compute_dimension_score=lambda score: {
+            "level1_score": next(
+                (value for candidate, value in numeric_scores if score == candidate),
+                None,
+            )
+        },
+    )
+
+
+def stub_qwen_native(failures, image_failures=0, failing_scores=None):
+    calls = []
+
+    def run_batch(judge, args, inputs, meta, desc):
+        calls.append(desc)
+        if len(calls) <= failures:
+            scores = {"Quality": None} if failing_scores is None else failing_scores
+            return [qwen_result(scores)], 1, [scores], image_failures
+        scores = {"Quality": QWEN_QUALITY}
+        return [qwen_result(scores)], 0, [scores], image_failures
+
+    return qwen_native_namespace(run_batch), calls
+
+
+def test_qwen_retries_judge_parse_failures():
+    native, calls = stub_qwen_native(failures=2)
+    results = qwen_image.judge_batch(native, "judge", [qwen_vlm_group()], 4)
+    assert json.loads(results[0]["judge_model_output"]) == {
+        "Quality": {"Detail": {"Noise": {"score": 2}}}
+    }
+    assert calls == ["Q-Judger"] * 3
+
+
+def test_qwen_gives_up_after_bounded_retries():
+    native, calls = stub_qwen_native(failures=100)
+    with pytest.raises(ValueError, match="failed to evaluate IDs"):
+        qwen_image.judge_batch(native, "judge", [qwen_vlm_group()], 4)
+    assert len(calls) == 8
+
+
+def test_qwen_tolerates_rows_with_partially_parsed_dimensions():
+    scores = {"Quality": None, "Alignment": QWEN_ALIGNMENT}
+    native, calls = stub_qwen_native(failures=100, failing_scores=scores)
+    results = qwen_image.judge_batch(native, "judge", [qwen_vlm_group()], 4)
+    assert json.loads(results[0]["judge_model_output"]) == {
+        "Alignment": {"Attributes": {"Quantity": {"score": 1}}}
+    }
+    assert len(calls) == 8
+
+
+@pytest.mark.parametrize(
+    "scores", [{"Quality": {}}, {"Quality": {"Detail": {"Noise": {"score": "N/A"}}}}]
+)
+def test_qwen_rejects_rows_without_aggregatable_scores(scores):
+    native, calls = stub_qwen_native(failures=100, failing_scores=scores)
+    with pytest.raises(ValueError, match="failed to evaluate IDs"):
+        qwen_image.judge_batch(native, "judge", [qwen_vlm_group()], 4)
+    assert len(calls) == 8
+
+
+def test_qwen_preserves_scores_and_raw_outputs_across_attempts():
+    attempts = iter(
+        [
+            {"Quality": QWEN_QUALITY, "Alignment": None},
+            {"Quality": None, "Alignment": QWEN_ALIGNMENT},
+        ]
+    )
+
+    def run_batch(*args):
+        scores = next(attempts)
+        return [qwen_result(scores)], 1, [scores], 0
+
+    results = qwen_image.judge_batch(
+        qwen_native_namespace(run_batch), "judge", [qwen_vlm_group()], 4
+    )
+    assert json.loads(results[0]["judge_model_output"]) == {
+        "Quality": {"Detail": {"Noise": {"score": 2}}},
+        "Alignment": {"Attributes": {"Quantity": {"score": 1}}},
+    }
+    assert json.loads(results[0]["quality_judge_output"]) == QWEN_QUALITY
+    assert json.loads(results[0]["alignment_judge_output"]) == QWEN_ALIGNMENT
+
+
+def test_qwen_keeps_the_first_successful_score_when_later_attempts_rescore_it():
+    attempts = iter(
+        [
+            {"Quality": QWEN_QUALITY, "Alignment": None},
+            {
+                "Quality": {"Detail": {"Noise": {"score": 0}}},
+                "Alignment": QWEN_ALIGNMENT,
+            },
+        ]
+    )
+
+    def run_batch(*args):
+        scores = next(attempts)
+        return [qwen_result(scores)], 1, [scores], 0
+
+    results = qwen_image.judge_batch(
+        qwen_native_namespace(run_batch), "judge", [qwen_vlm_group()], 4
+    )
+    assert json.loads(results[0]["judge_model_output"])["Quality"] == {
+        "Detail": {"Noise": {"score": 2}}
+    }
+    assert json.loads(results[0]["quality_judge_output"]) == QWEN_QUALITY
+
+
+def test_qwen_merges_rows_independently_and_accepts_zero_scores():
+    zero = {"Detail": {"Noise": {"score": 0}}}
+    attempts = iter(
+        [
+            [{"Quality": QWEN_QUALITY}, {"Quality": None}],
+            [{"Quality": zero}, {"Quality": zero}],
+        ]
+    )
+
+    def run_batch(*args):
+        scores = next(attempts)
+        return [qwen_result(row) for row in scores], 1, scores, 0
+
+    groups = [qwen_vlm_group(), qwen_vlm_group()]
+    groups[1]["prompt"]["metadata"]["ID"] = 45
+    results = qwen_image.judge_batch(
+        qwen_native_namespace(run_batch), "judge", groups, 4
+    )
+    assert [json.loads(row["judge_model_output"]) for row in results] == [
+        {"Quality": {"Detail": {"Noise": {"score": 2}}}},
+        {"Quality": {"Detail": {"Noise": {"score": 0}}}},
+    ]
+
+
+def test_qwen_does_not_retry_valid_na_dimensions_when_the_row_is_scored():
+    scores = {
+        "Quality": QWEN_QUALITY,
+        "Alignment": {"Attributes": {"Quantity": {"score": "N/A"}}},
+    }
+    calls = []
+
+    def run_batch(*args):
+        calls.append(None)
+        return [qwen_result(scores)], 0, [scores], 0
+
+    results = qwen_image.judge_batch(
+        qwen_native_namespace(run_batch), "judge", [qwen_vlm_group()], 4
+    )
+    assert json.loads(results[0]["judge_model_output"]) == {
+        "Quality": {"Detail": {"Noise": {"score": 2}}}
+    }
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failures", [0, 100])
+def test_qwen_does_not_retry_broken_images(failures):
+    native, calls = stub_qwen_native(failures=failures, image_failures=1)
+    with pytest.raises(ValueError, match="failed to evaluate IDs"):
+        qwen_image.judge_batch(native, "judge", [qwen_vlm_group()], 4)
+    assert len(calls) == 1
+
+
 def test_qwen_preserves_id_and_explicit_english_field(tmp_path):
     (tmp_path / "metadata").mkdir()
     write_json(

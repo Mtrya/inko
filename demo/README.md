@@ -17,8 +17,8 @@ short_description: Generate artistic paintings from text prompts
 # Inko
 
 English and Chinese text-to-image generation with the final RL EMA export.
-Width and height each support 480–2560 pixels, in multiples of 16.
-RoPE scaling and VAE tiling follow the requested dimensions automatically.
+Width and height each support 480–1920 pixels, in multiples of 16.
+Uniform Dy-YaRN scaling follows the requested dimensions automatically.
 
 Set `INKO_MODEL_ID=kaupane/Inko` for the published final RL EMA, or use a local
 export directory. Start `python -m demo.app` from the source checkout for local use. The loaded export supplies

@@ -272,6 +272,8 @@ class MSRoPE(nn.Module):
     The 896p training buckets reach 1184 pixels on either axis, or 74 patches
     at 16 pixels per patch. Training always uses the original frequencies.
     DyPE follows https://arxiv.org/html/2510.20766v2, equations 9 and 13–17.
+    Both axes share one scaling factor to preserve the canvas aspect ratio
+    in phase space.
     """
 
     def __init__(
@@ -296,7 +298,7 @@ class MSRoPE(nn.Module):
         self.centered = centered
 
         # Precompute frequency tables for both spatial axes
-        pos_index = torch.arange(2560)  # maximum position index
+        pos_index = torch.arange(2560)  # Initial table capacity; expands as needed.
         # Store as real to avoid safetensors issues with complex numbers
         self.register_buffer(
             "pos_freqs", torch.view_as_real(self._build_frequency_table(pos_index))
@@ -405,10 +407,11 @@ class MSRoPE(nn.Module):
         device = torch.device(device)
         scaling_factors = (1.0, 1.0)
         if not self.training:
-            scaling_factors = tuple(
+            shared = max(
                 max(1.0, size / reference)
                 for size, reference in zip(img_hw, self.reference_hw)
             )
+            scaling_factors = (shared, shared)
         scaled = scaling_factors != (1.0, 1.0)
         kappas = (1.0,)
         if self.needs_time(img_hw):
