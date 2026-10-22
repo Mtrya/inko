@@ -28,6 +28,44 @@ def test_masked_attention_matches_removing_padded_keys(keep):
         torch.testing.assert_close(output, reference, atol=2e-6, rtol=2e-5)
 
 
+@pytest.mark.parametrize("fail_attention", [False, True])
+def test_masked_attention_restores_nested_backend_state(monkeypatch, fail_attention):
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    def enabled_backends():
+        return (
+            torch.backends.cuda.flash_sdp_enabled(),
+            torch.backends.cuda.mem_efficient_sdp_enabled(),
+            torch.backends.cuda.math_sdp_enabled(),
+            torch.backends.cuda.cudnn_sdp_enabled(),
+        )
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("attention failed")
+
+    if fail_attention:
+        monkeypatch.setattr(F, "scaled_dot_product_attention", fail)
+    q = torch.randn(1, 2, 4, 8)
+    keep = torch.tensor([True, True, False, False])[None, None, None, :]
+    priority = torch._C._get_sdp_priority_order()
+    enabled = enabled_backends()
+    try:
+        with sdpa_kernel(SDPBackend.MATH):
+            nested_priority = torch._C._get_sdp_priority_order()
+            nested_enabled = enabled_backends()
+            if fail_attention:
+                with pytest.raises(RuntimeError, match="attention failed"):
+                    sdpa_with_pad_mask(q, q, q, keep)
+            else:
+                sdpa_with_pad_mask(q, q, q, keep)
+            assert torch._C._get_sdp_priority_order() == nested_priority
+            assert enabled_backends() == nested_enabled
+        assert torch._C._get_sdp_priority_order() == priority
+        assert enabled_backends() == enabled
+    finally:
+        torch._C._set_sdp_priority_order(priority)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA attention check")
 def test_inference_attention_preserves_distinct_padding_and_backend_state():
     from torch.nn.attention import SDPBackend, sdpa_kernel

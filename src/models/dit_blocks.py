@@ -129,8 +129,14 @@ def sdpa_with_bias(
         from torch.nn.attention import SDPBackend
 
         backends = [SDPBackend.MATH]
-    with sdpa_kernel(backends, set_priority=True):
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=bias, dropout_p=0.0)
+    # sdpa_kernel only saves enabled backends. Preserve disabled backends'
+    # positions too, so nested contexts do not reorder the caller's policy.
+    priority = torch._C._get_sdp_priority_order()
+    try:
+        with sdpa_kernel(backends, set_priority=True):
+            return F.scaled_dot_product_attention(q, k, v, attn_mask=bias, dropout_p=0.0)
+    finally:
+        torch._C._set_sdp_priority_order(priority)
 
 
 def pad_bias_from_mask(attn_mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
