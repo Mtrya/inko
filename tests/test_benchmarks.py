@@ -288,6 +288,58 @@ def test_tiif_gives_up_after_bounded_retries(monkeypatch, tmp_path):
     assert len(calls) == 8
 
 
+def qwen_vlm_group():
+    return {
+        "prompt": {
+            "metadata": {"ID": 44, "dims_en": "Quality / Detail / Noise"},
+            "text": "A medical science infographic poster.",
+        },
+        "samples": [{"model": "model", "image_path": "image.png"}],
+    }
+
+
+def stub_qwen_native(failures, image_failures=0, failing_row=None):
+    calls = []
+
+    def run_batch(judge, args, inputs, meta, desc):
+        calls.append(desc)
+        if len(calls) <= failures:
+            return [failing_row or {"judge_model_output": None}], 1, [], image_failures
+        return [{"judge_model_output": '{"Quality": {}}'}], 0, [], image_failures
+
+    return SimpleNamespace(_run_batch_inference=run_batch), calls
+
+
+def test_qwen_retries_judge_parse_failures():
+    native, calls = stub_qwen_native(failures=2)
+    results = qwen_image.judge_batch(native, "judge", [qwen_vlm_group()], 4)
+    assert results == [{"judge_model_output": '{"Quality": {}}'}]
+    assert calls == ["Q-Judger"] * 3
+
+
+def test_qwen_gives_up_after_bounded_retries():
+    native, calls = stub_qwen_native(failures=100)
+    with pytest.raises(ValueError, match="failed to evaluate IDs"):
+        qwen_image.judge_batch(native, "judge", [qwen_vlm_group()], 4)
+    assert len(calls) == 8
+
+
+def test_qwen_tolerates_rows_with_partially_parsed_dimensions():
+    truncated = {"judge_model_output": '{"Aesthetics": {}}'}
+    native, calls = stub_qwen_native(failures=100, failing_row=truncated)
+    results = qwen_image.judge_batch(native, "judge", [qwen_vlm_group()], 4)
+    assert results == [truncated]
+    assert len(calls) == 8
+
+
+@pytest.mark.parametrize("failures", [0, 100])
+def test_qwen_does_not_retry_broken_images(failures):
+    native, calls = stub_qwen_native(failures=failures, image_failures=1)
+    with pytest.raises(ValueError, match="failed to evaluate IDs"):
+        qwen_image.judge_batch(native, "judge", [qwen_vlm_group()], 4)
+    assert len(calls) == 1
+
+
 def test_qwen_preserves_id_and_explicit_english_field(tmp_path):
     (tmp_path / "metadata").mkdir()
     write_json(

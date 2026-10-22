@@ -52,6 +52,7 @@ def test_factor_one_uses_original_fp32_rotations_after_dtype_cast(dtype, restore
 @pytest.mark.parametrize("centered", [False, True])
 def test_yarn_scales_each_axis_and_keeps_text_diagonal(centered):
     rope = MSRoPE(axes_dim=[4, 4], reference_hw=(2, 3), centered=centered).eval()
+    rope.uniform_scaling = False
     image, text = rope((4, 9), 2, "cpu", time=(0.0,))
     tau = 1 + 0.1 * math.log(3)
     grid = image.reshape(4, 9, 4)
@@ -110,6 +111,7 @@ def test_dynamic_yarn_moves_frequency_bands_and_retains_temperature():
         yarn_alpha=0.2,
         yarn_beta=2,
     ).eval()
+    rope.uniform_scaling = False
     tau = 1 + 0.1 * math.log(2)
     mid_early = (3.2 / math.pi - 0.2) / 1.8
     mid_late = (0.32 / math.pi - 0.05) / 0.45
@@ -205,3 +207,61 @@ def test_yarn_ramp_and_schedule_changes_invalidate_cache():
             image[1, :4] / math.sqrt(1 + 0.1 * math.log(2)),
             torch.exp(1j * torch.tensor([1.0, middle_angle, 0.005, 0.0005])),
         )
+
+
+def test_uniform_scaling_shares_the_max_factor_across_axes():
+    rope = MSRoPE(axes_dim=[4, 4], reference_hw=(2, 3), centered=True).eval()
+    rope.uniform_scaling = False
+    per_axis, _ = rope((4, 9), 1, "cpu", time=(0.0,))
+    rope.uniform_scaling = True
+    uniform, _ = rope((4, 9), 1, "cpu", time=(0.0,))
+    tau = 1 + 0.1 * math.log(3)
+    # The shared factor 3 divides both ramp-free frequency pairs on both axes.
+    shared_angles = torch.tensor([1 / 3, 0.01 / 3])
+    grid = uniform.reshape(4, 9, 4)
+    for first, second, pairs in (
+        (grid[0, 0], grid[1, 0], slice(0, 2)),
+        (grid[0, 0], grid[0, 1], slice(2, 4)),
+    ):
+        torch.testing.assert_close(
+            (second * first.conj())[pairs] / tau,
+            torch.exp(1j * shared_angles),
+        )
+    # Per-axis policy keeps the height factor at 2 and differs from uniform.
+    per_axis_grid = per_axis.reshape(4, 9, 4)
+    torch.testing.assert_close(
+        (per_axis_grid[1, 0] * per_axis_grid[0, 0].conj())[:2] / tau,
+        torch.exp(1j * torch.tensor([0.5, 0.005])),
+    )
+    assert not torch.allclose(per_axis, uniform)
+
+
+def test_set_uniform_rope_scaling_sets_instances_only():
+    from src.models.dit_blocks import set_uniform_rope_scaling
+
+    model = torch.nn.ModuleList([MSRoPE(axes_dim=[4, 4]), MSRoPE(axes_dim=[4, 4])])
+    other = MSRoPE(axes_dim=[4, 4])
+    # New instances default to the shared factor.
+    assert [module.uniform_scaling for module in model] == [True, True]
+    with pytest.raises(ValueError, match="uniform RoPE scaling policy"):
+        set_uniform_rope_scaling(model, 1)
+    set_uniform_rope_scaling(model, False)
+    assert [module.uniform_scaling for module in model] == [False, False]
+    assert other.uniform_scaling
+    set_uniform_rope_scaling(model, True)
+    assert [module.uniform_scaling for module in model] == [True, True]
+
+
+@pytest.mark.parametrize("img_hw", [(2, 6), (6, 2)])
+def test_uniform_scaling_also_scales_the_axis_below_reference(img_hw):
+    rope = MSRoPE(axes_dim=[4, 4], reference_hw=(3, 3), centered=True).eval()
+    image, text = rope(img_hw, 1, "cpu", time=(0.0,))
+    grid = image.reshape(*img_hw, 4)
+    tau = 1 + 0.1 * math.log(2)
+    expected = torch.exp(1j * torch.tensor([0.5, 0.005]))
+    torch.testing.assert_close((grid[1, 0] * grid[0, 0].conj())[:2] / tau, expected)
+    torch.testing.assert_close((grid[0, 1] * grid[0, 0].conj())[2:] / tau, expected)
+    torch.testing.assert_close(
+        text[0] / math.sqrt(tau),
+        torch.exp(1j * torch.tensor([3.0, 0.03, 3.0, 0.03])),
+    )

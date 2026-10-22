@@ -9,6 +9,8 @@ from unittest.mock import Mock
 import pytest
 import requests
 
+from src.pipeline import MAX_IMAGE_SIZE
+
 pytest.importorskip("gradio", minversion="6.13")
 pytest.importorskip("spaces")
 
@@ -117,11 +119,28 @@ def test_generation_forwards_dimensions_and_resolved_seed(
     gpu = Mock(return_value="generated image")
     monkeypatch.setattr(app, "run_pipeline", gpu)
     monkeypatch.setattr(app.secrets, "randbelow", lambda n: 1234567)
-    assert app.generate("A garden", 480, 2560, 42, randomize, 20, 0) == (
+    assert app.generate("A garden", 480, MAX_IMAGE_SIZE, 42, randomize, 20, 0) == (
         "generated image",
         expected_seed,
     )
-    gpu.assert_called_once_with("A garden", 480, 2560, expected_seed, 20, 0)
+    gpu.assert_called_once_with("A garden", 480, MAX_IMAGE_SIZE, expected_seed, 20, 0)
+
+
+def test_generation_api_keeps_existing_inputs_without_rope_choice(app):
+    endpoint = app.demo.get_api_info()["named_endpoints"]["/generate"]
+    assert [parameter["parameter_name"] for parameter in endpoint["parameters"]] == [
+        "prompt",
+        "width",
+        "height",
+        "seed",
+        "randomize_seed",
+        "steps",
+        "guidance",
+    ]
+    assert not any(
+        component.get("props", {}).get("label") == "RoPE scaling"
+        for component in app.demo.config["components"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -130,7 +149,8 @@ def test_generation_forwards_dimensions_and_resolved_seed(
         {"prompt": " "},
         {"width": 479},
         {"width": 481},
-        {"height": 2576},
+        {"width": MAX_IMAGE_SIZE + 16},
+        {"height": MAX_IMAGE_SIZE + 16},
         {"guidance": -0.1},
         {"guidance": 10.1},
         {"guidance": float("nan")},

@@ -70,14 +70,23 @@ def judge_batch(native, judge, batch, batch_size):
         ]
     )
     meta = pd.DataFrame([group["prompt"]["metadata"] for group in batch])
-    results, failures, _, image_failures = native._run_batch_inference(
-        judge, SimpleNamespace(batch_size=batch_size), inputs, meta, "Q-Judger"
-    )
-    if failures or image_failures:
-        raise ValueError(
-            f"Q-Judger failed to evaluate IDs {inputs['ID'].tolist()}: {results}"
+    # The released harness does not retry parse failures; bound the retries.
+    for _ in range(8):
+        results, failures, _, image_failures = native._run_batch_inference(
+            judge, SimpleNamespace(batch_size=batch_size), inputs, meta, "Q-Judger"
         )
-    return results
+        if not failures and not image_failures:
+            return results
+        if image_failures:
+            # Broken images do not heal by resampling.
+            break
+    # Native aggregation omits missing dimensions. Keep partial scores after
+    # bounded retries, but reject rows with no parsed dimensions.
+    if not image_failures and all(result["judge_model_output"] for result in results):
+        return results
+    raise ValueError(
+        f"Q-Judger failed to evaluate IDs {inputs['ID'].tolist()}: {results}"
+    )
 
 
 def judge_worker(

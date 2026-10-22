@@ -266,12 +266,29 @@ def set_real_rope(model: nn.Module, enabled: bool) -> None:
             module.real_rope = enabled
 
 
+def set_uniform_rope_scaling(model: nn.Module, enabled: bool) -> None:
+    """Scale both spatial axes by one shared factor (default) or per-axis ones.
+
+    Independent factors alter the phase-space aspect ratio on rectangular
+    canvases. One shared maximum factor applies the same spatial scaling to
+    both axes. This is instance-local inference policy, not checkpoint state.
+    """
+    if type(enabled) is not bool:
+        raise ValueError("uniform RoPE scaling policy must be boolean")
+    for module in model.modules():
+        if isinstance(module, MSRoPE):
+            module.uniform_scaling = enabled
+
+
 class MSRoPE(nn.Module):
     """Image/text RoPE with automatic Dy-YaRN inference scaling.
 
     The 896p training buckets reach 1184 pixels on either axis, or 74 patches
     at 16 pixels per patch. Training always uses the original frequencies.
     DyPE follows https://arxiv.org/html/2510.20766v2, equations 9 and 13–17.
+    Rectangular canvases default to one shared scaling factor so the phase
+    aspect matches the canvas aspect; set_uniform_rope_scaling(model, False)
+    restores the paper's per-axis factors.
     """
 
     def __init__(
@@ -294,9 +311,11 @@ class MSRoPE(nn.Module):
         # centered: image coords symmetric around 0 ([-(n-1)/2, (n-1)/2]) instead of
         # 0-based from the corner. Text starts at max(height, width) on both axes.
         self.centered = centered
+        # Launch policy set by set_uniform_rope_scaling; not checkpoint state.
+        self.uniform_scaling = True
 
         # Precompute frequency tables for both spatial axes
-        pos_index = torch.arange(2560)  # maximum position index
+        pos_index = torch.arange(2560)  # Initial table capacity; expands as needed.
         # Store as real to avoid safetensors issues with complex numbers
         self.register_buffer(
             "pos_freqs", torch.view_as_real(self._build_frequency_table(pos_index))
@@ -409,6 +428,9 @@ class MSRoPE(nn.Module):
                 max(1.0, size / reference)
                 for size, reference in zip(img_hw, self.reference_hw)
             )
+            if self.uniform_scaling:
+                shared = max(scaling_factors)
+                scaling_factors = (shared, shared)
         scaled = scaling_factors != (1.0, 1.0)
         kappas = (1.0,)
         if self.needs_time(img_hw):

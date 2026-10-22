@@ -147,6 +147,36 @@ def test_catalog_slice_uses_its_judgments_from_a_larger_score_collection(tmp_pat
     assert entry["scores"]["overall"] == 1.0
 
 
+def test_published_aggregate_tolerates_float_summation_noise(tmp_path):
+    row = prompt("geneval", "original", "2", "two cats", {}, [11])
+    publish(tmp_path, "base", row, [True])
+    write_json(
+        tmp_path / "scores/geneval/base/summary.json",
+        {
+            "expected": 1,
+            "evaluated": 1,
+            "scores": {"categories": {"counting": 1.0 + 1e-15}, "overall": 1.0},
+        },
+    )
+    result = report(tmp_path, [row], ["base"])
+    assert result["benchmarks"]["geneval"]["models"]["base"]["status"] == "complete"
+
+
+def test_published_aggregate_mismatch_fails(tmp_path):
+    row = prompt("geneval", "original", "2", "two cats", {}, [11])
+    publish(tmp_path, "base", row, [True])
+    write_json(
+        tmp_path / "scores/geneval/base/summary.json",
+        {
+            "expected": 1,
+            "evaluated": 1,
+            "scores": {"categories": {"counting": 0.5}, "overall": 0.5},
+        },
+    )
+    with pytest.raises(ValueError, match="published aggregate differs"):
+        report(tmp_path, [row], ["base"])
+
+
 @pytest.mark.parametrize("change", ["judge", "inference", "prompt", "seed"])
 def test_incompatible_comparisons_fail(tmp_path, change):
     row = prompt("geneval", "original", "2", "two cats", {}, [11, 13])

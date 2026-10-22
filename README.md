@@ -14,7 +14,7 @@ Inko is a bilingual text-to-image model for paintings and illustrations. Its
 caption and resolution curricula, chunked Muon optimization, and Ascend training.
 
 **Current model: final round-60 RL EMA**, built on the 600k pretrained EMA.
-Inference uses automatic Dy-YaRN scaling, with a maximum of 2560 pixels per axis.
+Inference uses automatic uniform Dy-YaRN scaling, with a maximum of 1920 pixels per axis.
 The gallery below shows the pretrained model.
 
 ## Gallery
@@ -239,19 +239,19 @@ pipe = InkoPipeline.from_pretrained(
 
 image = pipe(
     "中国水墨画，远山笼罩在薄雾中，近处一棵松树伸向江面，一叶小舟停在岸边。",
-    width=2560,
-    height=1440,
+    width=1920,
+    height=1088,
     generator=torch.Generator(device="cpu").manual_seed(42),
 ).images[0]
 image.save("inko.png")
 ```
 
 The final RL EMA defaults are 896 × 896, 20 Euler steps, and CFG 4.5.
-Width and height must be multiples of 16, with a maximum of 2560 each.
-Dy-YaRN scaling applies automatically above the 1184-pixel training reference
-on each axis. Its frequency correction decreases during denoising. Requests
-above 2048 pixels use tiled VAE decoding with 2048-pixel tiles and a 1536-pixel
-stride. Smaller requests use full-image decoding.
+Width and height must be multiples of 16, with a maximum of 1920 each.
+Dy-YaRN scaling applies automatically above the 1184-pixel training reference.
+Both axes share the largest scale factor to avoid distorting proportions on
+rectangular canvases. Its frequency correction decreases during denoising.
+Requests use full-image VAE decoding.
 
 <details>
 <summary>Batch generation and local model files</summary>
@@ -263,7 +263,7 @@ Use `text_encoder_path` and `vae_path` for local copies of the frozen models,
 and `local_files_only=True` to disable downloads.
 
 Sampling uses resolution-dependent time shifting. Custom dimensions must be
-multiples of 16 and no greater than 2560 per axis.
+multiples of 16 and no greater than 1920 per axis.
 
 ```python
 images = pipe(
@@ -313,7 +313,7 @@ notice. Set `INKO_MODEL_ID` to the final RL EMA export directory or an explicit
 model repository. The demo requires this setting at startup. `INKO_DEVICE=cpu`
 runs in FP32 on CPU.
 
-The demo accepts 480–2560 pixels per axis in steps of 16, CFG 0–10, and 10–50
+The demo accepts 480–1920 pixels per axis in steps of 16, CFG 0–10, and 10–50
 sampling steps. Selecting a gallery prompt uses the loaded model's sampling
 defaults and the saved seed, with enhancement and randomization off. The static
 gallery images show the earlier 600k pretrained model.

@@ -18,7 +18,7 @@ from .models.dit_blocks import set_real_rope
 from .utils.encode_text import encode_text
 from .utils.vae_codec import decode_latents, vae_stats_from_config
 
-MAX_IMAGE_SIZE = 2560
+MAX_IMAGE_SIZE = 1920
 
 
 @dataclass
@@ -148,7 +148,7 @@ class InkoPipeline:
     ) -> InkoPipelineOutput:
         """Generate one image per prompt, in input order.
 
-        Dimensions must be multiples of 16, up to 2560 on each axis.
+        Dimensions must be multiples of 16, up to 1920 on each axis.
         Dy-YaRN scaling follows the dimensions and current denoising time.
         A list of generators gives each
         image its own random stream. CPU generators make initial noise
@@ -227,14 +227,5 @@ class InkoPipeline:
         latents = sample_ode(
             velocity, noise, steps=steps, progress_callback=progress_callback
         )
-        if max(height, width) > 2048:
-            self.vae.enable_tiling(
-                tile_sample_min_height=2048,
-                tile_sample_min_width=2048,
-                tile_sample_stride_height=1536,
-                tile_sample_stride_width=1536,
-            )
-        else:
-            self.vae.disable_tiling()
         images = decode_latents(latents * self.vae_std + self.vae_mean, self.vae)
         return InkoPipelineOutput(images=images)
