@@ -45,8 +45,11 @@ def pipe(monkeypatch):
         prompts, model, tokenizer, pooling, *, exit_layer, exit_mode, fast_slice
     ):
         values = torch.tensor([2.0 if text == "positive" else -1.0 for text in prompts])
-        text = values[:, None, None].expand(-1, 2, 1024)
-        return text, torch.ones(len(prompts), 2, dtype=torch.long), text.mean(1)
+        lengths = [2 if prompt == "positive" else 1 for prompt in prompts]
+        mask = torch.arange(max(lengths))[None, :] < torch.tensor(lengths)[:, None]
+        text = values[:, None, None].expand(-1, max(lengths), 1024)
+        text = text.masked_fill(~mask[:, :, None], 999)
+        return text, mask.long(), values[:, None].expand(-1, 1024)
 
     monkeypatch.setattr("src.pipeline.encode_text", encode)
     return InkoPipeline(
@@ -89,19 +92,53 @@ def test_guidance_integrates_velocity_then_denormalizes_for_vae(
     assert output.images[0].mode == "RGB"
 
 
-def test_per_image_generators_preserve_batch_order_and_global_rng(pipe):
+@pytest.mark.parametrize("guidance", [1, 4.5])
+def test_per_image_generators_preserve_batch_order_and_global_rng(pipe, guidance):
     before = torch.random.get_rng_state().clone()
     pipe(
         ["positive", "negative"],
+        guidance_scale=guidance,
+        negative_prompt=["negative", "positive"],
         generator=[torch.Generator().manual_seed(seed) for seed in (19, 23)],
     )
     batched = pipe.vae.decoded.clone()
     for index, (prompt, seed) in enumerate(
         zip(["positive", "negative"], (19, 23), strict=True)
     ):
-        pipe(prompt, generator=torch.Generator().manual_seed(seed))
+        pipe(
+            prompt,
+            guidance_scale=guidance,
+            negative_prompt=["negative", "positive"][index],
+            generator=torch.Generator().manual_seed(seed),
+        )
         torch.testing.assert_close(pipe.vae.decoded[0], batched[index])
     assert torch.equal(torch.random.get_rng_state(), before)
+
+
+def test_mixed_cfg_batch_matches_independent_masked_model_calls(pipe, small_model):
+    pipe.transformer = small_model().eval().requires_grad_(False)
+    prompts, negatives, seeds = (
+        ["positive", "negative"],
+        ["negative", "positive"],
+        [19, 23],
+    )
+    pipe(
+        prompts,
+        negative_prompt=negatives,
+        guidance_scale=2,
+        generator=[torch.Generator().manual_seed(seed) for seed in seeds],
+    )
+    batched = pipe.vae.decoded.clone()
+    for index, (prompt, negative, seed) in enumerate(zip(prompts, negatives, seeds)):
+        pipe(
+            prompt,
+            negative_prompt=negative,
+            guidance_scale=2,
+            generator=torch.Generator().manual_seed(seed),
+        )
+        torch.testing.assert_close(
+            pipe.vae.decoded[0], batched[index], atol=3e-5, rtol=3e-5
+        )
 
 
 @pytest.mark.parametrize(

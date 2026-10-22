@@ -113,10 +113,20 @@ class InkoPipeline:
         self.vae_mean = self.vae_mean.to(device)
         self.vae_std = self.vae_std.to(device)
         set_real_rope(self.transformer, device.type == "npu")
+        if (
+            device.type == "cuda"
+            and next(self.vae.parameters()).dtype == torch.bfloat16
+        ):
+            # Torch 2.9/cuDNN >=9.8 sends contiguous BF16 Conv3d to a native
+            # vol2col fallback with huge temporaries. Layout alone enables cuDNN;
+            # weight values, precision, and the full-image decode stay unchanged.
+            torch.nn.utils.convert_conv3d_weight_memory_format(
+                self.vae, torch.channels_last_3d
+            )
         return self
 
     def _encode(self, prompts):
-        return encode_text(
+        text, mask, pooled = encode_text(
             prompts,
             self.text_encoder,
             self.tokenizer,
@@ -125,6 +135,12 @@ class InkoPipeline:
             exit_mode="stop_at_layer",
             fast_slice=True,
         )
+        # Identical prompts have no padding under the right-padding encoder.
+        # Omitting an all-valid mask lets SDPA use FlashAttention, including
+        # the repeated empty-negative branch of a mixed-prompt CFG batch.
+        if all(prompt == prompts[0] for prompt in prompts):
+            mask = None
+        return text, mask, pooled
 
     def _predict(self, x, t, conditioning):
         text, mask, pooled = conditioning
