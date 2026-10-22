@@ -9,8 +9,7 @@ import torch.nn.functional as F
 
 from .varlen_attention import packed_attention
 
-# Optional SDPA backend restriction for the masked (padded-text) attention
-# path; None keeps the library default.
+# Optional SDPA backend restriction for masked (padded-text) attention.
 _SDPA_BACKENDS = None
 
 
@@ -46,8 +45,8 @@ def sdpa_with_pad_mask(
     A bool mask forces PyTorch off the flash path; the math fallback then
     materializes B*H*S^2 attention weights per layer (saved for backward),
     which at seq ~2K is tens of GiB per layer and OOMs long-caption batches.
-    We convert the mask to an additive bias in q.dtype
-    and prefer the memory-efficient kernel (never materializes S^2 scores);
+    We convert the mask to an additive bias in q.dtype and use fused kernels:
+    cuDNN first in inference mode, memory-efficient attention otherwise.
     mask=None keeps the default (flash) path untouched.
     """
     if attn_mask is None:
@@ -59,9 +58,9 @@ def sdpa_with_pad_mask(
 def set_sdpa_backends(names: Optional[Sequence[str]]) -> None:
     """Restrict SDPA backends for masked (padded-text) attention.
 
-    ``None`` keeps the library default (memory-efficient first). Otherwise
-    masked attention is limited to the named ``SDPBackend`` members, with the
-    math backend appended as a fallback. Training keeps the default: on a
+    ``None`` uses cuDNN first in inference mode and memory-efficient attention
+    otherwise. An explicit list restricts attention to those backends, in order.
+    Training keeps memory-efficient attention: on a
     single 4090 at 256p (micro-batch 16, 128-192 text tokens) cuDNN attention
     is ~30% slower than memory-efficient on the forward+backward training
     step, despite a faster forward-only kernel with an additive pad bias.
@@ -86,6 +85,12 @@ def _sdpa_backends():
         return list(_SDPA_BACKENDS)
     from torch.nn.attention import SDPBackend
 
+    if torch.is_inference_mode_enabled():
+        return [
+            SDPBackend.CUDNN_ATTENTION,
+            SDPBackend.EFFICIENT_ATTENTION,
+            SDPBackend.MATH,
+        ]
     return [SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
 
 
@@ -124,7 +129,7 @@ def sdpa_with_bias(
         from torch.nn.attention import SDPBackend
 
         backends = [SDPBackend.MATH]
-    with sdpa_kernel(backends):
+    with sdpa_kernel(backends, set_priority=True):
         return F.scaled_dot_product_attention(q, k, v, attn_mask=bias, dropout_p=0.0)
 
 
