@@ -69,6 +69,10 @@ def conditioning_lengths(pipe, model, texts):
             for text in texts
         ]
         tokenizers = [("text_encoder", pipe.tokenizer, texts, limit)]
+    elif model.pipeline == "StableDiffusionPipeline":
+        tokenizers = [
+            ("text_encoder", pipe.tokenizer, texts, pipe.tokenizer.model_max_length)
+        ]
     else:
         tokenizers = [
             ("text_encoder", pipe.tokenizer, texts, pipe.tokenizer.model_max_length),

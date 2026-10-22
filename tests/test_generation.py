@@ -138,7 +138,13 @@ def test_generation_recovers_images_and_appends_another_model(
 
 
 @pytest.mark.parametrize(
-    "pipeline", ["DreamLitePipeline", "MOSSImagePipeline", "PixArtSigmaPipeline"]
+    "pipeline",
+    [
+        "DreamLitePipeline",
+        "MOSSImagePipeline",
+        "PixArtSigmaPipeline",
+        "StableDiffusionPipeline",
+    ],
 )
 def test_external_call_preserves_text_seed_and_record_order(
     tmp_path, monkeypatch, pipeline
