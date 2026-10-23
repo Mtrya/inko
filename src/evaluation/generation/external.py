@@ -26,6 +26,11 @@ def load_pipeline(model, assets, device):
     else:
         if model.pipeline == "SanaPipeline":
             kwargs["variant"] = "fp16"
+        if model.pipeline == "StableDiffusionPipeline":
+            # SD 1.5 ships a safety checker that blanks flagged outputs; no
+            # other compared model filters, so evaluate without it.
+            kwargs["safety_checker"] = None
+            kwargs["requires_safety_checker"] = False
         pipe = getattr(diffusers, model.pipeline).from_pretrained(
             assets["path"], **kwargs
         )
