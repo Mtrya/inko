@@ -137,6 +137,50 @@ Resume skips published prompt-dimension results. Missing images or scorer
 failures stop scoring before a complete summary is published. Use a new score
 directory when changing the judge or its settings; generation is independent.
 
+## Figures (`scripts/figures/`)
+
+| Command | Purpose |
+|---|---|
+| `figures.benchmark_figure` | Render benchmark overview bars and the posttraining gain radar from a benchmark `report.json`. |
+| `figures.caption_lengths` | Render the data chapter's caption-length bands and cumulative profile from archived 256p metadata. |
+| `figures.generate_pretrain_chapter_figures` | Render training stability and loss figures from `scripts/figures/data/`. |
+| `figures.generate_pretrain_infra_figures` | Render batch-plan, memory and throughput figures from `scripts/figures/data/` and `configs/`. |
+
+Run `node scripts/figures/export_pretrain_architecture.mjs` to export the
+pretraining architecture diagram. Figure outputs default to `notes/assets/`.
+
+Raw figure inputs live locally under `scripts/figures/data/` and are ignored by
+Git. Supply these files before running the plotters in a fresh checkout.
+
+### Data chapter figures
+
+Reproduce the chart and pipeline diagram in [the data chapter](../notes/data.md):
+
+```bash
+python -m scripts.figures.caption_lengths
+node scripts/figures/export_rollout_pipeline.mjs
+```
+
+The chart reads the 15 original NumPy sidecars in
+`scripts/figures/data/caption_lengths/`. They contain
+3,284,692 per-caption measurements from the archived 256p snapshot. The
+`prompt_lengths` arrays measure retained Qwen3 prompt tokens after formatting,
+prefix removal and truncation, not raw caption tokens. Each caption counts once;
+training sampling weights are not applied. The historical “fewer than 100”
+annotation comes from the chapter; these files contain only the enriched pool.
+Use `--data-dir` to select another sidecar directory or `--output` to save elsewhere.
+
+The diagram exporter reads [`figures/rollout_pipeline.html`](figures/rollout_pipeline.html).
+It requires Node.js, Chromium and the `puppeteer-core` dependency installed with
+Archify. `--browser`, `--archify-dir` and `--output` override their defaults.
+After editing the diagram's JSON source, regenerate the HTML before exporting:
+
+```bash
+node ~/.agents/skills/archify/bin/archify.mjs render architecture \
+  scripts/figures/rollout-pipeline.architecture.json \
+  scripts/figures/rollout_pipeline.html
+```
+
 ## Caption production (`scripts/caption/`)
 
 Use `caption.select_rows` → `caption.generate` → `caption.freeze_captions` →

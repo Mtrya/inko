@@ -8,7 +8,7 @@ import pandas as pd
 from matplotlib.ticker import FuncFormatter
 
 ROOT = Path(__file__).resolve().parents[2]
-TELEMETRY = ROOT / "telemetry"
+TELEMETRY = Path(__file__).resolve().parent / "data"
 ASSETS = ROOT / "notes" / "assets"
 ASSETS.mkdir(parents=True, exist_ok=True)
 COLORS = {"blue": "#0072B2", "orange": "#D55E00", "green": "#009E73", "gray": "#666666"}

@@ -9,7 +9,7 @@ import pandas as pd
 from matplotlib.ticker import FuncFormatter, ScalarFormatter
 
 ROOT = Path(__file__).resolve().parents[2]
-TELEMETRY = ROOT / "telemetry"
+TELEMETRY = Path(__file__).resolve().parent / "data"
 ASSETS = ROOT / "notes" / "assets"
 COLORS = {"blue": "#0072B2", "orange": "#D55E00", "green": "#009E73", "gray": "#666666"}
 THOUSANDS = FuncFormatter(lambda value, _: f"{value / 1000:g}k")

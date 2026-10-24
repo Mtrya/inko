@@ -4,7 +4,7 @@ Reads a cluster report.json (see `scripts.eval.run report`) and writes
 notes/assets/benchmark_overview.png plus notes/assets/posttrain_gain_radar.png.
 
 Usage:
-    python scripts/eval/benchmark_figure.py \
+    python -m scripts.figures.benchmark_figure \
       --report /path/to/report.json --output-dir notes/assets
 """
 
