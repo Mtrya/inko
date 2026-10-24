@@ -1,7 +1,5 @@
 # Data
 
-This chapter records what Inko learned from. Part 1 covers the pretraining corpus: four domains, where each dataset came from, how it was cleaned and captioned, and what changed mid-training. Part 2 covers the prompt and rubric pool used by post-training.
-
 ## Part 1: The pretraining corpus
 
 ### Two lessons from weak models
@@ -360,11 +358,11 @@ Data events during training:
 
 ## Part 2: the post-training pool
 
+### The pool at a glance
+
 RL post-training needs two things from data: prompts to roll out, and a reward to optimize. Both are constrained by the training target. Inko is a painting model, so the reward must cover style fidelity, medium conventions and defect detection, which general-purpose scorers such as HPS or PickScore do not measure; fitting them would pull the model toward general photographic taste. The rollout pool is therefore custom, and the reward is primarily rubric-based VLM judging. Public prompt sets (DrawBench, GenEval, PickScore, HPS) stay held-out: they are general-domain, English-first and photographic, and training on them would contaminate the evaluation.
 
 The prompts are seeded from the pretraining corpus, so RL sharpens abilities the model already has instead of forcing new ones at the risk of ability and diversity. It was produced in one pass and published as [kaupane/inko-rollout-25k](https://huggingface.co/datasets/kaupane/inko-rollout-25k).
-
-### The pool at a glance
 
 - 24,579 rows: 50% image-seeded, 40% caption-seeded and 10% short-band.
 - Three partitions: 23,572 train, 505 dev, 502 confirmation. Rows derived from the same seed content or sharing prompt text are kept in the same partition: 21,813 scene groups in train, 463 in dev and 470 in confirmation.
