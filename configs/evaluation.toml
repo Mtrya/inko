@@ -30,10 +30,9 @@ guidance = 5.0
 shift = "shape"
 
 [models.inko_posttrain]
-# Starting candidate; select guidance with a small sweep after posttrain finishes.
 checkpoint = {asset = "inko_posttrain", weights = "ema"}
 steps = 20
-guidance = 1.0
+guidance = 4.5
 shift = "shape"
 
 [benchmarks.geneval]

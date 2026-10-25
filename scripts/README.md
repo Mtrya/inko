@@ -141,7 +141,8 @@ directory when changing the judge or its settings; generation is independent.
 
 | Command | Purpose |
 |---|---|
-| `figures.benchmark_figure` | Render benchmark overview bars and the posttraining gain radar from a benchmark `report.json`. |
+| `figures.benchmark_figure` | Render nine-model benchmark bars from a `report.json` and selected case panels from the matched sample bundle. |
+| `figures.fine_art_panels` | Rebuild the eleven nine-model fine-art panels from `notes/assets/fine_art_extended/images/`. |
 | `figures.caption_lengths` | Render the data chapter's caption-length bands and cumulative profile from archived 256p metadata. |
 | `figures.generate_pretrain_chapter_figures` | Render training stability and loss figures from `scripts/figures/data/`. |
 | `figures.generate_pretrain_infra_figures` | Render batch-plan, memory and throughput figures from `scripts/figures/data/` and `configs/`. |
