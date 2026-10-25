@@ -15,29 +15,28 @@ caption and resolution curricula, chunked Muon optimization, and Ascend training
 
 **Current model: final round-60 RL EMA**, built on the 600k pretrained EMA.
 Inference uses automatic uniform Dy-YaRN scaling, with a maximum of 1920 pixels per axis.
-The gallery below shows the pretrained model.
+The gallery below shows the release model.
 
 ## Gallery
 
-From quiet ink landscapes to sunlit watercolors and textured oils. These are
-selected images from the 600k pretrained checkpoint. Click an image to see it
-at full resolution, or choose its prompt in the demo and make it your own.
+Selected paintings from the release model. Click an image to see it at full
+resolution, or select it in the demo carousel to use its prompt and settings.
 
 <table>
   <tr>
-    <td width="33%" align="center"><a href="demo/showcase/misty-mountains.png"><img src="demo/showcase/misty-mountains.png" alt="Chinese ink landscape with misty mountains, a pine tree and a small fishing boat" width="100%"></a><br><sub>Misty mountains · 水墨山水</sub></td>
-    <td width="33%" align="center"><a href="demo/showcase/harbor.png"><img src="demo/showcase/harbor.png" alt="Watercolor fishing boats reflected in a Mediterranean harbor at dawn" width="100%"></a><br><sub>Harbor at dawn</sub></td>
-    <td width="33%" align="center"><a href="demo/showcase/garden.png"><img src="demo/showcase/garden.png" alt="Watercolor Chinese garden with pink blossoms and a round moon gate" width="100%"></a><br><sub>Spring garden · 春日庭院</sub></td>
+    <td width="33%" align="center"><a href="demo/showcase/c-ink-autumn-long_1536x864_s42.png"><img src="demo/showcase/c-ink-autumn-long_1536x864_s42.png" alt="Autumn mountains · 秋山" width="100%"></a><br><sub>Autumn mountains · 秋山</sub></td>
+    <td width="33%" align="center"><a href="demo/showcase/w-fauvist-harbor_1184x672_s42.png"><img src="demo/showcase/w-fauvist-harbor_1184x672_s42.png" alt="Fauvist harbor" width="100%"></a><br><sub>Fauvist harbor</sub></td>
+    <td width="33%" align="center"><a href="demo/showcase/c-garden-long_1024x768_s42.png"><img src="demo/showcase/c-garden-long_1024x768_s42.png" alt="Garden pavilion · 园林" width="100%"></a><br><sub>Garden pavilion · 园林</sub></td>
   </tr>
   <tr>
-    <td align="center"><a href="demo/showcase/bookshop.png"><img src="demo/showcase/bookshop.png" alt="Warmly lit bookshop with a ginger cat on the doorstep at dusk" width="100%"></a><br><sub>The evening bookshop</sub></td>
-    <td align="center"><a href="demo/showcase/portrait.png"><img src="demo/showcase/portrait.png" alt="Oil portrait of a young woman in an ivory blouse, softly lit from the side" width="100%"></a><br><sub>A quiet portrait</sub></td>
-    <td align="center"><a href="demo/showcase/lemons.png"><img src="demo/showcase/lemons.png" alt="Textured oil still life of yellow lemons, a blue jug and folded linen" width="100%"></a><br><sub>Lemons in afternoon light</sub></td>
+    <td width="33%" align="center"><a href="demo/showcase/c-lantern-long_1184x672_s42.png"><img src="demo/showcase/c-lantern-long_1184x672_s42.png" alt="Lantern canal · 灯火水巷" width="100%"></a><br><sub>Lantern canal · 灯火水巷</sub></td>
+    <td width="33%" align="center"><a href="demo/showcase/w-art-nouveau-portrait_768x1024_s42.png"><img src="demo/showcase/w-art-nouveau-portrait_768x1024_s42.png" alt="Art Nouveau portrait" width="100%"></a><br><sub>Art Nouveau portrait</sub></td>
+    <td width="33%" align="center"><a href="demo/showcase/w-pomegranate-en_1024x768_s42.png"><img src="demo/showcase/w-pomegranate-en_1024x768_s42.png" alt="Pomegranate still life" width="100%"></a><br><sub>Pomegranate still life</sub></td>
   </tr>
 </table>
 
-600k EMA · 896 × 896 · 20 Euler steps · CFG 1.
-[Prompts and seeds](demo/showcase/prompts.json)
+Final RL EMA · 20 Euler steps · CFG 4.5.
+[Prompts, canvas sizes, and seeds](demo/showcase/prompts.json)
 
 ## Training recipe
 
@@ -218,7 +217,7 @@ reward scores. Fixed bilingual panels, DrawBench prompts, and held-out
 comparisons provide different views of the model. The
 [posttraining recipe and observations](https://github.com/Mtrya/inko/blob/feat/posttrain/notes/posttrain_recipe.md)
 record both gains and failure cases. The Hub default contains the final
-round-60 RL EMA. The gallery on this page uses the pretrained base, available
+round-60 RL EMA, used by the gallery on this page. The pretrained base is available
 at the [`pretrain-base` tag](https://huggingface.co/kaupane/Inko/tree/pretrain-base).
 
 ## Generate an image
@@ -302,24 +301,13 @@ python -m scripts.pretrain.launch --help
 ### Run the demo locally
 
 ```bash
-pip install -r demo/requirements.txt
-INKO_MODEL_ID=kaupane/Inko python -m demo.app
+pip install gradio==6.13.0 spaces -r demo/requirements.txt
+INKO_MODEL_ID=kaupane/Inko python app.py
 ```
 
-Set `DEEPSEEK_API_KEY` in the server environment or Space secrets to enable
-prompt enhancement with `deepseek-flash`. Enhancement runs before GPU allocation;
-if the service is unavailable, the app uses the original prompt and shows a
-notice. Set `INKO_MODEL_ID` to the final RL EMA export directory or an explicit
-model repository. The demo requires this setting at startup. `INKO_DEVICE=cpu`
-runs in FP32 on CPU.
+Set `DEEPSEEK_API_KEY` in the server environment or Space secrets to enable prompt enhancement with `deepseek-flash`. Enhancement runs before GPU allocation; if the service is unavailable, the app uses the original prompt and shows a notice. Set `INKO_MODEL_ID` to the final RL EMA export directory or an explicit model repository. The demo requires this setting at startup. `INKO_DEVICE=cpu` runs in FP32 on CPU.
 
-The demo accepts 480–1920 pixels per axis in steps of 16, CFG 0–10, and 10–50
-sampling steps. Selecting a gallery prompt uses the loaded model's sampling
-defaults and the saved seed, with enhancement and randomization off. The static
-gallery images show the earlier 600k pretrained model.
-
-The hosted demo uses [ZeroGPU](https://huggingface.co/docs/hub/spaces-zerogpu).
-Its app, dependencies and Space metadata live together in [`demo/`](demo/).
+The demo accepts 480–1920 pixels per axis in steps of 16, CFG 0–10, and 10–50 sampling steps. The hosted demo uses [ZeroGPU](https://huggingface.co/docs/hub/spaces-zerogpu). Its implementation, dependencies and Space metadata live in [`demo/`](demo/), with [`app.py`](app.py) as the launch entry point.
 
 ### Export a checkpoint
 
