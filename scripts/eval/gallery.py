@@ -96,21 +96,24 @@ def layout_rows(images, width, gap, target_height):
         current.append(image)
         aspect_sum += image.width / image.height
         if (width - gap * (len(current) - 1)) / aspect_sum <= target_height:
-            rows.append((current, (width - gap * (len(current) - 1)) / aspect_sum))
+            rows.append((current, (width - gap * (len(current) - 1)) / aspect_sum, False))
             current, aspect_sum = [], 0.0
     if current:
         height = (width - gap * (len(current) - 1)) / aspect_sum
-        rows.append((current, min(height, target_height)))
-    total = sum(round(height) for _, height in rows) + gap * (len(rows) - 1)
+        rows.append((current, min(height, target_height), height > target_height))
+    total = sum(round(height) for _, height, _ in rows) + gap * (len(rows) - 1)
     canvas = Image.new("RGB", (width, total), "white")
     y = 0
-    for row, height in rows:
+    for row, height, capped in rows:
         height = round(height)
         widths = [image.width * height / image.height for image in row]
         available = width - gap * (len(row) - 1)
-        scale = available / sum(widths)
-        widths = [round(w * scale) for w in widths]
-        widths[-1] += available - sum(widths)
+        if capped:
+            widths = [round(w) for w in widths]
+        else:
+            scale = available / sum(widths)
+            widths = [round(w * scale) for w in widths]
+            widths[-1] += available - sum(widths)
         x = 0
         for image, w in zip(row, widths):
             canvas.paste(image.resize((w, height), Image.LANCZOS), (x, y))
