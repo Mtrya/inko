@@ -26,7 +26,7 @@ Inko is also close to SD3.5 Medium on DPG (83.24 versus 84.07), OneIG alignment 
 
 ## Inside the benchmark scores
 
-Native category and channel scores locate these comparative results. The matched panels show the first saved draw for selected prompts, using the same model order as the headline table.
+Native category and channel scores locate these comparative results. The panels show the first saved draw for selected prompts.
 
 ### GenEval
 
