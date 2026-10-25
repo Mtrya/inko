@@ -16,9 +16,9 @@ where the data is mounted. Platform setup and credentials are in the local
 | `posttrain.readouts` | Join a completed blind ballot to benchmark scores; report comparable pairs and scorer/human disagreement. |
 
 The single-stage DiffusionART trainer is `python -m src.posttrain.train`; the standalone evaluation
-harness is `python -m src.evaluation.monitoring.run`. Commands, config schema
-and current limits are in [the posttraining recipe](../notes/posttrain_recipe.md)
-and [campaign guide](../notes/posttrain_campaign.md).
+harness is `python -m src.evaluation.monitoring.run`. The production configuration is
+[`configs/posttrain.toml`](../configs/posttrain.toml); the campaign and its evidence are documented in
+[the post-training chapter](../notes/posttraining.md).
 ## Model release
 
 `python -m scripts.export_model --checkpoint <weights> --output <directory>`
@@ -56,7 +56,7 @@ and clears queued draws while preserving all other training state. At interior
 stage endpoints, migration preserves sampler files because the next stage
 constructs its own sampler. The shell launcher uses the package overlay at
 `<storage-root>/runtime/python`. See the
-[checkpoint migration procedure](../notes/pretrain_recipe.md#launch-checkpoints-and-resolution-transitions).
+[checkpoint migration procedure](../notes/pretraining.md#checkpointing-and-recovery).
 
 The planner takes `--config`, `--stage` and `--storage-root`; dataset weights
 and caption policy come from that recipe. Calibration is a flat JSON list of
@@ -137,6 +137,51 @@ Resume skips published prompt-dimension results. Missing images or scorer
 failures stop scoring before a complete summary is published. Use a new score
 directory when changing the judge or its settings; generation is independent.
 
+## Figures (`scripts/figures/`)
+
+| Command | Purpose |
+|---|---|
+| `figures.benchmark_figure` | Render nine-model benchmark bars from a `report.json` and selected case panels from the matched sample bundle. |
+| `figures.fine_art_panels` | Rebuild the eleven nine-model fine-art panels from `notes/assets/fine_art_extended/images/`. |
+| `figures.caption_lengths` | Render the data chapter's caption-length bands and cumulative profile from archived 256p metadata. |
+| `figures.generate_pretrain_chapter_figures` | Render training stability and loss figures from `scripts/figures/data/`. |
+| `figures.generate_pretrain_infra_figures` | Render batch-plan, memory and throughput figures from `scripts/figures/data/` and `configs/`. |
+
+Run `node scripts/figures/export_pretrain_architecture.mjs` to export the
+pretraining architecture diagram. Figure outputs default to `notes/assets/`.
+
+Raw figure inputs live locally under `scripts/figures/data/` and are ignored by
+Git. Supply these files before running the plotters in a fresh checkout.
+
+### Data chapter figures
+
+Reproduce the chart and pipeline diagram in [the data chapter](../notes/data.md):
+
+```bash
+python scripts/figures/caption_lengths.py
+node scripts/figures/export_rollout_pipeline.mjs
+```
+
+The chart reads the 15 original NumPy sidecars in
+`scripts/figures/data/caption_lengths/`. They contain
+3,284,692 per-caption measurements from the archived 256p snapshot. The
+`prompt_lengths` arrays measure retained Qwen3 prompt tokens after formatting,
+prefix removal and truncation, not raw caption tokens. Each caption counts once;
+training sampling weights are not applied. The historical “fewer than 100”
+annotation comes from the chapter; these files contain only the enriched pool.
+Use `--data-dir` to select another sidecar directory or `--output` to save elsewhere.
+
+The diagram exporter reads [`figures/rollout_pipeline.html`](figures/rollout_pipeline.html).
+It requires Node.js, Chromium and the `puppeteer-core` dependency installed with
+Archify. `--browser`, `--archify-dir` and `--output` override their defaults.
+After editing the diagram's JSON source, regenerate the HTML before exporting:
+
+```bash
+node ~/.agents/skills/archify/bin/archify.mjs render architecture \
+  scripts/figures/rollout-pipeline.architecture.json \
+  scripts/figures/rollout_pipeline.html
+```
+
 ## Caption production (`scripts/caption/`)
 
 Use `caption.select_rows` → `caption.generate` → `caption.freeze_captions` →
@@ -181,4 +226,4 @@ stage. `--storage-root` selects the external data/model/output tree.
 Downloads fetch the selected repository. Credentials come from `HF_TOKEN`, or
 `MS_TOKEN` / `MODELSCOPE_TOKEN_PATH` for ModelScope.
 
-Benchmark comparison reports and interpretation are in [model evaluation](../notes/model_evaluation.md).
+Benchmark comparison reports and interpretation are in [the evaluation chapter](../notes/evaluation.md).

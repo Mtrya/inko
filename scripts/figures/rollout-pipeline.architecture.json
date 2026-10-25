@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Rollout Pool Production",
+    "subtitle": "Three branches, one prompt-writer model, one rubric-writer model",
+    "output": "scripts/figures/rollout_pipeline.html"
+  },
+  "components": [
+    { "id": "style", "type": "database", "label": "Style image", "sublabel": "d1/d2 · 50/50", "pos": [40, 80], "size": [170, 58] },
+    { "id": "content", "type": "database", "label": "Content image", "sublabel": "d1–d4 · 25% each", "pos": [40, 170], "size": [170, 58] },
+    { "id": "caption", "type": "database", "label": "Caption", "sublabel": "d3/d4 · 50/50", "pos": [40, 330], "size": [170, 58] },
+    { "id": "writer1", "type": "backend", "label": "Prompt writer", "sublabel": "deepseek-v4.1-flash", "pos": [300, 125], "size": [180, 58] },
+    { "id": "writer2", "type": "backend", "label": "Prompt writer", "sublabel": "deepseek-v4.1-flash", "pos": [300, 330], "size": [180, 58] },
+    { "id": "writer3", "type": "backend", "label": "Prompt writer", "sublabel": "deepseek-v4.1-flash", "pos": [300, 450], "size": [180, 58] },
+    { "id": "rubric1", "type": "backend", "label": "Rubric writer", "sublabel": "Qwen3.8-27B · thinking on", "pos": [590, 125], "size": [190, 58] },
+    { "id": "rubric2", "type": "backend", "label": "Rubric writer", "sublabel": "Qwen3.8-27B · thinking on", "pos": [590, 390], "size": [190, 58] },
+    { "id": "pool", "type": "cloud", "label": "Rollout pool", "sublabel": "24,579 rows", "pos": [850, 240], "size": [150, 58] }
+  ],
+  "connections": [
+    { "from": "style", "to": "writer1", "label": "style", "variant": "emphasis", "fromSide": "right", "toSide": "left", "via": [[255, 109], [255, 154]], "labelAt": [232, 109] },
+    { "from": "content", "to": "writer1", "label": "content", "variant": "emphasis", "fromSide": "right", "toSide": "left", "via": [[255, 199], [255, 154]], "labelAt": [236, 199] },
+    { "from": "caption", "to": "writer2", "label": "caption", "fromSide": "right", "toSide": "left", "route": "straight", "labelAt": [255, 359] },
+    { "from": "writer1", "to": "rubric1", "label": "prompts · 50%", "variant": "emphasis", "fromSide": "right", "toSide": "left", "route": "straight", "labelAt": [535, 154] },
+    { "from": "writer2", "to": "rubric2", "label": "prompts · 40%", "variant": "emphasis", "fromSide": "right", "toSide": "left", "via": [[535, 359], [535, 419]], "labelAt": [525, 359] },
+    { "from": "writer3", "to": "rubric2", "label": "prompts · 10%", "variant": "emphasis", "fromSide": "right", "toSide": "left", "via": [[560, 479], [560, 419]], "labelAt": [550, 479] },
+    { "from": "rubric1", "to": "pool", "label": "rows", "variant": "emphasis", "fromSide": "right", "toSide": "left", "via": [[810, 154], [810, 269]], "labelAt": [810, 211] },
+    { "from": "rubric2", "to": "pool", "label": "rows", "variant": "emphasis", "fromSide": "right", "toSide": "bottom", "via": [[925, 419]], "labelAt": [850, 419] },
+    { "from": "style", "to": "pool", "label": "reference image", "variant": "dashed", "fromSide": "top", "toSide": "top", "via": [[125, 40], [925, 40]], "labelAt": [400, 40] },
+    { "from": "style", "to": "rubric1", "variant": "dashed", "fromSide": "top", "toSide": "top", "via": [[125, 40], [685, 40]] }
+  ],
+  "cards": []
+}

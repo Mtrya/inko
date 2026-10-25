@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "One DiffusionART round",
+    "subtitle": "Generation and scoring overlap; both updates wait for the complete reward file",
+    "output": "scripts/figures/posttrain_round.html"
+  },
+  "lanes": [
+    { "id": "rubric", "label": "Scoring node · Qwen3.8-27B rubric" },
+    { "id": "learner", "label": "Learner · 16 devices" },
+    { "id": "pointwise", "label": "Scoring · pointwise" }
+  ],
+  "phases": [
+    { "id": "collect", "label": "Collection + scoring", "fromCol": 0, "toCol": 2 },
+    { "id": "guide", "label": "Reward + guidance", "fromCol": 3, "toCol": 4, "variant": "emphasis" },
+    { "id": "update", "label": "Two updates + EMA", "fromCol": 5, "toCol": 5, "variant": "emphasis" }
+  ],
+  "groups": [],
+  "mainPath": ["rollout", "decode", "rubric", "reward", "updates"],
+  "nodes": [
+    { "id": "rollout", "lane": "learner", "col": 0, "type": "backend", "label": "Rollout", "sublabel": "64×16 · 20 steps", "tag": "CFG 1 · FP32 cache" },
+    { "id": "decode", "lane": "learner", "col": 1, "type": "backend", "label": "Decode + submit", "sublabel": "VAE + PNG (sync)", "tag": "async HTTP: image + IDs", "width": 104 },
+    { "id": "reward", "lane": "learner", "col": 3, "type": "security", "label": "Reward file", "sublabel": "1,024 × 7 channels", "tag": "update barrier", "width": 110 },
+    { "id": "updates", "lane": "learner", "col": 5, "type": "backend", "label": "2 updates + EMA", "sublabel": "32 + 32 per rank", "tag": "checkpoint per 20 rounds", "width": 110 },
+    { "id": "rubric", "lane": "rubric", "col": 2, "type": "backend", "label": "Rubric judge", "sublabel": "7× TP=2 · devices 0–13", "tag": "8 pairs × 2 orders", "width": 120 },
+    { "id": "pointwise", "lane": "pointwise", "col": 2, "type": "backend", "label": "HPSv3 + VQAScore", "sublabel": "devices 14 + 15", "tag": "pointwise", "width": 120 }
+  ],
+  "edges": [
+    { "from": "rollout", "to": "decode", "variant": "emphasis" },
+    { "from": "decode", "to": "rubric", "variant": "dashed", "role": "async", "fromSide": "top", "toSide": "left", "via": [[220, 119]] },
+    { "from": "decode", "to": "pointwise", "variant": "dashed", "role": "async", "fromSide": "bottom", "toSide": "left", "via": [[220, 367]] },
+    { "from": "rubric", "to": "reward", "variant": "security", "role": "return", "fromSide": "right", "toSide": "top", "via": [[430, 119]] },
+    { "from": "pointwise", "to": "reward", "variant": "security", "role": "return", "fromSide": "right", "toSide": "bottom", "via": [[430, 367]] },
+    { "from": "reward", "to": "updates", "label": "16-draw ART guidance", "variant": "emphasis", "labelAt": [528, 205] }
+  ],
+  "cards": []
+}

@@ -92,6 +92,7 @@ def validate_generation(s, e, arms):
                     "SanaPipeline",
                     "PixArtSigmaPipeline",
                     "StableDiffusion3Pipeline",
+                    "StableDiffusionPipeline",
                     "MOSSImagePipeline",
                 },
                 "unsupported external pipeline",

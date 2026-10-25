@@ -138,7 +138,13 @@ def test_generation_recovers_images_and_appends_another_model(
 
 
 @pytest.mark.parametrize(
-    "pipeline", ["DreamLitePipeline", "MOSSImagePipeline", "PixArtSigmaPipeline"]
+    "pipeline",
+    [
+        "DreamLitePipeline",
+        "MOSSImagePipeline",
+        "PixArtSigmaPipeline",
+        "StableDiffusionPipeline",
+    ],
 )
 def test_external_call_preserves_text_seed_and_record_order(
     tmp_path, monkeypatch, pipeline
@@ -157,7 +163,7 @@ def test_external_call_preserves_text_seed_and_record_order(
         "float32",
         1,
         {"portrait": (48, 32)},
-        {"num_inference_steps": 13},
+        {"num_inference_steps": 13, "negative_prompt": ""},
     )
     calls = []
 
@@ -184,6 +190,9 @@ def test_external_call_preserves_text_seed_and_record_order(
     )
     rng = calls[0]["generator"]
     assert (rng if pipeline == "DreamLitePipeline" else rng[0]).initial_seed() == 37
+    assert calls[0]["negative_prompt"] == (
+        [""] if pipeline == "StableDiffusionPipeline" else ""
+    )
     assert (calls[0]["height"], calls[0]["width"], calls[0]["num_inference_steps"]) == (
         48,
         32,

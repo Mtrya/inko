@@ -26,6 +26,11 @@ def load_pipeline(model, assets, device):
     else:
         if model.pipeline == "SanaPipeline":
             kwargs["variant"] = "fp16"
+        if model.pipeline == "StableDiffusionPipeline":
+            # SD 1.5 ships a safety checker that blanks flagged outputs; no
+            # other compared model filters, so evaluate without it.
+            kwargs["safety_checker"] = None
+            kwargs["requires_safety_checker"] = False
         pipe = getattr(diffusers, model.pipeline).from_pretrained(
             assets["path"], **kwargs
         )
@@ -69,6 +74,10 @@ def conditioning_lengths(pipe, model, texts):
             for text in texts
         ]
         tokenizers = [("text_encoder", pipe.tokenizer, texts, limit)]
+    elif model.pipeline == "StableDiffusionPipeline":
+        tokenizers = [
+            ("text_encoder", pipe.tokenizer, texts, pipe.tokenizer.model_max_length)
+        ]
     else:
         tokenizers = [
             ("text_encoder", pipe.tokenizer, texts, pipe.tokenizer.model_max_length),
@@ -150,12 +159,19 @@ class Generator:
             prompts, rng = texts[0], generators[0]
         else:
             prompts, rng = texts, generators
+        parameters = dict(self.model.parameters)
+        if self.model.pipeline == "StableDiffusionPipeline" and isinstance(
+            parameters.get("negative_prompt"), str
+        ):
+            parameters["negative_prompt"] = [parameters["negative_prompt"]] * len(
+                texts
+            )
         images = self.pipe(
             prompt=prompts,
             height=height,
             width=width,
             generator=rng,
-            **self.model.parameters,
+            **parameters,
         ).images
         synchronize(self.device)
         generation_end = time.perf_counter()

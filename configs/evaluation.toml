@@ -30,10 +30,9 @@ guidance = 5.0
 shift = "shape"
 
 [models.inko_posttrain]
-# Starting candidate; select guidance with a small sweep after posttrain finishes.
 checkpoint = {asset = "inko_posttrain", weights = "ema"}
 steps = 20
-guidance = 1.0
+guidance = 4.5
 shift = "shape"
 
 [benchmarks.geneval]
@@ -154,3 +153,41 @@ guidance_scale = 3.0
 negative_prompt = ""
 max_sequence_length = 4096
 uncond_skip_layers = [22]
+
+# 512-native legacy references; prompts truncate at CLIP's 77 tokens.
+[models.sd15]
+pipeline = "StableDiffusionPipeline"
+asset = "sd15"
+precision = "float16"
+batch_size = 1
+
+[models.sd15.shapes]
+"1:1" = [512, 512]
+"3:4" = [576, 432]
+"4:3" = [432, 576]
+"16:9" = [288, 512]
+"9:16" = [512, 288]
+
+[models.sd15.parameters]
+num_inference_steps = 50
+guidance_scale = 7.5
+negative_prompt = ""
+
+# One-step distilled 512 model; its model card requires guidance_scale = 0.
+[models.sdxs]
+pipeline = "StableDiffusionPipeline"
+asset = "sdxs"
+precision = "float16"
+batch_size = 1
+
+[models.sdxs.shapes]
+"1:1" = [512, 512]
+"3:4" = [576, 432]
+"4:3" = [432, 576]
+"16:9" = [288, 512]
+"9:16" = [512, 288]
+
+[models.sdxs.parameters]
+num_inference_steps = 1
+guidance_scale = 0.0
+negative_prompt = ""

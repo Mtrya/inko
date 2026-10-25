@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Inko Architecture",
+    "subtitle": "Frozen text and image encoders around a 532.5M-parameter diffusion transformer",
+    "output": "scripts/figures/pretrain_architecture.html",
+    "viewBox": [1480, 860]
+  },
+  "components": [
+    { "id": "qwen", "type": "cloud", "label": "Frozen Qwen3-0.6B", "sublabel": "early exit at layer 20", "tag": "output width 1024", "pos": [40, 70], "size": [190, 90] },
+    { "id": "txtproj", "type": "backend", "label": "Text token projection", "sublabel": "1024 → 1152", "pos": [500, 70], "size": [210, 90] },
+    { "id": "latent", "type": "database", "label": "Noisy image latent", "sublabel": "REPA-E VAE · 16 channels", "tag": "x_t", "pos": [40, 330], "size": [150, 90] },
+    { "id": "patch", "type": "backend", "label": "2×2 patch embedding", "sublabel": "Conv2d · 16 → 1152", "pos": [250, 330], "size": [170, 90] },
+    { "id": "double", "type": "backend", "label": "Double-stream block ×1", "sublabel": "joint attention · separate MLPs", "tag": "independent image/text and attention/MLP modulation", "pos": [500, 300], "size": [210, 150] },
+    { "id": "single", "type": "backend", "label": "Single-stream blocks ×24", "sublabel": "joint attention · shared MLP", "tag": "shared attention/MLP modulation", "pos": [790, 300], "size": [220, 150] },
+    { "id": "head", "type": "backend", "label": "Output head", "sublabel": "LayerNorm → Linear", "tag": "2×2 unpatchify", "pos": [1090, 330], "size": [170, 90] },
+    { "id": "velocity", "type": "database", "label": "Latent velocity", "sublabel": "16 channels · H × W", "pos": [1310, 330], "size": [130, 90] },
+    { "id": "pooled", "type": "backend", "label": "Masked mean + projection", "sublabel": "1024 → 1152", "tag": "non-padding text tokens", "pos": [250, 580], "size": [190, 90] },
+    { "id": "conditioner", "type": "backend", "label": "Conditioning MLP", "sublabel": "concatenate · 2304 → 1152", "tag": "output c", "pos": [500, 580], "size": [210, 90] },
+    { "id": "timestep", "type": "cloud", "label": "Sinusoidal timestep", "sublabel": "1000t → 1152 features", "pos": [500, 740], "size": [210, 70] }
+  ],
+  "boundaries": [],
+  "connections": [
+    { "from": "qwen", "to": "txtproj", "label": "token features · 1024", "variant": "emphasis", "fromSide": "right", "toSide": "left", "route": "straight", "labelAt": [365, 115] },
+    { "from": "txtproj", "to": "double", "label": "text tokens · 1152", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "straight", "labelAt": [605, 230] },
+    { "from": "latent", "to": "patch", "variant": "emphasis", "fromSide": "right", "toSide": "left", "route": "straight" },
+    { "from": "patch", "to": "double", "label": "image tokens", "variant": "emphasis", "fromSide": "right", "toSide": "left", "route": "straight", "labelAt": [460, 375] },
+    { "from": "double", "to": "single", "label": "image + text", "variant": "emphasis", "fromSide": "right", "toSide": "left", "route": "straight", "labelAt": [745, 375] },
+    { "from": "single", "to": "head", "label": "image tokens", "variant": "emphasis", "fromSide": "right", "toSide": "left", "route": "straight", "labelAt": [1050, 375] },
+    { "from": "head", "to": "velocity", "variant": "emphasis", "fromSide": "right", "toSide": "left", "route": "straight" },
+    { "from": "qwen", "to": "pooled", "label": "text features · 1024", "fromSide": "left", "toSide": "left", "via": [[20, 115], [20, 625]], "labelAt": [135, 625] },
+    { "from": "pooled", "to": "conditioner", "fromSide": "right", "toSide": "left", "route": "straight" },
+    { "from": "timestep", "to": "conditioner", "fromSide": "top", "toSide": "bottom", "route": "straight" },
+    { "from": "conditioner", "to": "double", "label": "c", "fromSide": "top", "toSide": "bottom", "route": "straight", "labelAt": [605, 530] },
+    { "from": "conditioner", "to": "single", "label": "c", "fromSide": "right", "toSide": "bottom", "via": [[900, 625]], "labelAt": [900, 530] }
+  ],
+  "cards": []
+}
