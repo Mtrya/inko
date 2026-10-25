@@ -16,9 +16,9 @@ where the data is mounted. Platform setup and credentials are in the local
 | `posttrain.readouts` | Join a completed blind ballot to benchmark scores; report comparable pairs and scorer/human disagreement. |
 
 The single-stage DiffusionART trainer is `python -m src.posttrain.train`; the standalone evaluation
-harness is `python -m src.evaluation.monitoring.run`. Commands, config schema
-and current limits are in [the posttraining recipe](../notes/posttrain_recipe.md)
-and [campaign guide](../notes/posttrain_campaign.md).
+harness is `python -m src.evaluation.monitoring.run`. The production configuration is
+[`configs/posttrain.toml`](../configs/posttrain.toml); the campaign and its evidence are documented in
+[the post-training chapter](../notes/posttraining.md).
 ## Model release
 
 `python -m scripts.export_model --checkpoint <weights> --output <directory>`
@@ -56,7 +56,7 @@ and clears queued draws while preserving all other training state. At interior
 stage endpoints, migration preserves sampler files because the next stage
 constructs its own sampler. The shell launcher uses the package overlay at
 `<storage-root>/runtime/python`. See the
-[checkpoint migration procedure](../notes/pretrain_recipe.md#launch-checkpoints-and-resolution-transitions).
+[checkpoint migration procedure](../notes/pretraining.md#checkpointing-and-recovery).
 
 The planner takes `--config`, `--stage` and `--storage-root`; dataset weights
 and caption policy come from that recipe. Calibration is a flat JSON list of
@@ -226,4 +226,4 @@ stage. `--storage-root` selects the external data/model/output tree.
 Downloads fetch the selected repository. Credentials come from `HF_TOKEN`, or
 `MS_TOKEN` / `MODELSCOPE_TOKEN_PATH` for ModelScope.
 
-Benchmark comparison reports and interpretation are in [model evaluation](../notes/model_evaluation.md).
+Benchmark comparison reports and interpretation are in [the evaluation chapter](../notes/evaluation.md).
