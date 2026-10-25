@@ -136,7 +136,7 @@ Known limitations of the release model, from the post-training assessment and ca
 
 - Exact rendered text, detector-based counting and spatial relations remain weak.
 - Some unrelated subjects (crevices, magic relics, factory creatures) can be substituted by ornate portraits; requested illustration styles and actions can collapse into static realistic portraits.
-- Chinese negation is followed far more reliably than English negation (measured probe in the [evaluation chapter](notes/evaluation.md)).
+- Negation in dense scenes is unreliable: asked for a busy intersection with no blue cars, Inko, like most references, paints the cars (see the [evaluation chapter](notes/evaluation.md)).
 
 ## Development
 

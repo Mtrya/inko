@@ -34,20 +34,14 @@ def prepare(path, crop_range, long_edge=None):
     image = Image.open(path).convert("RGB")
     aspect = image.width / image.height
     low, high = crop_range
-    if aspect < low or aspect > high:
-        target = min(max(aspect, low), high)
-        if target > aspect:
-            width = round(image.height * target)
-            left = (width - image.width) // 2
-            canvas = Image.new("RGB", (width, image.height))
-            canvas.paste(image, (left, 0))
-            image = canvas
-        else:
-            height = round(image.width / target)
-            top = (image.height - height) // 2
-            canvas = Image.new("RGB", (image.width, height))
-            canvas.paste(image, (0, top))
-            image = canvas
+    if aspect < low:
+        height = round(image.width / low)
+        top = (image.height - height) // 2
+        image = image.crop((0, top, image.width, top + height))
+    elif aspect > high:
+        width = round(image.height * high)
+        left = (image.width - width) // 2
+        image = image.crop((left, 0, left + width, image.height))
     if long_edge and max(image.size) > long_edge:
         scale = long_edge / max(image.size)
         image = image.resize((round(image.width * scale), round(image.height * scale)), Image.LANCZOS)
