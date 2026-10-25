@@ -2,16 +2,16 @@
 
 ## Pretraining at a glance
 
-Inko's trainable diffusion backbone has **532,496,992 parameters**. Pretraining ran for 600,000 optimizer updates on 16 Ascend 910B2C cards, using rectified flow with a frozen Qwen3-0.6B text encoder and a frozen REPA-E image VAE. One global learning-rate schedule carried the model through three resolutions.
+Inko's trainable diffusion backbone has **532,496,992 parameters**. Pretraining ran for 600,000 optimizer updates on 16 Ascend 910B2C cards, using [rectified flow](https://arxiv.org/abs/2209.03003) with a frozen Qwen3-0.6B text encoder and a frozen REPA-E image VAE. One global learning-rate schedule carried the model through three resolutions.
 
-| Resolution | Optimizer updates | Actual duration |
+| Resolution | Optimizer updates | Active duration |
 |---|---:|---:|
 | 256p | 450,000 | 160h 12m |
 | 640p | 120,000 | 119h 11m |
 | 896p | 30,000 | 44h 03m |
 | **Total** | **600,000** | **323h 26m** |
 
-The reported durations include evaluation and checkpoint work. Data-related pauses are documented in the [data chapter](data.md#weights-splits-and-events).
+The durations sum the active training segments, including evaluation and checkpoint work, and exclude paused time: about 5,175 Ascend card-hours in total. The full-run curves mark four interruptions: new or refreshed training data at 250k and 400k, a source-weight correction at 480k, and the conditioning-decay intervention at 56k. The [data timeline](data.md#the-corpus-and-its-training-timeline) gives the dataset changes; the stability section reconstructs 56k.
 
 ## Architecture under the 0.6B budget
 
@@ -33,21 +33,21 @@ The architecture was designed to a **0.6B trainable-parameter budget**.
 
 Branch RMSNorm and the factor-1000 timestep input are explained through the evidence in [Training stability](#training-stability).
 
-Single-stream processing was attractive because double-stream blocks carry roughly twice the parameters at comparable compute. Z-Image's comparison of stream architectures favored all-single-stream processing for image quality, with weaker text rendering as the tradeoff. Since text rendering was not an Inko target, that tradeoff had little weight. FLUX.1 supplied the double-to-single ordering. A bounded matched-compute comparison of double-stream, single-stream and hybrid models found nearly identical loss, making parameter efficiency the deciding factor. The initial choice was full single-stream.
+Single-stream processing was attractive because double-stream blocks carry roughly twice the parameters at comparable compute. [Z-Image](https://arxiv.org/abs/2511.22699)'s comparison of stream architectures favored all-single-stream processing for image quality, with weaker text rendering as the tradeoff. Since text rendering was not an Inko target, that tradeoff had little weight. [FLUX.1](https://github.com/black-forest-labs/flux) supplied the double-to-single ordering. A bounded matched-compute comparison of double-stream, single-stream and hybrid models found nearly identical loss, making parameter efficiency the deciding factor. The initial choice was full single-stream.
 
-The final 1+24 assembly came later. Twenty-four single-stream blocks gave roughly 485M parameters, and one double-stream block brought the total to 532M.
+The final 1+24 assembly came later. Twenty-four single-stream blocks gave roughly 485M parameters; I wanted the model slightly larger, and the one added block was double-stream, bringing the total to 532M.
 
 The width–depth balance extrapolated a directional result from only two roughly 100M candidates: wider and shallower won on loss and Kernel Inception distance (KID), so I used 1152 with 24 single-stream blocks. A grid search to fit an optimal ratio would have been better, but was not performed. Head dimension 72 with 16 heads had a slight advantage over 64 with 18 in a small comparison. The 8/3 FFN ratio was a SwiGLU convention; the later change from 3075 to 3072 was for Ascend alignment.
 
-Qwen3-0.6B followed the LLM-based conditioning direction established by Qwen-Image. The smallest Qwen3 model suited bilingual and long prompts, while freezing it avoided additional optimizer groups, learning rates and training memory. Early exit addressed a different hypothesis: final-layer features are prepared for next-token prediction and need not be best for visual conditioning. A sweep over layers {8, 16, 20, 24, 28} selected layer 20. Layer 28 had slightly lower loss, while layer 20 gave better KID and facial-structure review; layers 8 and 16 were too early. Intermediate-feature aggregation was not explored.
+[Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) followed the LLM-based conditioning direction established by [Qwen-Image](https://arxiv.org/abs/2508.02324). The smallest Qwen3 model suited bilingual and long prompts, while freezing it avoided additional optimizer groups, learning rates and training memory. Early exit addressed a different hypothesis: final-layer features are prepared for next-token prediction and need not be best for visual conditioning. A sweep over layers {8, 16, 20, 24, 28} selected layer 20. Layer 28 had slightly lower loss, while layer 20 gave better KID and facial-structure review; layers 8 and 16 were too early. Intermediate-feature aggregation was not explored.
 
-The VAE is the REPA-E fine-tune of the Qwen-Image VAE, selected because the REPA-E paper reported better DiT learning even without end-to-end VAE tuning during DiT training. Inko keeps it frozen and did not ablate the choice. The 2×2 latent patch size was inherited from the [original DiT](https://arxiv.org/abs/2212.09748).
+The VAE is the REPA-E fine-tune of the Qwen-Image VAE, selected because the [REPA-E paper](https://arxiv.org/abs/2504.10483) reported better DiT learning even without end-to-end VAE tuning during DiT training. Inko keeps it frozen. The 2×2 latent patch size was inherited from the [original DiT](https://arxiv.org/abs/2212.09748).
 
-Text conditions the blocks through joint attention and through a global modulation path. The latter mean-pools non-padding text features, projects them, and combines them with timestep features. Single-stream blocks share one shift, scale and gate between attention and MLP to save parameters. A matched comparison favored sharing on loss, KID and peak memory. The double-stream block was added later and kept independent modulation.
+Text conditions the blocks through joint attention and through a global modulation path. The latter mean-pools non-padding text features, projects them, and combines them with timestep features. Single-stream blocks share one shift, scale and gate between attention and MLP to save parameters. A matched comparison favored sharing on loss, KID and peak memory. The double-stream block was added after those experiments and kept independent modulation.
 
 The positional layout follows Qwen-Image. Centered image coordinates were intended to reduce the largest absolute coordinates during extrapolation, while text tokens continue along a fixed diagonal beyond the image grid. An early comparison against a corner-origin image-diagonal variant tied at 320p transfer, and both failed at zero-shot scale factors of at least 1.875. Centering was not a measured winner; progressive training supplied the transfer mechanism.
 
-Muon showed faster convergence than AdamW in a matched comparison. Fused QKV, modulation and gated-FFN matrices are split into functional chunks before orthogonalization, following [CMuon](https://arxiv.org/abs/2608.02502), which was not itself ablated. Auxiliary parameters use AdamW by convention. The initial Moonlight scaling convention and its correction appear in the stability account.
+[Muon](https://kellerjordan.github.io/posts/muon/) showed faster convergence than AdamW in a matched comparison. Fused QKV, modulation and gated-FFN matrices are split into functional chunks before orthogonalization, following [CMuon](https://arxiv.org/abs/2608.02502). Auxiliary parameters use AdamW by convention. The initial [Moonlight](https://arxiv.org/abs/2502.16982) scaling convention and its correction appear in the stability account.
 
 <details><summary>Matched architecture comparisons</summary>
 
@@ -82,107 +82,90 @@ The Muon comparison establishes the convergence advantage of the tested RMS-matc
 
 The 75:20:5 allocation across 256p, 640p and 896p was fixed before the staged run. Existing DiT recipes commonly spend most updates at low resolution and very few at the largest; Inko followed that prior because 896p training remained expensive.
 
-Timesteps start from a logit-normal distribution with mean 0 and standard deviation 1. The model uses $t=0$ for noise and $t=1$ for data, with the SD3-style resolution shift. For latent spatial dimensions $H\times W$, the image-patch token count is $N=(H/2)(W/2)$ because patches are 2×2. The shift is $s=\sqrt{N/256}$ when $N>256$, and $s=1$ otherwise:
+Timesteps start from a logit-normal distribution with mean 0 and standard deviation 1. The model uses $t=0$ for noise and $t=1$ for data, with the [SD3](https://arxiv.org/abs/2403.03206)-style resolution shift. For latent spatial dimensions $H\times W$, the image-patch token count is $N=(H/2)(W/2)$ because patches are 2×2. The shift is $s=\sqrt{N/256}$ when $N>256$, and $s=1$ otherwise:
 
 $$t' = \frac{t}{s-(s-1)t}.$$
 
-The 256p reference geometry has $N=256$ and a neutral shift. Larger token counts shift sampled times toward noise under this convention.
+A square 256p image becomes a 32×32 latent grid and then 16×16 patches, giving the reference $N=256$ and a neutral shift. The corresponding patch grids are 40×40 at 640p and 56×56 at 896p, so their shifts are 2.5 and 3.5. Larger token counts therefore move sampled times toward noise under this convention.
 
-Zero-shot positional scaling failed at factors of at least 1.875, so progressive training supplied the transfer mechanism instead. In the actual 256p→640p transition, adaptation took about 20k updates with EMA decay 0.9999.
+Zero-shot positional scaling failed at factors of at least 1.875, short of the 2.5× jump to 640p, so progressive training supplied the transfer mechanism instead. In the actual 256p→640p transition, adaptation took about 20k updates with EMA decay 0.9999.
 
 ### Caption length
 
-For retained caption lengths $n_i$ within a selected image row, the length-based sampling probability is proportional to $n_i^\beta$, with $\beta$ moving linearly from −1 to +1 over the global run. Early training therefore favors shorter texts, while later training favors detailed conditioning. This ordering was designed from the beginning on the intuition that short prompts are easier to learn first.
+For retained caption lengths $n_i$ within a selected image row, the length-based sampling probability is proportional to $n_i^\beta$, with $\beta$ moving linearly from −1 to +1 over the global run. Early training therefore favors shorter texts, while later training favors detailed conditioning. This ordering follows the intuition that short prompts are easier to learn first.
 
 For a row containing captions shorter than 256 tokens, 20% of the within-row probability mass is distributed uniformly over those short captions; the remaining 80% follows the power law, including any short captions within that part. Rows without short captions use the power law alone. The reserve maintains short-prompt exposure as $\beta$ rises.
 
-Long captions remained scarce even after the enrichment described in the [data chapter](data.md#the-caption-strategy), so each conditioned example also receives a loss weight based on retained caption length $n$:
+Long captions were still a minority after the enrichment described in the [data chapter](data.md#the-caption-strategy), so each conditioned example also receives a loss weight based on retained caption length $n$:
 
 $$w(n)=\max\left(1,\log_2\frac{n}{128}\right).$$
 
-Captions up to 256 tokens receive weight 1; weights are 2 at 512, 3 at 1024 and 4 at the 2,048-token cap. The update uses a weighted mean, $\sum_i w_i\ell_i/\sum_i w_i$, rather than a weighted sum, changing where gradient mass goes without rescaling the whole update. Comparisons of curves and reference thresholds produced no clear winner, so this remains a heuristic choice.
+Captions up to 256 tokens receive weight 1; weights are 2 at 512, 3 at 1024 and 4 at the 2,048-token cap. The update uses a weighted mean, $\sum_i w_i\ell_i/\sum_i w_i$, changing where gradient mass goes without rescaling the whole update. Comparisons of curves and reference thresholds produced no clear winner, so the exact weighting remains a heuristic choice.
 
-Caption dropout independently removes text for 10% of examples, supplying unconditional examples for classifier-free guidance. Precompute stores image latents, cleaned caption candidates and length metadata, while tokenization and the frozen Qwen forward run online. Source weights and the data changes at 250k, 400k, 450k, 480k and 570k stay with the [data chapter](data.md#weights-splits-and-events).
+Separately from the length curriculum, caption dropout removes text for 10% of examples, supplying unconditional examples for classifier-free guidance.
+
+The long-caption emphasis had a cost. Despite the 20% reserve, generation review near the end of pretraining showed weaker responses to short prompts. Recovering that ability (at least partially) became one of the objectives of the specialized post-training run.
 
 ## Packing and infrastructure optimization
 
 ### From a long-caption OOM to dynamic micro-batching
 
-The initial infrastructure problem was a long-caption out-of-memory failure. Reducing every micro-batch to fit the worst caption would have wasted the rest of the workload, and a fixed micro-batch per aspect ratio ignores text length. Here, packing means dynamic micro-batching by aspect and caption length, not concatenating sequences. Its goals were stable memory, limited padding waste and measured throughput.
+The initial infrastructure problem was a long-caption out-of-memory failure. Reducing every micro-batch to fit the worst caption would have wasted the rest of the workload, while a fixed micro-batch per aspect ratio would still ignore text length. The response was dynamic micro-batching by aspect and caption length, called packing here. Its goals were stable memory, limited padding waste and high measured throughput. Precompute stored image latents, caption candidates and length metadata, while tokenization and the frozen Qwen forward ran online, so the planner could account for each selected caption's actual length.
 
-Each aspect bucket receives 20 caption-length buckets with a 2,048-token cap. The planner chooses their upper bounds by minimizing expected padded compute. For image-token count $N$ and caption length $n$, $C(n)$ is the estimated per-sample compute cost under the fitted time model:
+Each of the five aspect buckets receives 20 caption-length buckets with a 2,048-token cap. The planner chooses their upper bounds by minimizing expected padded compute. For image-token count $N$ and caption length $n$, $C(n)$ estimates the per-sample compute cost:
 
 $$C(n)=\alpha(N+n)+\gamma(N+n)^2.$$
 
-The linear term represents projections and MLPs, while the quadratic term represents attention. The coefficients are architecture-dependent, and only their ratio affects the optimum. A row padded to a bucket's upper bound $h$ is charged $C(h)$, so its padding waste is $C(h)-C(n)$. For a bucket with lower bound $a$ and upper bound $h$, expected waste is $\sum_{n\in(a,h]}p(n)(C(h)-C(n))$, where $p(n)$ is the weighted caption-length distribution for the stage and curriculum window. Dynamic programming finds the boundaries that minimize total waste, rather than using uniform lengths.
+The linear term represents projections and MLPs, while the quadratic term represents attention. The coefficients are architecture-dependent, and only their ratio affects the optimum. A row padded to a bucket's upper bound $h$ is charged $C(h)$, so its padding waste is $C(h)-C(n)$. For a bucket with lower bound $a$ and upper bound $h$, expected waste is $\sum_{n\in(a,h]}p(n)(C(h)-C(n))$, where $p(n)$ is the weighted caption-length distribution for the stage and curriculum window. Dynamic programming finds the boundaries that minimize total waste.
 
-Micro-batch sizes come from measured forward/backward calibration on the target cards. For the 640p and 896p plans, the per-rank allocation budget was **52 GiB on 60.96 GiB devices**. With padded sequence length $L=N+h$ and micro-batch size $B$, the fitted models are
+Micro-batch sizes come from measured forward/backward calibration on the target cards. With padded sequence length $L=N+h$ and micro-batch size $B$, the fitted models are
 
 $$M(B,L)=m_0+B\,m_1L,\qquad T(B,L)=t_0+B(t_1L+t_2L^2).$$
 
-$M$ estimates peak allocated memory and $T$ estimates forward/backward time. The coefficients are fitted constants. A quadratic memory term is added when the linear fit has $R^2<0.95$; fitted memory residuals were at most 0.60 GiB. The 52 GiB budget covered the FP32 model, EMA, frozen BF16 text encoder, initialized optimizer states and gradients, plus a model-sized DDP-buffer reserve. The planner selects the largest $B$ within the configured batch range whose predicted peak fits this full-resident budget. Each fixed later-resolution plan averages caption probabilities over its stage window: 0.75–0.95 at 640p and 0.95–1.0 at 896p.
+$M$ estimates peak allocated memory and $T$ estimates forward/backward time. A quadratic memory term is added when the linear fit has $R^2<0.95$; fitted memory residuals were at most 0.60 GiB. For 640p and 896p, the planner targeted 52 GiB of allocated memory per rank on 60.96 GiB devices. Calibration included the FP32 model, EMA, frozen BF16 text encoder, initialized optimizer states, gradients and a model-sized distributed-training buffer reserve. Within that resident state, the planner selects the largest permitted $B$ whose predicted peak fits. Each fixed later-resolution plan averages caption probabilities over its curriculum window: progress 0.75–0.95 at 640p and 0.95–1.0 at 896p.
 
-Captions are padded only to their local bound, so the per-rank micro-batch shrinks as that bound grows. Gradient accumulation increases samples per update without exceeding the per-microbatch memory ceiling: accumulation 1 at 256p, 3 at 640p and 4 at 896p. The selected micro-batch ranges are 8–72, 5–12 and 3–6 per rank.
+Captions are padded only to their local bound, so the per-rank micro-batch shrinks as that bound grows. Gradient accumulation then increases samples per update without exceeding the micro-batch memory budget: accumulation 1 at 256p, 3 at 640p and 4 at 896p. The selected micro-batch ranges are 8–72, 5–12 and 3–6 per rank.
 
 For a telemetry window with mean per-rank micro-batch $\bar B$ and stage accumulation $A$, the estimated global batch per optimizer update is
 
 $$\widehat{B}_{\mathrm{global}}=16A\bar B.$$
 
-This is a realized window estimate, not a fixed batch size: bucket occupancy changes with the caption curriculum and the configured pools.
+The estimate follows realized bucket occupancy as the caption curriculum and source pools change.
 
 ![Bucket plans and realized global batch. Top: five aspect curves per resolution, each with 20 caption-length buckets; the y-axes differ by resolution. Bottom: estimated global samples per optimizer update from 25-update telemetry windows, with a 500-update median. Faint vertical dashed lines mark 56k, 250k, 400k and 480k; thicker dashed lines mark the resolution transitions at 450k and 570k.](assets/pretrain_batch_plan.png)
 
-Median estimates across the staged run were **898**, **514** and **358** global samples per update at 256p, 640p and 896p, respectively.
+Median estimates across the staged run were **898**, **514** and **358** global samples per update at 256p, 640p and 896p, respectively. The downward trend within each stage reflects the movement toward longer captions as well as the changing data pools.
 
-The direct result of packing was memory coverage rather than a headline throughput percentage. A forced-shape check covered all 280 distinct aspect, length and batch combinations across the later-resolution candidates, with three forward/backward repeats and finite loss and gradient checks. Peak allocations were 51.57 and 52.03 GiB against 60.96 GiB device capacity. The production trace adds the time dimension, showing how logging-rank memory behaved as resolution, caption lengths and pool composition changed.
+A forced-shape check exercised all 280 distinct aspect, length and batch combinations across the later-resolution candidates. Peak allocations were 51.57 and 52.03 GiB. The production trace below adds the time dimension: stage maxima were 49.68, 51.59 and 52.05 GiB. The small excursions above 52 GiB are consistent with a fitted planning target whose calibration residuals reached 0.60 GiB, while actual use remained below device capacity.
 
 ![Peak allocated memory on the logging rank over the 600k schedule. Lines are 500-update medians and ribbons preserve the full minimum–maximum range within each bin. Stage maxima are 49.68, 51.59 and 52.05 GiB. The dotted horizontal line marks the 52 GiB later-stage budget; the dashed line marks 60.96 GiB device capacity. Faint vertical dashed lines mark 56k, 250k, 400k and 480k; thicker dashed lines mark the resolution transitions at 450k and 570k.](assets/pretrain_memory.png)
 
-The throughput gains came from the subsequent execution work.
-
 ### From CUDA exploration to Ascend execution
 
-The RTX 4090 pass supplied the first candidate screen. Autotuning reduced warm update time by **1.73%**, **4.41%** and **3.50%** at 256p, 640p and 896p, respectively. Cold subprocess time rose from 485 to 918 seconds at 256p, from 783 or 919 to 1,712 seconds at 640p, and from 1,013 to 1,067 seconds at 896p. A long training run can amortize that compilation cost; a short probe can lose the entire warm gain.
+Packing controlled the workload's shape; execution work made that workload faster. The first pass on an RTX 4090 screened autotuning and recurring overheads. Autotuning reduced warm update time by **1.73%**, **4.41%** and **3.50%** at 256p, 640p and 896p. Together with the other selected changes, the CUDA path increased steady single-GPU throughput from **54.99 to 72.98 samples/s**, a 32.7% gain.
 
-Event-level costs received their own measurements. Periodic cleanup fell from about 3.14 to 1.30 seconds at its update boundary, and health collection from 3.526 to 1.410 seconds, both at their event cadences rather than every ordinary update. The combined CUDA path improved steady single-GPU throughput from **54.99 to 72.98 samples/s**.
+The screen rejected as well as selected. BF16 communication reduced the measured communication interval from roughly 141 to 80 ms, but added 2.33 GB of memory. More importantly, simulated Muon updates differed by 6.52% on two ranks and 8.58% on eight ranks despite gradient differences of only 0.23% and 0.317%. Orthogonalization amplified the reduction error, so the hook was rejected.
 
-Communication precision provided a counterexample. BF16 communication reduced the measured communication interval from roughly 141 to 80 ms, but added 2.33 GB of memory. Simulated Muon updates differed by 6.52% on two ranks and 8.58% on eight ranks, despite gradient differences of only 0.23% and 0.317%. Orthogonalization amplified the reduction error, so the hook was rejected before Ascend qualification.
+The CUDA screen informed the Ascend candidates, which then received fresh matched measurements on 16×910B2C cards. Long-caption memory depended first on the attention implementation. Generic float-mask scaled dot-product attention retained a quadratic attention-sized tensor with approximately 2.81 GiB of extra saved memory in the measured case. Native Ascend attention reduced that overhead to 0.06 GiB with a boolean drop mask.
 
-The CUDA screen informed the Ascend candidates, and adoption required fresh matched measurements on 16×910B2C. Long-caption memory depended on the attention implementation. The generic float-mask SDPA path retained a quadratic attention-sized tensor, costing approximately 2.81 GiB of extra saved memory in the measured case. Direct native Ascend attention reduced that overhead to 0.06 GiB by using a boolean `[B,1,Sq,Sk]` drop mask, with `True` meaning drop.
-
-The early-256p comparisons used the selected variable-aspect and caption workload over updates 100–450, excluding startup, profiling and periodic evaluation or checkpoint work. Fused RMSNorm retains FP32 arithmetic and learned gains while using the native operator. FFN alignment changes the matrix shape seen by Ascend kernels and reduces total parameters by about 0.05%. Native SwiGLU replaces the separate chunk, activation and multiplication operations with one native call.
-
-The upper panels below isolate specific execution changes; the lower panel follows the configured pools and caption curriculum through the staged run.
+The early-256p comparisons used the selected variable-aspect and caption workload over updates 100–450, excluding startup, profiling and periodic evaluation or checkpoint work. Native fused RMSNorm retained FP32 arithmetic and learned gains. The memory freed by the fused attention and norm kernels then made room for larger micro-batches, and aligning the FFN width to 3072 gave Ascend kernels more regular matrix shapes. Native SwiGLU replaced separate chunk, activation and multiplication operations with one call. The figure labels each incremental gain.
 
 ![CUDA and Ascend infrastructure measurements. Top left: warm baseline and autotuned seconds per update on one RTX 4090, with time reductions of 1.73%, 4.41% and 3.50%. Top right: cumulative early-256p throughput on 16 Ascend 910B2C cards, rising from 656.29 to 878.91 samples per second with incremental gains labeled. Bottom: EMA of per-update global throughput for the configured training runs, with a 500-update median and stage medians of approximately 787, 161 and 78 samples per second. Faint vertical dashed lines mark 56k, 250k, 400k and 480k; thicker dashed lines mark the resolution transitions at 450k and 570k.](assets/pretrain_throughput.png)
 
-Together the Ascend changes gave **33.92% more throughput and 24.81% less time per update**. The final SwiGLU kernel comparison matched 9,600 sample identities over 600 updates, kept the parameter layout unchanged, retained comparable short-run loss and gradient distributions, and reduced peak allocation from 52.591 to 49.678 GiB.
+The cumulative Ascend changes gave **33.92% more throughput** on that early-256p comparison. The final SwiGLU comparison reduced peak allocation from 52.591 to 49.678 GiB. In the full curriculum, throughput followed resolution, caption length and pool composition, with stage medians of approximately 787, 161 and 78 samples/s.
 
-### Later-resolution plans
+### Choosing the later-resolution plans
 
-At 640p and 896p, the planner compared memory-sized batches with time-aligned batches. Time alignment reduces sizes in faster buckets to keep predicted micro-batch times under a shared target, since distributed updates wait for the slowest rank. Each candidate ran with the same mature 180k model weights, fresh optimizers, fixed caption progress and monitoring disabled. Data-source mixture weights, optimizer policy and accumulation were held fixed within a comparison. The last three columns report the selected memory-sized path.
+At 640p and 896p, memory-sized batches competed with time-aligned batches. Time alignment reduces sizes in faster buckets to keep predicted micro-batch times under a shared target, since distributed updates wait for the slowest rank. Controlled probes used the same mature 180k model, fresh optimizers and fixed caption progress for both candidates.
 
-| Stage | Time-aligned samples/s | Memory-sized samples/s | Samples/update | Seconds/update | Peak allocated / reserved GiB |
-|---|---:|---:|---:|---:|---:|
-| 640p, accumulation 3 | 169.78 | **173.47** | 531.66 | 3.0648 | 51.18 / 51.59 |
-| 896p, accumulation 4 | 83.30 | **83.90** | 375.43 | 4.4747 | 51.74 / 52.67 |
+| Stage | Time-aligned samples/s | Memory-sized samples/s | Memory-sized samples/update | Memory-sized seconds/update |
+|---|---:|---:|---:|---:|
+| 640p, accumulation 3 | 169.78 | **173.47** | 531.66 | 3.0648 |
+| 896p, accumulation 4 | 83.30 | **83.90** | 375.43 | 4.4747 |
 
-Time alignment needed at least a 3% gain with a positive lower 95% block-bootstrap bound. It instead changed throughput by −2.13% at 640p and −0.72% at 896p, so it was rejected and memory-sized plans remained selected. Accumulation may dilute the effect of any one slow micro-batch, but that remains a plausible hypothesis rather than an established mechanism.
+Time alignment reduced throughput by 2.13% at 640p and 0.72% at 896p, so the memory-sized plans remained selected. These short probes isolated the execution paths on a fixed reference pool; the full-run panel above supplies the production throughput record.
 
-The reference pools used for these measurements were not the final configured pools. The rates therefore qualify the compared execution paths, not final-pool bucket occupancy or production throughput.
-
-### Rejected candidates and the remaining bottleneck
-
-Not every plausible optimization survived measurement.
-
-| Candidate | Evidence and decision |
-|---|---|
-| Compiled attention | The tested stack hit converter/output problems and later device out-of-bounds failures. Native attention remained the qualified path. |
-| Custom RoPE kernel | Measured 1.167/2.304/2.140 ms against native 0.478/1.074/1.327 ms at the tested shapes. Rejected. |
-| Batched `baddbmm` Muon | 40–59% slower than the existing optimizer probe and numerically different. Rejected. |
-| DDP buffer changes | No material real-workload gain. Retained the existing path. |
-
-For the selected early-256p workload, a three-update trace attributed 84.56% of time to compute, 7.22% to exposed communication and 8.22% to free gaps. Eliminating every non-compute component would have removed at most 15.44% of that trace's wall time. Further substantial gains would require compute improvements rather than another round of small overhead fixes.
+A three-update trace of the selected early-256p path attributed 84.56% of wall time to compute, 7.22% to exposed communication and 8.22% to free gaps. Further substantial gains would therefore need cheaper compute, not just another round of overhead removal.
 
 ## Training stability
 
@@ -192,16 +175,18 @@ Before the staged schedule, an Ascend run using the earlier recipe developed los
 
 ![Raw training loss and pre-clip gradient norm around the step-12,705 event in the original Ascend run and its H200 reproduction. Both gradient series peak at update 12,705. The gradient panel uses a logarithmic y-axis.](assets/pretrain_spike_12705.png)
 
-The investigation then used two additional captured H200 states for controlled replay. They came from separate spike events, not from update 12,705. At step 12,829, replaying the same batch and state in FP32 produced gradient norms 41.709637 on H200 and 41.709521 on RTX 4090. This cross-hardware agreement pointed to model-side dynamics rather than a card-specific or BF16-only failure. At step 12,172, an exact reconstruction of the preceding update reproduced the stored state bit-for-bit. The same following batch then allowed interventions on individual update components:
+The investigation then used two additional captured H200 states for controlled replay. They came from separate spike events, not from update 12,705. At step 12,829, replaying the same batch and state in FP32 produced gradient norms 41.709637 on H200 and 41.709521 on RTX 4090. This cross-hardware agreement pointed to model-side dynamics rather than a card-specific or BF16-only failure.
+
+At the captured step-12,172 event, an exact reconstruction of the preceding update reproduced the stored state bit-for-bit. A matrix-by-matrix inspection of that update singled out the final conditioning matrix, `c_mlp.2.weight`, as the anomaly. Its update was decomposed into a displacement of the mean hidden feature, which acts as a shared conditioning offset, and the remaining variation across features. Replaying the same following batch with selected parts of the preceding update isolated their effects:
 
 | Intervention on the preceding update at step 12,172 | Gradient norm on the following batch |
 |---|---:|
-| Full preceding update | 45.0366 |
-| Only the `c_mlp.2.weight` update | 55.8181 |
-| Remove that matrix update acting on the mean hidden feature | 0.247787 |
+| All parameter updates | 45.0366 |
+| `c_mlp.2.weight` update alone | 55.8181 |
+| That matrix update without its shared mean-feature displacement | 0.247787 |
 | Bias update alone | 0.2921 |
 
-The update was decomposed into its action on the mean hidden feature and the remaining variation. The former acts as a common conditioning offset. Removing that part of the update reduced the gradient to 0.247787, close to the 0.2921 produced by the bias-only update. Each intervention was evaluated through the nonlinear network, so the gradient norms do not add or subtract linearly. The experiment isolated a causal path from the matrix-induced shared displacement to this captured spike.
+The matrix-induced shared displacement therefore supplied a causal path to this captured spike. Removing it brought the gradient close to the bias-only arm, while the remaining feature variation did not reproduce the event.
 
 ### Changes that followed the investigation
 
@@ -209,26 +194,26 @@ Branch-output RMSNorm was introduced in response to the spikes. It normalizes ea
 
 $$x \leftarrow x + \mathrm{gate}\odot\mathrm{RMSNorm}(\mathrm{branch}(x)).$$
 
-A matched 2,000-update comparison held effective batching fixed and measured the fixed diagnostic panel:
+A fixed diagnostic panel repeatedly measured internal responses on the same short-caption rows at three shifted timesteps. Using that panel and a matched 2,000-update comparison with effective batching fixed gave:
 
 | Measurement | Control | Branch RMSNorm |
 |---|---:|---:|
 | Evaluation loss | 0.92154 | 0.91259 |
 | Block-24 residual-stream RMS | 12,001 | 73.58 |
 
-The factor-1000 timestep input multiplies $t\in[0,1]$ by 1000 before the sinusoidal embedding. The initial hypothesis was that adjacent timesteps were difficult to discriminate because too few channels avoided saturation. That hypothesis did not explain the spike, but the change was reasonable and showed no harmful effect, so it remained in the recipe.
+Muon had originally been selected after a 16,000-update comparison under the earlier RMS-matched recipe. It reached loss 0.91127 and KID 0.00699, compared with 0.92134 and 0.00922 for AdamW. The spike investigation then exposed a scaling mismatch in the implementation. The previous RMS-matched multiplier from [Moonlight](https://arxiv.org/abs/2502.16982) was `0.2 * sqrt(max(rows, cols))`; the corrected original convention is `sqrt(max(1, rows / cols))`. The configured LR remained 0.02, while the correction reduced the effective update magnitude. For square 1152 × 1152 matrices the old multiplier was 6.79 times the new one. For the wide 1152 × 3072 down-projection, the ratio was 11.09×.
 
-Muon also received an implementation correction. The previous Moonlight/RMS-matched multiplier was `0.2 * sqrt(max(rows, cols))`; the corrected original convention is `sqrt(max(1, rows / cols))`. The configured LR remained 0.02, while the correction reduced the effective update magnitude. For square 1152 × 1152 matrices the old multiplier was 6.79 times the new one. For the wide 1152 × 3072 down-projection, the old multiplier was 11.09 and the new multiplier is 1, an 11.09× ratio. This was a substantial effective-LR correction.
+The restart also multiplied $t\in[0,1]$ by 1000 before the sinusoidal timestep embedding. This addressed a separate hypothesis: adjacent times in $[0,1]$ might leave too few embedding channels responsive. The captured spikes did not establish that mechanism, but the change was reasonable and had no observed training cost. Later conditioning telemetry separately showed a healthier fraction of SiLU preactivations below −5.
 
 The subsequent 600k schedule started from scratch with branch-output RMSNorm, the factor-1000 timestep input and the corrected Muon scaling.
 
 ### Scale growth at 46k and the 56k intervention
 
-The new run developed a separate scale-growth problem. Around 46k, conditioning, gate and residual curves appeared to grow exponentially, while loss had not yet supplied an equally clear warning. Combining 46k conditioning matrices with 44k biases reproduced 99.87% of conditioning growth; bias-only changes reproduced 0.12%. Nearly flat matrix RMS coexisted with changed directional responses, so weight magnitude alone could not explain the changed conditioning.
+The restarted run showed a different problem around 46k: conditioning, gate and residual RMS were growing approximately exponentially. Even though loss still looked normal, this was concerning. Because conditioning modulates every block, a change in that path could propagate to the other two measurements, the first step was therefore to locate the change within the conditioning path.
 
-![Conditioning, gate and residual RMS around the 56k intervention. The curve uses original telemetry through 56k and the corrected continuation afterward, omitting overlapping old-recipe points. The dashed line marks the introduction of conditioning weight decay 0.4.](assets/pretrain_scale_mitigation_56k.png)
+A matrix-versus-bias swap provided that separation. Moving the 46k conditioning matrices into the 44k state while keeping the 44k biases reproduced 99.87% of the observed conditioning RMS growth; changing only the biases reproduced 0.12%. The matrices were carrying the change, but not through a simple increase in magnitude: their RMS remained nearly flat while their directional responses changed. Weight norms alone therefore could not describe the developing problem.
 
-Four matched continuations from a preserved 48k checkpoint compared the existing recipe, conditioning weight decay 0.2, decay 0.5 and conditioning-output normalization. All used the same random draws and sample identities on 16 Ascend ranks for 1,000 updates. The table reports log-linear slopes over the last 500 updates, in percent per 1,000 updates; the gate, residual and pre-branch columns are slopes of the corresponding fixed-panel maxima.
+The next question was whether constraining the conditioning pathway could reverse the downstream growth. Four matched continuations from a preserved 48k checkpoint compared the existing recipe, conditioning weight decay 0.2, decay 0.5 and normalization of the conditioning output to a fixed RMS. Weight decay constrained the matrices implicated by the swap; output normalization constrained the vector they produced. All four arms used the same random draws and sample identities on 16 Ascend ranks for 1,000 updates. The table reports log-linear slopes over the last 500 updates, in percent per 1,000 updates. For gates, residuals and pre-branch activations, the maximum is taken across the fixed panel's measured block traces before fitting the slope.
 
 | Arm | Conditioning | Gate maximum | Residual maximum | Pre-branch maximum |
 |---|---:|---:|---:|---:|
@@ -237,11 +222,11 @@ Four matched continuations from a preserved 48k checkpoint compared the existing
 | Output normalization | 0 | −3.56 | −4.40 | −6.73 |
 | Decay 0.5 | −2.55 | −0.49 | −0.35 | +1.17 |
 
-Decay 0.2 left the conditioning path under-controlled. Decay 0.5 drove all measured gate and residual late slopes negative, although some pre-normalization layers still grew. Output normalization imposed a constant conditioner RMS, with insertion transients of roughly 12% in gates and 33% in pre-branch activations. I selected an intermediate weight decay of 0.4 to avoid over-constraining the conditioning path.
+Decay 0.2 slowed the growth but left all four late slopes positive. Decay 0.5 reversed conditioning, gate and residual growth, although some pre-normalization traces still grew. Output normalization also reversed the downstream slopes, but fixing conditioner RMS introduced transients of roughly 12% in gates and 33% in pre-branch activations. An intermediate weight decay of 0.4 was finally selected to control the growth without suppressing the conditioning response too aggressively.
 
-The stronger decay applies only to `txt_pooled_proj.weight`, `c_mlp.0.weight` and `c_mlp.2.weight`; other AdamW parameters keep ordinary decay. The 0.4 setting was qualified on 16 Ascend ranks over 500 updates from 56k. Conditioning, gate and residual RMS fell 1.385%, 1.301% and 2.314%, with no clipped update and a maximum gradient of 0.393383. Eleven of 52 pre-branch traces still grew, and the plotted curves rise again later.
+The stronger decay applied only to `txt_pooled_proj.weight`, `c_mlp.0.weight` and `c_mlp.2.weight`; other AdamW parameters kept ordinary decay. A 500-update continuation from 56k on 16 Ascend ranks then measured the selected setting. Conditioning, gate and residual RMS fell 1.385%, 1.301% and 2.314%, with no clipped update and a maximum gradient of 0.393383. The three quantities that had grown together around 46k were now decreasing together, and production resumed from 56k with decay 0.4.
 
-Production then resumed from 56k after an eight-minute pause with that setting. The original cloud series overlaps the continuation through update 57,094 under the preceding recipe, so the plotted post-56k values come from the corrected continuation's local telemetry.
+![Conditioning, gate and residual RMS around the 56k intervention. The curve uses original telemetry through 56k and the corrected continuation afterward, omitting overlapping old-recipe points. The dashed line marks the introduction of conditioning weight decay 0.4.](assets/pretrain_scale_mitigation_56k.png)
 
 ### The full-run record
 
@@ -262,6 +247,8 @@ At step 599,576, the 896p gradient reached its maximum of 6.588 while the loss a
 
 ## Checkpointing and recovery
 
-Complete checkpoints were saved every 2,000 updates, retaining the latest two plus stage endpoints. The saved training state includes the run configuration, model metadata and active bucket table, model and EMA weights, both optimizers, schedulers, sampler state and per-rank RNG state. A bounded recovery test from step 400 to step 600 restored that state exactly on all 16 ranks and matched 3,200 subsequent sample identities.
+Complete checkpoints were saved every 2,000 updates, retaining the latest two plus stage endpoints. Each checkpoint contained model and EMA weights, optimizer and scheduler states, rank-local random states and sampler state.
 
-The 600k EMA checkpoint became the starting point for [post-training](posttraining.md).
+A same-stage resume restored these states together. Sampler recovery included each rank's row cycles, cursors and queued batches, so row and caption sampling continued from the saved position. Resolution transitions instead constructed a fresh sampler for the new stage. A changed recipe or model configuration required explicit migration rather than an ordinary resume.
+
+The **600k EMA checkpoint** became the base model for [post-training](posttraining.md). Its generations still missed counts, positions and layouts, sometimes collapsed human anatomy, and often broke subjects when an artistic style was combined with an unfamiliar content category. Those observed weaknesses set the next stage's objectives.
