@@ -82,37 +82,37 @@
     }
 
     [data-theme="light"] {
-      --bg: #f8fafc;
-      --grid: #e2e8f0;
-      --text: #0f172a;
-      --text-muted: #64748b;
-      --text-dim: #94a3b8;
-      --text-faint: #64748b;
+      --bg: #f4f0e8;
+      --grid: #e4d9c9;
+      --text: #322d28;
+      --text-muted: #766b60;
+      --text-dim: #94897b;
+      --text-faint: #766b60;
 
-      --panel: #ffffff;
-      --panel-border: #e2e8f0;
-      --lane-fill: rgba(248, 250, 252, 0.65);
-      --lane-stroke: #cbd5e1;
+      --panel: #fffcf7;
+      --panel-border: #ded6c9;
+      --lane-fill: rgba(255, 252, 247, 0.65);
+      --lane-stroke: #ded6c9;
 
-      --arrow: #94a3b8;
-      --arrow-emphasis: #059669;
+      --arrow: #94897b;
+      --arrow-emphasis: #a94f3c;
 
-      --mask: #ffffff;
+      --mask: #f4f0e8;
 
-      --frontend-fill:    rgba(34, 211, 238, 0.15);
-      --frontend-stroke:  #0891b2;
-      --backend-fill:     rgba(52, 211, 153, 0.18);
-      --backend-stroke:   #059669;
-      --database-fill:    rgba(167, 139, 250, 0.2);
-      --database-stroke:  #7c3aed;
-      --cloud-fill:       rgba(251, 191, 36, 0.18);
-      --cloud-stroke:     #d97706;
-      --security-fill:    rgba(251, 113, 133, 0.15);
-      --security-stroke:  #e11d48;
-      --messagebus-fill:  rgba(251, 146, 60, 0.15);
-      --messagebus-stroke:#ea580c;
-      --external-fill:    rgba(148, 163, 184, 0.18);
-      --external-stroke:  #64748b;
+      --frontend-fill:    rgba(169, 79, 60, 0.13);
+      --frontend-stroke:  #a94f3c;
+      --backend-fill:     rgba(68, 97, 90, 0.14);
+      --backend-stroke:   #44615a;
+      --database-fill:    rgba(91, 107, 140, 0.13);
+      --database-stroke:  #5b6b8c;
+      --cloud-fill:       rgba(138, 109, 47, 0.13);
+      --cloud-stroke:     #8a6d2f;
+      --security-fill:    rgba(124, 74, 99, 0.13);
+      --security-stroke:  #7c4a63;
+      --messagebus-fill:  rgba(63, 107, 107, 0.13);
+      --messagebus-stroke:#3f6b6b;
+      --external-fill:    rgba(118, 107, 96, 0.13);
+      --external-stroke:  #766b60;
 
       --toolbar-bg:       rgba(255, 255, 255, 0.92);
       --toolbar-border:   #cbd5e1;
@@ -180,6 +180,7 @@
       width: 100%;
       min-width: min(900px, 100%);
       display: block;
+      background: var(--bg);
     }
 
     .cards {
@@ -453,7 +454,7 @@
 
     /* Dashed boundary variants */
     .c-security-group { fill: transparent; stroke: var(--security-stroke); stroke-dasharray: 4,4; }
-    .c-region         { fill: rgba(251, 191, 36, 0.05); stroke: var(--cloud-stroke); stroke-dasharray: 8,4; }
+    .c-region         { fill: rgba(138, 109, 47, 0.05); stroke: var(--cloud-stroke); stroke-dasharray: 8,4; }
     .c-lane           { fill: var(--lane-fill); stroke: var(--lane-stroke); stroke-dasharray: 6,6; }
 
     /* Optional trace animation, enabled only by meta.animation = "trace".

@@ -7,6 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import theme
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -14,13 +15,15 @@ DATA = Path(__file__).resolve().parent / "data" / "posttrain"
 ASSETS = ROOT / "notes" / "assets"
 ASSETS.mkdir(parents=True, exist_ok=True)
 COLORS = {
-    "blue": "#0072B2",
-    "orange": "#D55E00",
-    "green": "#009E73",
-    "pink": "#CC79A7",
-    "yellow": "#E69F00",
-    "gray": "#666666",
+    "blue": theme.VERMILION,
+    "orange": theme.CYCLE[1],
+    "green": theme.CYCLE[2],
+    "pink": theme.CYCLE[4],
+    "yellow": theme.CYCLE[3],
+    "gray": theme.MUTED,
 }
+
+theme.apply()
 UPDATES_PER_ROUND = {
     "selection-e0-art": 2,
     "selection-e0-nft": 1,
@@ -59,7 +62,7 @@ def binned(values, width):
 
 def style(axis, legend=True):
     axis.spines[["top", "right"]].set_visible(False)
-    axis.grid(alpha=0.16, linewidth=0.6)
+    axis.grid()
     axis.set_xlabel("Collection round")
     if legend:
         axis.legend(frameon=False)
@@ -86,7 +89,7 @@ def reward_band(axis, values, label, color, linestyle="-", width=20):
 
 
 def save(fig, name):
-    fig.savefig(ASSETS / name, dpi=180, facecolor="white")
+    fig.savefig(ASSETS / name, dpi=180, facecolor=theme.PAPER)
     plt.close(fig)
 
 
@@ -263,7 +266,7 @@ def development_figure():
             color=color,
             marker="o",
             markersize=5.5,
-            markeredgecolor="white",
+            markeredgecolor=theme.PANEL,
             markeredgewidth=0.6,
             linewidth=2.0,
         )
@@ -278,9 +281,9 @@ def development_figure():
         axis.set_xticks(np.arange(0, 301, 50))
         axis.margins(y=0.18)
         axis.spines[["top", "right"]].set_visible(False)
-        axis.grid(axis="y", alpha=0.18, linewidth=0.6)
+        axis.grid(axis="y")
         axis.grid(axis="x", visible=False)
-        axis.tick_params(labelsize=10, length=3, colors="#555555")
+        axis.tick_params(labelsize=10, length=3, colors=theme.MUTED)
         final_round = student.index[-1]
         final_value = student.iloc[-1]
         axis.annotate(
@@ -343,7 +346,7 @@ def collapse_figure():
     margin = 28
     width = left + 2 * tile + gap + 2 * margin
     height = header + 2 * tile + gap + 2 * margin
-    canvas = Image.new("RGB", (width, height), "white")
+    canvas = Image.new("RGB", (width, height), theme.PAPER)
     draw = ImageDraw.Draw(canvas)
     headings = ("600k base", "Full tuning, Muon 3e-3\n(round 350)")
     for column, heading in enumerate(headings):
@@ -351,7 +354,7 @@ def collapse_figure():
         draw.multiline_text(
             (x + tile / 2, 24),
             heading,
-            fill="#222222",
+            fill=theme.INK,
             font=font(24, bold=True),
             anchor="ma",
             align="center",
@@ -362,7 +365,7 @@ def collapse_figure():
         draw.text(
             (margin, y + tile / 2),
             label,
-            fill="#222222",
+            fill=theme.INK,
             font=font(24, bold=True),
             anchor="lm",
         )
@@ -373,7 +376,7 @@ def collapse_figure():
             px = x + (tile - fitted.width) // 2
             py = y + (tile - fitted.height) // 2
             canvas.paste(fitted, (px, py))
-            draw.rectangle((px, py, px + fitted.width - 1, py + fitted.height - 1), outline="#DDDDDD", width=1)
+            draw.rectangle((px, py, px + fitted.width - 1, py + fitted.height - 1), outline=theme.GRID, width=1)
     canvas.save(ASSETS / "posttrain_pointwise_collapse.png")
 
 
@@ -472,39 +475,39 @@ def comparison_figure():
         for cards in columns
     ]
     height = top + max(column_heights) + footer_height
-    canvas = Image.new("RGB", (width, height), "#F7F5F0")
+    canvas = Image.new("RGB", (width, height), theme.PAPER)
     draw = ImageDraw.Draw(canvas)
     for column, cards in enumerate(columns):
         x = margin + column * (card_width + column_gap)
         y = top
         for index, (base, final, kicker, title, note_lines, image_height, card_height) in enumerate(cards):
-            draw.text((x, y), kicker, fill="#777167", font=kicker_font)
-            draw.text((x, y + 30), title, fill="#202522", font=title_font)
-            draw.text((x, y + 74), "600k base", fill="#4C5450", font=label_font)
-            draw.text((x + image_width + image_gap, y + 74), "Release", fill="#4C5450", font=label_font)
+            draw.text((x, y), kicker, fill=theme.MUTED, font=kicker_font)
+            draw.text((x, y + 30), title, fill=theme.INK, font=title_font)
+            draw.text((x, y + 74), "600k base", fill=theme.MUTED, font=label_font)
+            draw.text((x + image_width + image_gap, y + 74), "Release", fill=theme.MUTED, font=label_font)
             image_y = y + header_height
             for image_x, image in ((x, base), (x + image_width + image_gap, final)):
                 resized = image.resize((image_width, image_height), Image.Resampling.LANCZOS)
                 canvas.paste(resized, (image_x, image_y))
                 draw.rectangle(
                     (image_x, image_y, image_x + image_width - 1, image_y + image_height - 1),
-                    outline="#D6D1C8",
+                    outline=theme.GRID,
                     width=1,
                 )
             note_y = image_y + image_height + 14
             for line_index, line in enumerate(note_lines):
-                draw.text((x, note_y + line_index * note_line_height), line, fill="#303632", font=note_font)
+                draw.text((x, note_y + line_index * note_line_height), line, fill=theme.INK, font=note_font)
             if index < len(cards) - 1:
                 rule_y = y + card_height - 14
-                draw.line((x, rule_y, x + card_width, rule_y), fill="#D6D1C8", width=1)
+                draw.line((x, rule_y, x + card_width, rule_y), fill=theme.GRID, width=1)
             y += card_height + card_gap
 
     footer_y = height - 58
-    draw.line((margin, footer_y - 20, width - margin, footer_y - 20), fill="#D6D1C8", width=1)
+    draw.line((margin, footer_y - 20, width - margin, footer_y - 20), fill=theme.GRID, width=1)
     draw.text(
         (margin, footer_y),
         "Matched prompt, seed and shape · 20 Euler steps · Base CFG 5.0 · Release CFG 4.5",
-        fill="#5E645F",
+        fill=theme.MUTED,
         font=footer_font,
     )
     canvas.save(ASSETS / "posttrain_base_final_comparisons.png", dpi=(180, 180))

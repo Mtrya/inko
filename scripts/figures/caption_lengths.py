@@ -5,7 +5,7 @@ formatting, DROP_IDX removal and truncation. They are not raw caption lengths.
 Each caption is counted once, without source or caption-sampling weights.
 
 Run from the repository root:
-    python -m scripts.figures.caption_lengths
+    python scripts/figures/caption_lengths.py
 """
 
 import argparse
@@ -16,13 +16,16 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import theme
 from matplotlib.ticker import PercentFormatter
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = Path(__file__).resolve().parent / "data" / "caption_lengths"
 BANDS = [0, 64, 256, 512, 896, np.inf]
 LABELS = ["<64", "64-255", "256-511", "512-895", "896+"]
-COLORS = ["#d6dde5", "#aec4d9", "#7ea3c6", "#4f7fa9", "#2d5b83"]
+COLORS = theme.CYCLE[:5]
+
+theme.apply()
 
 
 def load_lengths(directory):
@@ -89,7 +92,7 @@ def render(datasets, output):
             f"{np.mean(values >= 256):.0%} of {len(values):,}",
             va="center",
             fontsize=7,
-            color="#333333",
+            color=theme.INK,
         )
 
     thresholds = np.arange(0, 1301, 8)
@@ -99,7 +102,7 @@ def render(datasets, output):
     )
     profile.plot(thresholds, survival, color=COLORS[-1], linewidth=1.6)
     for threshold in BANDS[1:-1]:
-        profile.axvline(threshold, color="#cccccc", linestyle="--", linewidth=0.7)
+        profile.axvline(threshold, color=theme.GRID, linestyle="--", linewidth=0.7)
     profile.set(
         xlim=(0, 1300),
         ylim=(0, 1),
@@ -115,7 +118,7 @@ def render(datasets, output):
         xy=(256, long_share),
         xytext=(380, 0.3),
         fontsize=8,
-        arrowprops={"arrowstyle": "->", "color": "#333333", "lw": 0.8},
+        arrowprops={"arrowstyle": "->", "color": theme.INK, "lw": 0.8},
     )
     for axis in (bars, profile):
         axis.spines[["top", "right"]].set_visible(False)

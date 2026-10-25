@@ -158,7 +158,7 @@ Git. Supply these files before running the plotters in a fresh checkout.
 Reproduce the chart and pipeline diagram in [the data chapter](../notes/data.md):
 
 ```bash
-python -m scripts.figures.caption_lengths
+python scripts/figures/caption_lengths.py
 node scripts/figures/export_rollout_pipeline.mjs
 ```
 

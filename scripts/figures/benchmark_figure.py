@@ -1,7 +1,7 @@
 """Render nine-model benchmark bars and selected matched case panels.
 
 Usage:
-    python -m scripts.figures.benchmark_figure \
+    python scripts/figures/benchmark_figure.py \
       --report /path/to/report.json --samples notes/assets/benchmarks \
       --output-dir notes/assets
 """
@@ -15,6 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import theme
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 MODELS = {
@@ -32,10 +33,12 @@ REFERENCES = tuple(MODELS)[:7]
 INKO = tuple(MODELS)[7:]
 ORDER = REFERENCES + INKO
 COLORS = {
-    "reference": "#5B84B1",
-    "base": "#E59866",
-    "release": "#C0392B",
+    "reference": theme.CYCLE[2],
+    "base": theme.CYCLE[3],
+    "release": theme.VERMILION,
 }
+
+theme.apply()
 PANELS = [
     ("geneval", "GenEval", lambda s: s["overall"], 3),
     ("dpg", "DPG", lambda s: s["overall"], 2),
@@ -158,22 +161,22 @@ def render_overview(table, output):
         ax.set_ylim(bottom=0)
         ax.margins(y=0.16)
         ax.spines[["top", "right"]].set_visible(False)
-        ax.grid(axis="y", alpha=0.16, linewidth=0.6)
+        ax.grid(axis="y")
         ax.set_axisbelow(True)
     fig.suptitle("Full-catalog benchmark results", fontsize=15)
-    fig.savefig(output, dpi=180, facecolor="white")
+    fig.savefig(output, dpi=180, facecolor=theme.PAPER)
     plt.close(fig)
 
 
 def render_case(samples, benchmark, sample, title, output):
     size, label_height, title_height = 340, 34, 56
     sheet = Image.new(
-        "RGB", (3 * size, title_height + 3 * (size + label_height)), "white"
+        "RGB", (3 * size, title_height + 3 * (size + label_height)), theme.PAPER
     )
     draw = ImageDraw.Draw(sheet)
     title_font = ImageFont.truetype("DejaVuSans.ttf", 23)
     label_font = ImageFont.truetype("DejaVuSans.ttf", 21)
-    draw.text((12, 13), title, fill="black", font=title_font)
+    draw.text((12, 13), title, fill=theme.INK, font=title_font)
     for index, model in enumerate(ORDER):
         x = (index % 3) * size
         y = title_height + (index // 3) * (size + label_height)
@@ -183,9 +186,9 @@ def render_case(samples, benchmark, sample, title, output):
         sheet.paste(
             image, (x + (size - image.width) // 2, y + (size - image.height) // 2)
         )
-        draw.text((x + 8, y + size + 5), MODELS[model], fill="black", font=label_font)
+        draw.text((x + 8, y + size + 5), MODELS[model], fill=theme.INK, font=label_font)
         draw.rectangle(
-            (x, y, x + size - 1, y + size + label_height - 1), outline="#CCCCCC"
+            (x, y, x + size - 1, y + size + label_height - 1), outline=theme.GRID
         )
     sheet.save(output)
 

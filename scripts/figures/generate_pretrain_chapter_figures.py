@@ -2,17 +2,26 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
+import theme
 from matplotlib.ticker import FuncFormatter
 
 ROOT = Path(__file__).resolve().parents[2]
 TELEMETRY = Path(__file__).resolve().parent / "data"
 ASSETS = ROOT / "notes" / "assets"
 ASSETS.mkdir(parents=True, exist_ok=True)
-COLORS = {"blue": "#0072B2", "orange": "#D55E00", "green": "#009E73", "gray": "#666666"}
+COLORS = {
+    "blue": theme.VERMILION,
+    "orange": theme.CYCLE[1],
+    "green": theme.CYCLE[5],
+    "gray": theme.MUTED,
+}
 THOUSANDS = FuncFormatter(lambda value, _: f"{value / 1000:g}k")
+
+theme.apply()
 
 
 def read_series(name):
@@ -37,7 +46,7 @@ def binned(series, width=500):
 
 def style(axis, x_thousands=True):
     axis.spines[["top", "right"]].set_visible(False)
-    axis.grid(alpha=0.16, linewidth=0.6)
+    axis.grid()
     axis.set_xlabel("Optimizer update")
     if x_thousands:
         axis.xaxis.set_major_formatter(THOUSANDS)
@@ -53,9 +62,9 @@ for axis, series, label in zip(axes, (loss, grad), ("Training loss", "Pre-clip g
     axis.fill_between(stats.center, stats["min"], stats["max"], color=COLORS["blue"], alpha=0.14, linewidth=0, label="500-update range")
     axis.plot(stats.center, stats["median"], color=COLORS["blue"], lw=1.35, label="500-update median")
     for event in (56000, 250000, 400000, 480000):
-        axis.axvline(event, color="#777777", lw=0.65, ls="--", alpha=0.35, zorder=1)
+        axis.axvline(event, color=theme.FAINT, lw=0.65, ls="--", alpha=0.35, zorder=1)
     for boundary in (450000, 570000):
-        axis.axvline(boundary, color="#555555", lw=1.25, ls="--", alpha=0.75, zorder=2)
+        axis.axvline(boundary, color=theme.MUTED, lw=1.25, ls="--", alpha=0.75, zorder=2)
     axis.set_ylabel(label)
     style(axis)
 axes[0].set_ylim(0.45, 2.1)
@@ -80,7 +89,7 @@ axes[1].set_yscale("log")
 axes[1].set_ylabel("Pre-clip gradient norm (log scale)")
 axes[1].set_xlim(12650, 12780)
 for axis in axes:
-    axis.axvline(12705, color="#666666", lw=0.9, ls="--")
+    axis.axvline(12705, color=theme.MUTED, lw=0.9, ls="--")
     style(axis, x_thousands=False)
 axes[0].set_xlabel("")
 fig.savefig(ASSETS / "pretrain_spike_12705.png", dpi=180)
@@ -113,7 +122,7 @@ for axis, names in zip(axes, (("condition", "hidden"), ("gate", "residual"))):
     for name in names:
         series = corrected[name].loc[30000:100000]
         axis.plot(series.index, series.to_numpy(), lw=1.35, label=labels[name])
-    axis.axvline(56000, color="#333333", lw=1.0, ls="--")
+    axis.axvline(56000, color=theme.MUTED, lw=1.0, ls="--")
     axis.set_ylabel("RMS")
     style(axis)
 axes[0].set_title("Conditioning path")

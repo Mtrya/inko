@@ -2,17 +2,26 @@ import json
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import theme
 from matplotlib.ticker import FuncFormatter, ScalarFormatter
 
 ROOT = Path(__file__).resolve().parents[2]
 TELEMETRY = Path(__file__).resolve().parent / "data"
 ASSETS = ROOT / "notes" / "assets"
-COLORS = {"blue": "#0072B2", "orange": "#D55E00", "green": "#009E73", "gray": "#666666"}
+COLORS = {
+    "blue": theme.VERMILION,
+    "orange": theme.CYCLE[3],
+    "green": theme.CYCLE[1],
+    "gray": theme.MUTED,
+}
 THOUSANDS = FuncFormatter(lambda value, _: f"{value / 1000:g}k")
+
+theme.apply()
 STAGES = (("256p", 1, 450000, 1), ("640p", 450001, 570000, 3), ("896p", 570001, 600000, 4))
 
 
@@ -40,16 +49,16 @@ def binned(series, width=500):
 
 def style(axis, x_thousands=True):
     axis.spines[["top", "right"]].set_visible(False)
-    axis.grid(alpha=0.16, linewidth=0.6)
+    axis.grid()
     if x_thousands:
         axis.xaxis.set_major_formatter(THOUSANDS)
 
 
 def boundaries(axis):
     for event in (56000, 250000, 400000, 480000):
-        axis.axvline(event, color="#777777", lw=0.65, ls="--", alpha=0.35, zorder=1)
+        axis.axvline(event, color=theme.FAINT, lw=0.65, ls="--", alpha=0.35, zorder=1)
     for boundary in (450000, 570000):
-        axis.axvline(boundary, color="#555555", lw=1.25, ls="--", alpha=0.75, zorder=2)
+        axis.axvline(boundary, color=theme.MUTED, lw=1.25, ls="--", alpha=0.75, zorder=2)
     axis.set_xlim(1, 600000)
 
 
@@ -79,7 +88,7 @@ for column, (stage, _, _, accum) in enumerate(STAGES):
 
 axis = fig.add_subplot(grid[1, :])
 stats = binned(effective)
-axis.plot(effective.index, effective.to_numpy(), color="#777777", alpha=0.22, lw=0.55, label="25-update window estimate")
+axis.plot(effective.index, effective.to_numpy(), color=theme.FAINT, alpha=0.22, lw=0.55, label="25-update window estimate")
 axis.plot(stats.center, stats["median"], color=COLORS["green"], lw=1.5, label="500-update median")
 boundaries(axis)
 axis.set_ylim(0, 1100)
@@ -92,7 +101,7 @@ for stage, lo, hi, _ in STAGES:
     median = float(effective.loc[lo:hi].median())
     center = (lo + hi) / 2
     axis.text(center, 1040, stage, ha="center", va="top", fontsize=11)
-    axis.text(center, median + 45, f"median ≈ {median:.0f}", ha="center", va="bottom", fontsize=9, color=COLORS["green"], bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 1.5})
+    axis.text(center, median + 45, f"median ≈ {median:.0f}", ha="center", va="bottom", fontsize=9, color=COLORS["green"], bbox={"facecolor": theme.PANEL, "edgecolor": "none", "alpha": 0.85, "pad": 1.5})
 fig.savefig(ASSETS / "pretrain_batch_plan.png", dpi=180)
 plt.close(fig)
 
@@ -103,7 +112,7 @@ fig, axis = plt.subplots(figsize=(13, 4.8), constrained_layout=True)
 axis.fill_between(stats.center, stats["min"], stats["max"], color=COLORS["blue"], alpha=0.14, linewidth=0, label="500-update range")
 axis.plot(stats.center, stats["median"], color=COLORS["blue"], lw=1.35, label="500-update median")
 axis.hlines(52, 450000, 600000, color=COLORS["orange"], lw=1.0, ls=":", label="52 GiB later-stage budget")
-axis.axhline(60.96, color="#B22222", lw=1.0, ls="--", label="60.96 GiB device capacity")
+axis.axhline(60.96, color=theme.CYCLE[4], lw=1.0, ls="--", label="60.96 GiB device capacity")
 boundaries(axis)
 axis.set_ylim(44, 62)
 axis.set_ylabel("Peak allocated GiB · logging rank")
@@ -127,12 +136,12 @@ baseline = [1.32176, 4.80127, 7.05191]
 autotuned = [1.29891, 4.58938, 6.80480]
 x = np.arange(3)
 width = 0.35
-axis.bar(x - width / 2, baseline, width, color="#999999", label="Baseline")
+axis.bar(x - width / 2, baseline, width, color=theme.MUTED, label="Baseline")
 axis.bar(x + width / 2, autotuned, width, color=COLORS["green"], label="Autotuned")
 for index, (before, after) in enumerate(zip(baseline, autotuned)):
     axis.text(index, before + 0.25, f"−{100 * (1 - after / before):.2f}% time", ha="center", va="bottom", fontsize=8, color=COLORS["green"])
     for offset, value in ((-width / 2, before), (width / 2, after)):
-        axis.text(index + offset, value - 0.08, f"{value:.2f}", ha="center", va="top", fontsize=7, color="white")
+        axis.text(index + offset, value - 0.08, f"{value:.2f}", ha="center", va="top", fontsize=7, color=theme.PANEL)
 axis.set_xticks(x, resolutions)
 axis.set_ylim(0, 8.3)
 axis.set_ylabel("Warm seconds / update · lower is better")
@@ -145,7 +154,7 @@ labels = ["Baseline", "Fused RMSNorm", "Larger batches", "FFN 3072", "Native Swi
 values = [656.29, 737.68, 765.34, 843.29, 878.91]
 gains = [None, 12.40, 3.75, 10.19, 4.22]
 y = np.arange(len(labels))
-bars = axis.barh(y, values, color=["#999999", COLORS["blue"], COLORS["blue"], COLORS["blue"], COLORS["green"]])
+bars = axis.barh(y, values, color=[theme.MUTED, COLORS["blue"], COLORS["blue"], COLORS["blue"], COLORS["green"]])
 axis.set_yticks(y, labels)
 axis.invert_yaxis()
 axis.set_xlim(0, 1030)
@@ -174,7 +183,7 @@ for stage, lo, hi, _ in STAGES:
     center = (lo + hi) / 2
     median = float(throughput.loc[lo:hi].median())
     axis.text(center, 925, stage, ha="center", va="top", fontsize=11)
-    axis.text(center, median + 45, f"median ≈ {median:.0f}", ha="center", va="bottom", fontsize=9, color=COLORS["blue"], bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 1.5})
+    axis.text(center, median + 45, f"median ≈ {median:.0f}", ha="center", va="bottom", fontsize=9, color=COLORS["blue"], bbox={"facecolor": theme.PANEL, "edgecolor": "none", "alpha": 0.85, "pad": 1.5})
 fig.savefig(ASSETS / "pretrain_throughput.png", dpi=180)
 plt.close(fig)
 
