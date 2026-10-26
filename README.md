@@ -134,8 +134,8 @@ Beyond the general catalogs, a fixed suite of eleven cross-model cases probes In
 
 Known limitations of the release model, from the post-training assessment and case studies:
 
-- Exact rendered text, detector-based counting and spatial relations remain weak.
-- Some unrelated subjects (crevices, magic relics, factory creatures) can be substituted by ornate portraits; requested illustration styles and actions can collapse into static realistic portraits.
+- Exact rendered text and spatial relations remain weak.
+- Anatomy still breaks at times; reasoning, counting and world knowledge remain weak.
 - Negation in dense scenes is unreliable: asked for a busy intersection with no blue cars, Inko, like most references, paints the cars (see the [evaluation chapter](notes/evaluation.md)).
 
 ## Development
