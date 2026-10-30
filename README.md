@@ -90,7 +90,7 @@ Each prompt produces one image. A list of generators assigns a separate random s
 |---|---|
 | Model | `inko`: hidden width 1152, 16 heads, 1 double-stream + 24 single-stream blocks, FFN width 3072, 532,496,992 parameters |
 | Text | Frozen Qwen3-0.6B, encoded online with an early exit after layer 20 |
-| Latents | Qwen-Image VAE, 16 channels, factor 8; 2×2 latent patches |
+| Latents | REPA-E Qwen-Image VAE, 16 channels, factor 8; 2×2 latent patches |
 | Objective | Rectified flow with logit-normal timestep sampling and resolution time shift |
 | Positions | Centered image-grid RoPE; text pinned to a fixed diagonal; Dy-YaRN scaling at inference |
 | Modulation | Independent image/text and attention/MLP modulation in the double-stream block; shared attention/MLP modulation within each single-stream block; branch-output RMSNorm before gates |
@@ -122,7 +122,11 @@ Post-training uses DiffusionART, selected over DiffusionNFT by a direct reward�
 
 Beyond the general catalogs, a fixed suite of eleven cross-model cases probes Inko's target domain directly: Chinese traditional painting, Western fine-art movements and composition across style and subject. Against its own base, the release improves counting, position adherence and human structure, at a measurable cost in diversity. The full suite with per-case analysis: [notes/evaluation.md](notes/evaluation.md#style-diversity-and-fine-art).
 
-![Nine models on the American muscle car in ink-wash prompt; MOSS-Image-SFT, Inko base and Inko occupy the bottom row.](notes/assets/fine_art_extended/panels/ink_muscle_car.jpg)
+<p align="center">
+  <img src="notes/assets/fine_art_extended/panels/ink_muscle_car.jpg" width="45%" alt="Nine models on the American muscle car in ink-wash prompt; MOSS-Image-SFT, Inko base and Inko occupy the bottom row.">
+</p>
+
+
 
 <details><summary>Prompt and English translation (American muscle car in ink wash)</summary>
 
